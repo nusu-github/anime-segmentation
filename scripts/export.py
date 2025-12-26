@@ -5,15 +5,13 @@ import torch
 from anime_segmentation.train import AnimeSegmentation, net_names
 
 
-def export_onnx(model, img_size, path):
+def export_onnx(model: AnimeSegmentation, img_size, path) -> None:
     import onnx
     from onnxsim import simplify
 
     torch.onnx.export(
         model,  # model being run
-        torch.randn(
-            1, 3, img_size, img_size
-        ),  # model input (or a tuple for multiple inputs)
+        torch.randn(1, 3, img_size, img_size),  # model input (or a tuple for multiple inputs)
         path,  # where to save the model (can be a file or file-like object)
         export_params=True,  # store the trained parameter weights inside the model file
         opset_version=11,  # the ONNX version to export the model to
@@ -36,18 +34,11 @@ def export_onnx(model, img_size, path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # model args
+    parser.add_argument("--net", type=str, default="isnet_is", choices=net_names, help="net name")
     parser.add_argument(
-        "--net", type=str, default="isnet_is", choices=net_names, help="net name"
+        "--ckpt", type=str, default="saved_models/isnetis.ckpt", help="model checkpoint path"
     )
-    parser.add_argument(
-        "--ckpt",
-        type=str,
-        default="saved_models/isnetis.ckpt",
-        help="model checkpoint path",
-    )
-    parser.add_argument(
-        "--out", type=str, default="saved_models/isnetis.onnx", help="output path"
-    )
+    parser.add_argument("--out", type=str, default="saved_models/isnetis.onnx", help="output path")
     parser.add_argument(
         "--to",
         type=str,

@@ -2,9 +2,9 @@
 # https://github.com/xuebinqin/DIS/blob/main/IS-Net/models/isnet.py
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import models
+from torch import nn
+from torch.types import Tensor
 
 bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
 
@@ -13,7 +13,7 @@ def muti_loss_fusion(preds, target):
     loss0 = 0.0
     loss = 0.0
 
-    for i in range(0, len(preds)):
+    for i in range(len(preds)):
         if preds[i].shape[2] != target.shape[2] or preds[i].shape[3] != target.shape[3]:
             tmp_target = F.interpolate(
                 target, size=preds[i].size()[2:], mode="bilinear", align_corners=True
@@ -36,7 +36,7 @@ def muti_loss_fusion_kl(preds, target, dfs, fs, mode="MSE"):
     loss0 = 0.0
     loss = 0.0
 
-    for i in range(0, len(preds)):
+    for i in range(len(preds)):
         if preds[i].shape[2] != target.shape[2] or preds[i].shape[3] != target.shape[3]:
             tmp_target = F.interpolate(
                 target, size=preds[i].size()[2:], mode="bilinear", align_corners=True
@@ -47,7 +47,7 @@ def muti_loss_fusion_kl(preds, target, dfs, fs, mode="MSE"):
         if i == 0:
             loss0 = loss
 
-    for i in range(0, len(dfs)):
+    for i in range(len(dfs)):
         df = dfs[i]
         fs_i = fs[i]
         if mode == "MSE":
@@ -65,8 +65,8 @@ def muti_loss_fusion_kl(preds, target, dfs, fs, mode="MSE"):
 
 
 class REBNCONV(nn.Module):
-    def __init__(self, in_ch=3, out_ch=3, dirate=1, stride=1):
-        super(REBNCONV, self).__init__()
+    def __init__(self, in_ch: int = 3, out_ch: int = 3, dirate: int = 1, stride: int = 1) -> None:
+        super().__init__()
 
         self.conv_s1 = nn.Conv2d(
             in_ch, out_ch, 3, padding=1 * dirate, dilation=1 * dirate, stride=stride
@@ -76,22 +76,20 @@ class REBNCONV(nn.Module):
 
     def forward(self, x):
         hx = x
-        xout = self.relu_s1(self.bn_s1(self.conv_s1(hx)))
-
-        return xout
+        return self.relu_s1(self.bn_s1(self.conv_s1(hx)))
 
 
 ## upsample tensor 'src' to have the same spatial size with tensor 'tar'
-def _upsample_like(src, tar):
-    src = F.interpolate(src, size=tar.shape[2:], mode="bilinear", align_corners=False)
-
-    return src
+def _upsample_like(src, tar) -> Tensor:
+    return F.interpolate(src, size=tar.shape[2:], mode="bilinear", align_corners=False)
 
 
 ### RSU-7 ###
 class RSU7(nn.Module):
-    def __init__(self, in_ch=3, mid_ch=12, out_ch=3, img_size=512):
-        super(RSU7, self).__init__()
+    def __init__(
+        self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3, img_size: int = 512
+    ) -> None:
+        super().__init__()
 
         self.in_ch = in_ch
         self.mid_ch = mid_ch
@@ -126,7 +124,7 @@ class RSU7(nn.Module):
         self.rebnconv1d = REBNCONV(mid_ch * 2, out_ch, dirate=1)
 
     def forward(self, x):
-        b, c, h, w = x.shape
+        _b, _c, _h, _w = x.shape
 
         hx = x
         hxin = self.rebnconvin(hx)
@@ -172,8 +170,8 @@ class RSU7(nn.Module):
 
 ### RSU-6 ###
 class RSU6(nn.Module):
-    def __init__(self, in_ch=3, mid_ch=12, out_ch=3):
-        super(RSU6, self).__init__()
+    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
+        super().__init__()
 
         self.rebnconvin = REBNCONV(in_ch, out_ch, dirate=1)
 
@@ -239,8 +237,8 @@ class RSU6(nn.Module):
 
 ### RSU-5 ###
 class RSU5(nn.Module):
-    def __init__(self, in_ch=3, mid_ch=12, out_ch=3):
-        super(RSU5, self).__init__()
+    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
+        super().__init__()
 
         self.rebnconvin = REBNCONV(in_ch, out_ch, dirate=1)
 
@@ -296,8 +294,8 @@ class RSU5(nn.Module):
 
 ### RSU-4 ###
 class RSU4(nn.Module):
-    def __init__(self, in_ch=3, mid_ch=12, out_ch=3):
-        super(RSU4, self).__init__()
+    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
+        super().__init__()
 
         self.rebnconvin = REBNCONV(in_ch, out_ch, dirate=1)
 
@@ -343,8 +341,8 @@ class RSU4(nn.Module):
 
 ### RSU-4F ###
 class RSU4F(nn.Module):
-    def __init__(self, in_ch=3, mid_ch=12, out_ch=3):
-        super(RSU4F, self).__init__()
+    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
+        super().__init__()
 
         self.rebnconvin = REBNCONV(in_ch, out_ch, dirate=1)
 
@@ -379,15 +377,15 @@ class RSU4F(nn.Module):
 class myrebnconv(nn.Module):
     def __init__(
         self,
-        in_ch=3,
-        out_ch=1,
-        kernel_size=3,
-        stride=1,
-        padding=1,
-        dilation=1,
-        groups=1,
-    ):
-        super(myrebnconv, self).__init__()
+        in_ch: int = 3,
+        out_ch: int = 1,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        dilation: int = 1,
+        groups: int = 1,
+    ) -> None:
+        super().__init__()
 
         self.conv = nn.Conv2d(
             in_ch,
@@ -406,8 +404,8 @@ class myrebnconv(nn.Module):
 
 
 class ISNetGTEncoder(nn.Module):
-    def __init__(self, in_ch=1, out_ch=1):
-        super(ISNetGTEncoder, self).__init__()
+    def __init__(self, in_ch: int = 1, out_ch: int = 1) -> None:
+        super().__init__()
 
         self.conv_in = myrebnconv(
             in_ch, 16, 3, stride=2, padding=1
@@ -497,8 +495,8 @@ class ISNetGTEncoder(nn.Module):
 
 
 class ISNetDIS(nn.Module):
-    def __init__(self, in_ch=3, out_ch=1):
-        super(ISNetDIS, self).__init__()
+    def __init__(self, in_ch: int = 3, out_ch: int = 1) -> None:
+        super().__init__()
 
         self.conv_in = nn.Conv2d(in_ch, 64, 3, stride=2, padding=1)
         self.pool_in = nn.MaxPool2d(2, stride=2, ceil_mode=True)
@@ -537,7 +535,7 @@ class ISNetDIS(nn.Module):
         # self.outconv = nn.Conv2d(6*out_ch,out_ch,1)
 
     @staticmethod
-    def compute_loss_kl(preds, targets, dfs, fs, mode="MSE"):
+    def compute_loss_kl(preds, targets, dfs, fs, mode: str = "MSE"):
         return muti_loss_fusion_kl(preds, targets, dfs, fs, mode=mode)
 
     @staticmethod
@@ -545,9 +543,8 @@ class ISNetDIS(nn.Module):
         if len(args) == 3:
             ds, dfs, labels = args
             return muti_loss_fusion(ds, labels)
-        else:
-            ds, dfs, labels, fs = args
-            return muti_loss_fusion_kl(ds, labels, dfs, fs, mode="MSE")
+        ds, dfs, labels, fs = args
+        return muti_loss_fusion_kl(ds, labels, dfs, fs, mode="MSE")
 
     def forward(self, x):
         hx = x

@@ -2,22 +2,26 @@
 
 import math
 from operator import xor
-from typing import Optional, Tuple, Union
 
 import cv2
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
 from kornia.morphology import dilation, erosion
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+from timm.layers.drop import DropPath
+from timm.layers.helpers import to_2tuple
+from timm.layers.weight_init import trunc_normal_
+from torch import nn
+from torch.nn.modules.activation import GELU
+from torch.nn.modules.container import Sequential
+from torch.nn.modules.normalization import LayerNorm
 from torch.nn.parameter import Parameter
-from torch.utils import model_zoo
+from torch.types import Tensor
+from torch.utils import checkpoint, model_zoo
 
 
 class ImagePyramid:
-    def __init__(self, ksize=7, sigma=1, channels=1):
+    def __init__(self, ksize: int = 7, sigma: int = 1, channels: int = 1) -> None:
         self.ksize = ksize
         self.sigma = sigma
         self.channels = channels
@@ -27,21 +31,19 @@ class ImagePyramid:
         k = torch.tensor(k).float()
         self.kernel = k.repeat(channels, 1, 1, 1)
 
-    def expand(self, x):
+    def expand(self, x: Tensor) -> Tensor:
         z = torch.zeros_like(x)
         x = torch.cat([x, z, z, z], dim=1)
         x = F.pixel_shuffle(x, 2)
         x = F.pad(x, (self.ksize // 2,) * 4, mode="reflect")
-        x = F.conv2d(x, self.kernel * 4, groups=self.channels)
-        return x
+        return F.conv2d(x, self.kernel * 4, groups=self.channels)
 
-    def reduce(self, x):
+    def reduce(self, x: Tensor) -> Tensor:
         x = F.pad(x, (self.ksize // 2,) * 4, mode="reflect")
         x = F.conv2d(x, self.kernel, groups=self.channels)
-        x = x[:, :, ::2, ::2]
-        return x
+        return x[:, :, ::2, ::2]
 
-    def deconstruct(self, x):
+    def deconstruct(self, x: Tensor) -> tuple[Tensor, Tensor]:
         reduced_x = self.reduce(x)
         expanded_reduced_x = self.expand(reduced_x)
 
@@ -51,7 +53,7 @@ class ImagePyramid:
         laplacian_x = x - expanded_reduced_x
         return reduced_x, laplacian_x
 
-    def reconstruct(self, x, laplacian_x):
+    def reconstruct(self, x: Tensor, laplacian_x: Tensor) -> Tensor:
         expanded_x = self.expand(x)
         if laplacian_x.shape != expanded_x:
             laplacian_x = F.interpolate(
@@ -59,24 +61,22 @@ class ImagePyramid:
             )
         return expanded_x + laplacian_x
 
-    def _apply(self, fn):
+    def _apply(self, fn) -> None:
         self.kernel = fn(self.kernel)
 
 
 class Transition:
-    def __init__(self, k=3):
-        self.kernel = torch.tensor(
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-        ).float()
+    def __init__(self, k: int = 3) -> None:
+        self.kernel = torch.tensor(cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))).float()
 
-    def __call__(self, x):
+    def __call__(self, x: Tensor) -> Tensor:
         x = torch.sigmoid(x)
         dx = dilation(x, self.kernel)
         ex = erosion(x, self.kernel)
 
         return ((dx - ex) > 0.5).float()
 
-    def _apply(self, fn):
+    def _apply(self, fn) -> None:
         self.kernel = fn(self.kernel)
 
 
@@ -86,15 +86,15 @@ class Conv2d(nn.Module):
         in_channels,
         out_channels,
         kernel_size,
-        stride=1,
-        dilation=1,
-        groups=1,
-        padding="same",
-        bias=False,
-        bn=True,
-        relu=False,
-    ):
-        super(Conv2d, self).__init__()
+        stride: int = 1,
+        dilation: int = 1,
+        groups: int = 1,
+        padding: str = "same",
+        bias: bool = False,
+        bn: bool = True,
+        relu: bool = False,
+    ) -> None:
+        super().__init__()
         if "__iter__" not in dir(kernel_size):
             kernel_size = (kernel_size, kernel_size)
         if "__iter__" not in dir(stride):
@@ -108,26 +108,18 @@ class Conv2d(nn.Module):
         elif padding == "valid":
             width_pad_size = 0
             height_pad_size = 0
+        elif "__iter__" in dir(padding):
+            width_pad_size = padding[0] * 2
+            height_pad_size = padding[1] * 2
         else:
-            if "__iter__" in dir(padding):
-                width_pad_size = padding[0] * 2
-                height_pad_size = padding[1] * 2
-            else:
-                width_pad_size = padding * 2
-                height_pad_size = padding * 2
+            width_pad_size = padding * 2
+            height_pad_size = padding * 2
 
         width_pad_size = width_pad_size // 2 + (width_pad_size % 2 - 1)
         height_pad_size = height_pad_size // 2 + (height_pad_size % 2 - 1)
         pad_size = (width_pad_size, height_pad_size)
         self.conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride,
-            pad_size,
-            dilation,
-            groups,
-            bias=bias,
+            in_channels, out_channels, kernel_size, stride, pad_size, dilation, groups, bias=bias
         )
 
         if bn is True:
@@ -140,7 +132,7 @@ class Conv2d(nn.Module):
         else:
             self.relu = None
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         x = self.conv(x)
         if self.bn is not None:
             x = self.bn(x)
@@ -150,8 +142,8 @@ class Conv2d(nn.Module):
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, in_channels, mode="hw", stage_size=None):
-        super(SelfAttention, self).__init__()
+    def __init__(self, in_channels, mode: str = "hw", stage_size=None) -> None:
+        super().__init__()
 
         self.mode = mode
 
@@ -188,13 +180,14 @@ class SelfAttention(nn.Module):
         out = torch.bmm(projected_value, attention.permute(0, 2, 1))
         out = out.view(batch_size, channel, height, width)
 
-        out = self.gamma * out + x
-        return out
+        return self.gamma * out + x
 
 
 class PAA_d(nn.Module):
-    def __init__(self, in_channel, out_channel=1, depth=64, base_size=None, stage=None):
-        super(PAA_d, self).__init__()
+    def __init__(
+        self, in_channel, out_channel: int = 1, depth: int = 64, base_size=None, stage=None
+    ) -> None:
+        super().__init__()
         self.conv1 = Conv2d(in_channel, depth, 3)
         self.conv2 = Conv2d(depth, depth, 3)
         self.conv3 = Conv2d(depth, depth, 3)
@@ -205,10 +198,7 @@ class PAA_d(nn.Module):
         self.stage = stage
 
         if base_size is not None and stage is not None:
-            self.stage_size = (
-                base_size[0] // (2**stage),
-                base_size[1] // (2**stage),
-            )
+            self.stage_size = (base_size[0] // (2**stage), base_size[1] // (2**stage))
         else:
             self.stage_size = [None, None]
 
@@ -237,8 +227,8 @@ class PAA_d(nn.Module):
 
 
 class PAA_kernel(nn.Module):
-    def __init__(self, in_channel, out_channel, receptive_size, stage_size=None):
-        super(PAA_kernel, self).__init__()
+    def __init__(self, in_channel, out_channel, receptive_size, stage_size=None) -> None:
+        super().__init__()
         self.conv0 = Conv2d(in_channel, out_channel, 1)
         self.conv1 = Conv2d(out_channel, out_channel, kernel_size=(1, receptive_size))
         self.conv2 = Conv2d(out_channel, out_channel, kernel_size=(receptive_size, 1))
@@ -258,19 +248,15 @@ class PAA_kernel(nn.Module):
         Hx = self.Hattn(x)
         Wx = self.Wattn(x)
 
-        x = self.conv3(Hx + Wx)
-        return x
+        return self.conv3(Hx + Wx)
 
 
 class PAA_e(nn.Module):
-    def __init__(self, in_channel, out_channel, base_size=None, stage=None):
-        super(PAA_e, self).__init__()
+    def __init__(self, in_channel, out_channel, base_size=None, stage=None) -> None:
+        super().__init__()
         self.relu = nn.ReLU(True)
         if base_size is not None and stage is not None:
-            self.stage_size = (
-                base_size[0] // (2**stage),
-                base_size[1] // (2**stage),
-            )
+            self.stage_size = (base_size[0] // (2**stage), base_size[1] // (2**stage))
         else:
             self.stage_size = None
 
@@ -289,30 +275,25 @@ class PAA_e(nn.Module):
         x3 = self.branch3(x)
 
         x_cat = self.conv_cat(torch.cat((x0, x1, x2, x3), 1))
-        x = self.relu(x_cat + self.conv_res(x))
-
-        return x
+        return self.relu(x_cat + self.conv_res(x))
 
 
 class SICA(nn.Module):
     def __init__(
         self,
         in_channel,
-        out_channel=1,
-        depth=64,
+        out_channel: int = 1,
+        depth: int = 64,
         base_size=None,
         stage=None,
-        lmap_in=False,
-    ):
-        super(SICA, self).__init__()
+        lmap_in: bool = False,
+    ) -> None:
+        super().__init__()
         self.in_channel = in_channel
         self.depth = depth
         self.lmap_in = lmap_in
         if base_size is not None and stage is not None:
-            self.stage_size = (
-                base_size[0] // (2**stage),
-                base_size[1] // (2**stage),
-            )
+            self.stage_size = (base_size[0] // (2**stage), base_size[1] // (2**stage))
         else:
             self.stage_size = None
 
@@ -341,14 +322,12 @@ class SICA(nn.Module):
         if self.lmap_in is True:
             self.lthreshold = Parameter(torch.tensor([0.5]))
 
-    def forward(self, x, smap, lmap: Optional[torch.Tensor] = None):
+    def forward(self, x, smap, lmap: torch.Tensor | None = None):
         assert not xor(self.lmap_in is True, lmap is not None)
-        b, c, h, w = x.shape
+        b, _c, h, w = x.shape
 
         # compute class probability
-        smap = F.interpolate(
-            smap, size=x.shape[-2:], mode="bilinear", align_corners=False
-        )
+        smap = F.interpolate(smap, size=x.shape[-2:], mode="bilinear", align_corners=False)
         smap = torch.sigmoid(smap)
         p = smap - self.threshold
 
@@ -357,9 +336,7 @@ class SICA(nn.Module):
         cg = self.threshold - torch.abs(p)  # confusion area
 
         if self.lmap_in is True and lmap is not None:
-            lmap = F.interpolate(
-                lmap, size=x.shape[-2:], mode="bilinear", align_corners=False
-            )
+            lmap = F.interpolate(lmap, size=x.shape[-2:], mode="bilinear", align_corners=False)
             lmap = torch.sigmoid(lmap)
             lp = lmap - self.lthreshold
             fp = torch.clip(lp, 0, 1)  # foreground
@@ -382,12 +359,14 @@ class SICA(nn.Module):
         f = F.interpolate(x, size=shape, mode="bilinear", align_corners=False).view(
             b, shape_mul, -1
         )
-        prob = F.interpolate(
-            prob, size=shape, mode="bilinear", align_corners=False
-        ).view(b, self.ctx, shape_mul)
+        prob = F.interpolate(prob, size=shape, mode="bilinear", align_corners=False).view(
+            b, self.ctx, shape_mul
+        )
 
         # compute context vector
-        prob = (1 / shape_mul) * prob  # note: different from original project, to avoid overflow and variance explosion
+        prob = (
+            1 / shape_mul
+        ) * prob  # note: different from original project, to avoid overflow and variance explosion
         context = torch.bmm(prob, f).permute(0, 2, 1).unsqueeze(3)  # b, 3, c
         # k q v compute
         query = self.conv_query(x).view(b, self.depth, -1).permute(0, 2, 1)
@@ -423,16 +402,16 @@ class Bottle2neck(nn.Module):
         self,
         inplanes,
         planes,
-        stride=1,
-        dilation=1,
+        stride: int = 1,
+        dilation: int = 1,
         downsample=None,
-        baseWidth=26,
-        scale=4,
-        stype="normal",
-    ):
-        super(Bottle2neck, self).__init__()
+        baseWidth: int = 26,
+        scale: int = 4,
+        stype: str = "normal",
+    ) -> None:
+        super().__init__()
 
-        width = int(math.floor(planes * (baseWidth / 64.0)))
+        width = math.floor(planes * (baseWidth / 64.0))
         self.conv1 = nn.Conv2d(inplanes, width * scale, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(width * scale)
 
@@ -444,7 +423,7 @@ class Bottle2neck(nn.Module):
             self.pool = nn.AvgPool2d(kernel_size=3, stride=stride, padding=1)
         convs = []
         bns = []
-        for i in range(self.nums):
+        for _i in range(self.nums):
             convs.append(
                 nn.Conv2d(
                     width,
@@ -460,9 +439,7 @@ class Bottle2neck(nn.Module):
         self.convs = nn.ModuleList(convs)
         self.bns = nn.ModuleList(bns)
 
-        self.conv3 = nn.Conv2d(
-            width * scale, planes * self.expansion, kernel_size=1, bias=False
-        )
+        self.conv3 = nn.Conv2d(width * scale, planes * self.expansion, kernel_size=1, bias=False)
         self.bn3 = nn.BatchNorm2d(planes * self.expansion)
 
         self.relu = nn.ReLU(inplace=True)
@@ -480,16 +457,10 @@ class Bottle2neck(nn.Module):
 
         spx = torch.split(out, self.width, 1)
         for i in range(self.nums):
-            if i == 0 or self.stype == "stage":
-                sp = spx[i]
-            else:
-                sp = sp + spx[i]
+            sp = spx[i] if i == 0 or self.stype == "stage" else sp + spx[i]
             sp = self.convs[i](sp)
             sp = self.relu(self.bns[i](sp))
-            if i == 0:
-                out = sp
-            else:
-                out = torch.cat((out, sp), 1)
+            out = sp if i == 0 else torch.cat((out, sp), 1)
         if self.scale != 1 and self.stype == "normal":
             out = torch.cat((out, spx[self.nums]), 1)
         elif self.scale != 1 and self.stype == "stage":
@@ -502,17 +473,21 @@ class Bottle2neck(nn.Module):
             residual = self.downsample(x)
 
         out += residual
-        out = self.relu(out)
-
-        return out
+        return self.relu(out)
 
 
 class Res2Net(nn.Module):
     def __init__(
-        self, block, layers, baseWidth=26, scale=4, num_classes=1000, output_stride=32
-    ):
+        self,
+        block,
+        layers,
+        baseWidth: int = 26,
+        scale: int = 4,
+        num_classes: int = 1000,
+        output_stride: int = 32,
+    ) -> None:
         self.inplanes = 64
-        super(Res2Net, self).__init__()
+        super().__init__()
         self.baseWidth = baseWidth
         self.scale = scale
         self.output_stride = output_stride
@@ -550,30 +525,20 @@ class Res2Net(nn.Module):
             block, 256, layers[2], stride=self.stride[2], dilation=self.dilation[2]
         )
         self.layer4 = self._make_layer(
-            block,
-            512,
-            layers[3],
-            stride=self.stride[3],
-            dilation=self.dilation[3],
-            grid=self.grid,
+            block, 512, layers[3], stride=self.stride[3], dilation=self.dilation[3], grid=self.grid
         )
 
-    def _make_layer(self, block, planes, blocks, stride=1, dilation=1, grid=None):
+    def _make_layer(
+        self, block, planes: int, blocks, stride=1, dilation=1, grid=None
+    ) -> Sequential:
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
                 nn.AvgPool2d(
-                    kernel_size=stride,
-                    stride=stride,
-                    ceil_mode=True,
-                    count_include_pad=False,
+                    kernel_size=stride, stride=stride, ceil_mode=True, count_include_pad=False
                 ),
                 nn.Conv2d(
-                    self.inplanes,
-                    planes * block.expansion,
-                    kernel_size=1,
-                    stride=1,
-                    bias=False,
+                    self.inplanes, planes * block.expansion, kernel_size=1, stride=1, bias=False
                 ),
                 nn.BatchNorm2d(planes * block.expansion),
             )
@@ -611,46 +576,36 @@ class Res2Net(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def change_stride(self, output_stride=16):
+    def change_stride(self, output_stride: int = 16) -> None:
         if output_stride == self.output_stride:
             return
-        else:
-            self.output_stride = output_stride
-            if self.output_stride == 8:
-                self.grid = [1, 2, 1]
-                self.stride = [1, 2, 1, 1]
-                self.dilation = [1, 1, 2, 4]
-            elif self.output_stride == 16:
-                self.grid = [1, 2, 4]
-                self.stride = [1, 2, 2, 1]
-                self.dilation = [1, 1, 1, 2]
-            elif self.output_stride == 32:
-                self.grid = [1, 2, 4]
-                self.stride = [1, 2, 2, 2]
-                self.dilation = [1, 1, 2, 4]
+        self.output_stride = output_stride
+        if self.output_stride == 8:
+            self.grid = [1, 2, 1]
+            self.stride = [1, 2, 1, 1]
+            self.dilation = [1, 1, 2, 4]
+        elif self.output_stride == 16:
+            self.grid = [1, 2, 4]
+            self.stride = [1, 2, 2, 1]
+            self.dilation = [1, 1, 1, 2]
+        elif self.output_stride == 32:
+            self.grid = [1, 2, 4]
+            self.stride = [1, 2, 2, 2]
+            self.dilation = [1, 1, 2, 4]
 
-            for i, layer in enumerate(
-                [self.layer1, self.layer2, self.layer3, self.layer4]
-            ):
-                for j, block in enumerate(layer):
-                    if block.downsample is not None:
-                        block.downsample[0].kernel_size = (
-                            self.stride[i],
-                            self.stride[i],
-                        )
-                        block.downsample[0].stride = (self.stride[i], self.stride[i])
-                        if hasattr(block, "pool"):
-                            block.pool.stride = (self.stride[i], self.stride[i])
-                        for conv in block.convs:
-                            conv.stride = (self.stride[i], self.stride[i])
+        for i, layer in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
+            for j, block in enumerate(layer):
+                if block.downsample is not None:
+                    block.downsample[0].kernel_size = (self.stride[i], self.stride[i])
+                    block.downsample[0].stride = (self.stride[i], self.stride[i])
+                    if hasattr(block, "pool"):
+                        block.pool.stride = (self.stride[i], self.stride[i])
                     for conv in block.convs:
-                        d = (
-                            self.dilation[i]
-                            if i != 3
-                            else self.dilation[i] * self.grid[j]
-                        )
-                        conv.dilation = (d, d)
-                        conv.padding = (d, d)
+                        conv.stride = (self.stride[i], self.stride[i])
+                for conv in block.convs:
+                    d = self.dilation[i] if i != 3 else self.dilation[i] * self.grid[j]
+                    conv.dilation = (d, d)
+                    conv.padding = (d, d)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -672,17 +627,15 @@ class Res2Net(nn.Module):
         return out
 
 
-def res2net50_v1b(pretrained=False, **kwargs):
+def res2net50_v1b(pretrained: bool = False, **kwargs) -> Res2Net:
     model = Res2Net(Bottle2neck, [3, 4, 6, 3], baseWidth=26, scale=4, **kwargs)
     if pretrained:
-        model.load_state_dict(
-            model_zoo.load_url(model_urls["res2net50_v1b_26w_4s"]), strict=False
-        )
+        model.load_state_dict(model_zoo.load_url(model_urls["res2net50_v1b_26w_4s"]), strict=False)
 
     return model
 
 
-def res2net101_v1b(pretrained=False, **kwargs):
+def res2net101_v1b(pretrained: bool = False, **kwargs) -> Res2Net:
     model = Res2Net(Bottle2neck, [3, 4, 23, 3], baseWidth=26, scale=4, **kwargs)
     if pretrained:
         model.load_state_dict(model_zoo.load_url(model_urls["res2net101_v1b_26w_4s"]))
@@ -690,33 +643,27 @@ def res2net101_v1b(pretrained=False, **kwargs):
     return model
 
 
-def res2net50_v1b_26w_4s(pretrained=False, **kwargs):
+def res2net50_v1b_26w_4s(pretrained: bool = False, **kwargs) -> Res2Net:
     model = Res2Net(Bottle2neck, [3, 4, 6, 3], baseWidth=26, scale=4, **kwargs)
     if pretrained is True:
         model.load_state_dict(
-            torch.load(
-                "data/backbone_ckpt/res2net50_v1b_26w_4s-3cf99910.pth",
-                map_location="cpu",
-            )
+            torch.load("data/backbone_ckpt/res2net50_v1b_26w_4s-3cf99910.pth", map_location="cpu")
         )
 
     return model
 
 
-def res2net101_v1b_26w_4s(pretrained=True, **kwargs):
+def res2net101_v1b_26w_4s(pretrained: bool = True, **kwargs) -> Res2Net:
     model = Res2Net(Bottle2neck, [3, 4, 23, 3], baseWidth=26, scale=4, **kwargs)
     if pretrained is True:
         model.load_state_dict(
-            torch.load(
-                "data/backbone_ckpt/res2net101_v1b_26w_4s-0812c246.pth",
-                map_location="cpu",
-            )
+            torch.load("data/backbone_ckpt/res2net101_v1b_26w_4s-0812c246.pth", map_location="cpu")
         )
 
     return model
 
 
-def res2net152_v1b_26w_4s(pretrained=False, **kwargs):
+def res2net152_v1b_26w_4s(pretrained: bool = False, **kwargs) -> Res2Net:
     model = Res2Net(Bottle2neck, [3, 8, 36, 3], baseWidth=26, scale=4, **kwargs)
     if pretrained:
         model.load_state_dict(model_zoo.load_url(model_urls["res2net152_v1b_26w_4s"]))
@@ -732,9 +679,9 @@ class Mlp(nn.Module):
         in_features,
         hidden_features=None,
         out_features=None,
-        act_layer=nn.GELU,
-        drop=0.0,
-    ):
+        act_layer: type[GELU] = nn.GELU,
+        drop: float = 0.0,
+    ) -> None:
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -748,11 +695,10 @@ class Mlp(nn.Module):
         x = self.act(x)
         x = self.drop(x)
         x = self.fc2(x)
-        x = self.drop(x)
-        return x
+        return self.drop(x)
 
 
-def window_partition(x, window_size):
+def window_partition(x: Tensor, window_size):
     """
     Args:
         x: (B, H, W, C)
@@ -762,13 +708,10 @@ def window_partition(x, window_size):
     """
     B, H, W, C = x.shape
     x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
-    windows = (
-        x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
-    )
-    return windows
+    return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
 
 
-def window_reverse(windows, window_size, H, W):
+def window_reverse(windows, window_size, H: int, W: int):
     """
     Args:
         windows: (num_windows*B, window_size, window_size, C)
@@ -779,11 +722,8 @@ def window_reverse(windows, window_size, H, W):
         x: (B, H, W, C)
     """
     B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.view(
-        B, H // window_size, W // window_size, window_size, window_size, -1
-    )
-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
-    return x
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+    return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
 
 
 class WindowAttention(nn.Module):
@@ -804,12 +744,11 @@ class WindowAttention(nn.Module):
         dim,
         window_size,
         num_heads,
-        qkv_bias=True,
+        qkv_bias: bool = True,
         qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-    ):
-
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+    ) -> None:
         super().__init__()
         self.dim = dim
         self.window_size = window_size  # Wh, Ww
@@ -827,12 +766,8 @@ class WindowAttention(nn.Module):
         coords_w = torch.arange(self.window_size[1])
         coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
         coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
-        relative_coords = (
-            coords_flatten[:, :, None] - coords_flatten[:, None, :]
-        )  # 2, Wh*Ww, Wh*Ww
-        relative_coords = relative_coords.permute(
-            1, 2, 0
-        ).contiguous()  # Wh*Ww, Wh*Ww, 2
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
         relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
         relative_coords[:, :, 1] += self.window_size[1] - 1
         relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
@@ -859,11 +794,7 @@ class WindowAttention(nn.Module):
             .reshape(B_, N, 3, self.num_heads, C // self.num_heads)
             .permute(2, 0, 3, 1, 4)
         )
-        q, k, v = (
-            qkv[0],
-            qkv[1],
-            qkv[2],
-        )  # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = (qkv[0], qkv[1], qkv[2])  # make torchscript happy (cannot use tensor as tuple)
 
         q = q * self.scale
         attn = q @ k.transpose(-2, -1)
@@ -871,9 +802,7 @@ class WindowAttention(nn.Module):
         relative_position_bias = self.relative_position_bias_table[
             self.relative_position_index.view(-1)
         ].view(
-            self.window_size[0] * self.window_size[1],
-            self.window_size[0] * self.window_size[1],
-            -1,
+            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1
         )  # Wh*Ww,Wh*Ww,nH
         relative_position_bias = relative_position_bias.permute(
             2, 0, 1
@@ -882,9 +811,7 @@ class WindowAttention(nn.Module):
 
         if mask is not None:
             nW = mask.shape[0]
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(
-                1
-            ).unsqueeze(0)
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
             attn = attn.view(-1, self.num_heads, N, N)
             attn = self.softmax(attn)
         else:
@@ -894,8 +821,7 @@ class WindowAttention(nn.Module):
 
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
+        return self.proj_drop(x)
 
 
 class SwinTransformerBlock(nn.Module):
@@ -919,26 +845,24 @@ class SwinTransformerBlock(nn.Module):
         self,
         dim,
         num_heads,
-        window_size=7,
-        shift_size=0,
-        mlp_ratio=4.0,
-        qkv_bias=True,
+        window_size: int = 7,
+        shift_size: int = 0,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
         qk_scale=None,
-        drop=0.0,
-        attn_drop=0.0,
-        drop_path=0.0,
-        act_layer=nn.GELU,
-        norm_layer=nn.LayerNorm,
-    ):
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        drop_path: float = 0.0,
+        act_layer: type[GELU] = nn.GELU,
+        norm_layer: type[LayerNorm] = nn.LayerNorm,
+    ) -> None:
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.window_size = window_size
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
-        assert (
-            0 <= self.shift_size < self.window_size
-        ), "shift_size must in 0-window_size"
+        assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
 
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
@@ -955,10 +879,7 @@ class SwinTransformerBlock(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(
-            in_features=dim,
-            hidden_features=mlp_hidden_dim,
-            act_layer=act_layer,
-            drop=drop,
+            in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop
         )
 
         self.H = None
@@ -988,9 +909,7 @@ class SwinTransformerBlock(nn.Module):
 
         # cyclic shift
         if self.shift_size > 0:
-            shifted_x = torch.roll(
-                x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2)
-            )
+            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
             attn_mask = mask_matrix
         else:
             shifted_x = x
@@ -1005,9 +924,7 @@ class SwinTransformerBlock(nn.Module):
         )  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(
-            x_windows, mask=attn_mask
-        )  # nW*B, window_size*window_size, C
+        attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -1015,9 +932,7 @@ class SwinTransformerBlock(nn.Module):
 
         # reverse cyclic shift
         if self.shift_size > 0:
-            x = torch.roll(
-                shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2)
-            )
+            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
             x = shifted_x
 
@@ -1028,9 +943,7 @@ class SwinTransformerBlock(nn.Module):
 
         # FFN
         x = shortcut + self.drop_path(x)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-
-        return x
+        return x + self.drop_path(self.mlp(self.norm2(x)))
 
 
 class PatchMerging(nn.Module):
@@ -1040,7 +953,7 @@ class PatchMerging(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
-    def __init__(self, dim, norm_layer=nn.LayerNorm):
+    def __init__(self, dim, norm_layer: type[LayerNorm] = nn.LayerNorm) -> None:
         super().__init__()
         self.dim = dim
         self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
@@ -1070,9 +983,7 @@ class PatchMerging(nn.Module):
         x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
 
         x = self.norm(x)
-        x = self.reduction(x)
-
-        return x
+        return self.reduction(x)
 
 
 class BasicLayer(nn.Module):
@@ -1098,17 +1009,17 @@ class BasicLayer(nn.Module):
         dim,
         depth,
         num_heads,
-        window_size=7,
-        mlp_ratio=4.0,
-        qkv_bias=True,
+        window_size: int = 7,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
         qk_scale=None,
-        drop=0.0,
-        attn_drop=0.0,
-        drop_path=0.0,
-        norm_layer=nn.LayerNorm,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        drop_path: float = 0.0,
+        norm_layer: type[LayerNorm] = nn.LayerNorm,
         downsample=None,
-        use_checkpoint=False,
-    ):
+        use_checkpoint: bool = False,
+    ) -> None:
         super().__init__()
         self.window_size = window_size
         self.shift_size = window_size // 2
@@ -1128,9 +1039,7 @@ class BasicLayer(nn.Module):
                     qk_scale=qk_scale,
                     drop=drop,
                     attn_drop=attn_drop,
-                    drop_path=drop_path[i]
-                    if isinstance(drop_path, list)
-                    else drop_path,
+                    drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                     norm_layer=norm_layer,
                 )
                 for i in range(depth)
@@ -1175,9 +1084,7 @@ class BasicLayer(nn.Module):
         )  # nW, window_size, window_size, 1
         mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
         attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(
-            attn_mask == 0, float(0.0)
-        )
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, (-100.0)).masked_fill(attn_mask == 0, 0.0)
 
         for blk in self.blocks:
             blk.H, blk.W = H, W
@@ -1189,8 +1096,7 @@ class BasicLayer(nn.Module):
             x_down = self.downsample(x, H, W)
             Wh, Ww = (H + 1) // 2, (W + 1) // 2
             return x, H, W, x_down, Wh, Ww
-        else:
-            return x, H, W, x, H, W
+        return x, H, W, x, H, W
 
 
 class PatchEmbed(nn.Module):
@@ -1202,7 +1108,9 @@ class PatchEmbed(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer. Default: None
     """
 
-    def __init__(self, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
+    def __init__(
+        self, patch_size: int = 4, in_chans: int = 3, embed_dim: int = 96, norm_layer=None
+    ) -> None:
         super().__init__()
         patch_size = to_2tuple(patch_size)
         self.patch_size = patch_size
@@ -1210,9 +1118,7 @@ class PatchEmbed(nn.Module):
         self.in_chans = in_chans
         self.embed_dim = embed_dim
 
-        self.proj = nn.Conv2d(
-            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size
-        )
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
         if norm_layer is not None:
             self.norm = norm_layer(embed_dim)
         else:
@@ -1267,26 +1173,30 @@ class SwinTransformer(nn.Module):
 
     def __init__(
         self,
-        pretrain_img_size=224,
-        patch_size=4,
-        in_chans=3,
-        embed_dim=96,
-        depths=[2, 2, 6, 2],
-        num_heads=[3, 6, 12, 24],
-        window_size=7,
-        mlp_ratio=4.0,
-        qkv_bias=True,
+        pretrain_img_size: int = 224,
+        patch_size: int = 4,
+        in_chans: int = 3,
+        embed_dim: int = 96,
+        depths=None,
+        num_heads=None,
+        window_size: int = 7,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
         qk_scale=None,
-        drop_rate=0.0,
-        attn_drop_rate=0.0,
-        drop_path_rate=0.2,
-        norm_layer=nn.LayerNorm,
-        ape=False,
-        patch_norm=True,
-        out_indices=(0, 1, 2, 3),
-        frozen_stages=-1,
-        use_checkpoint=False,
-    ):
+        drop_rate: float = 0.0,
+        attn_drop_rate: float = 0.0,
+        drop_path_rate: float = 0.2,
+        norm_layer: type[LayerNorm] = nn.LayerNorm,
+        ape: bool = False,
+        patch_norm: bool = True,
+        out_indices: tuple[int, int, int, int] = (0, 1, 2, 3),
+        frozen_stages: int = -1,
+        use_checkpoint: bool = False,
+    ) -> None:
+        if num_heads is None:
+            num_heads = [3, 6, 12, 24]
+        if depths is None:
+            depths = [2, 2, 6, 2]
         super().__init__()
 
         self.pretrain_img_size = pretrain_img_size
@@ -1357,7 +1267,7 @@ class SwinTransformer(nn.Module):
 
         self._freeze_stages()
 
-    def _freeze_stages(self):
+    def _freeze_stages(self) -> None:
         if self.frozen_stages >= 0:
             self.patch_embed.eval()
             for param in self.patch_embed.parameters():
@@ -1368,7 +1278,7 @@ class SwinTransformer(nn.Module):
 
         if self.frozen_stages >= 2:
             self.pos_drop.eval()
-            for i in range(0, self.frozen_stages - 1):
+            for i in range(self.frozen_stages - 1):
                 m = self.layers[i]
                 m.eval()
                 for param in m.parameters():
@@ -1397,62 +1307,55 @@ class SwinTransformer(nn.Module):
                 norm_layer = getattr(self, f"norm{i}")
                 x_out = norm_layer(x_out)
 
-                out = (
-                    x_out.view(-1, H, W, self.num_features[i])
-                    .permute(0, 3, 1, 2)
-                    .contiguous()
-                )
+                out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
                 outs.append(out)
 
         return tuple(outs)
 
-    def train(self, mode=True):
+    def train(self, mode: bool = True) -> None:
         """Convert the model into training mode while keep layers freezed."""
-        super(SwinTransformer, self).train(mode)
+        super().train(mode)
         self._freeze_stages()
 
 
-def SwinT(pretrained=True):
+def SwinT(pretrained: bool = True) -> SwinTransformer:
     model = SwinTransformer(
         embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24], window_size=7
     )
     if pretrained is True:
         model.load_state_dict(
-            torch.load(
-                "data/backbone_ckpt/swin_tiny_patch4_window7_224.pth",
-                map_location="cpu",
-            )["model"],
+            torch.load("data/backbone_ckpt/swin_tiny_patch4_window7_224.pth", map_location="cpu")[
+                "model"
+            ],
             strict=False,
         )
 
     return model
 
 
-def SwinS(pretrained=True):
+def SwinS(pretrained: bool = True) -> SwinTransformer:
     model = SwinTransformer(
         embed_dim=96, depths=[2, 2, 18, 2], num_heads=[3, 6, 12, 24], window_size=7
     )
     if pretrained is True:
         model.load_state_dict(
-            torch.load(
-                "data/backbone_ckpt/swin_small_patch4_window7_224.pth",
-                map_location="cpu",
-            )["model"],
+            torch.load("data/backbone_ckpt/swin_small_patch4_window7_224.pth", map_location="cpu")[
+                "model"
+            ],
             strict=False,
         )
 
     return model
 
 
-def SwinB(pretrained=True):
+def SwinB(pretrained: bool = True) -> SwinTransformer:
     model = SwinTransformer(
         embed_dim=128, depths=[2, 2, 18, 2], num_heads=[4, 8, 16, 32], window_size=12
     )
     if pretrained is True:
         model.load_state_dict(
             torch.load(
-                "data/backbone_ckpt/swin_base_patch4_window12_384_22kto1k.pth",
-                map_location="cpu",
+                "data/backbone_ckpt/swin_base_patch4_window12_384_22kto1k.pth", map_location="cpu"
             )["model"],
             strict=False,
         )
@@ -1460,15 +1363,14 @@ def SwinB(pretrained=True):
     return model
 
 
-def SwinL(pretrained=True):
+def SwinL(pretrained: bool = True) -> SwinTransformer:
     model = SwinTransformer(
         embed_dim=192, depths=[2, 2, 18, 2], num_heads=[6, 12, 24, 48], window_size=12
     )
     if pretrained is True:
         model.load_state_dict(
             torch.load(
-                "data/backbone_ckpt/swin_large_patch4_window12_384_22kto1k.pth",
-                map_location="cpu",
+                "data/backbone_ckpt/swin_large_patch4_window12_384_22kto1k.pth", map_location="cpu"
             )["model"],
             strict=False,
         )
@@ -1476,15 +1378,12 @@ def SwinL(pretrained=True):
     return model
 
 
-def weighted_bce_loss_with_logits(pred, mask, reduction="mean"):
-    weight = 1 + 5 * torch.abs(
-        F.avg_pool2d(mask, kernel_size=31, stride=1, padding=15) - mask
-    )
-    bce = F.binary_cross_entropy_with_logits(pred, mask, weight, reduction=reduction)
-    return bce
+def weighted_bce_loss_with_logits(pred, mask, reduction="mean") -> Tensor:
+    weight = 1 + 5 * torch.abs(F.avg_pool2d(mask, kernel_size=31, stride=1, padding=15) - mask)
+    return F.binary_cross_entropy_with_logits(pred, mask, weight, reduction=reduction)
 
 
-def iou_loss(pred, mask, reduction="mean"):
+def iou_loss(pred: Tensor, mask, reduction="mean"):
     inter = pred * mask
     union = pred + mask
     iou = 1 - (inter + 1) / (union - inter + 1)
@@ -1502,55 +1401,33 @@ class InSPyReNet(nn.Module):
         self,
         backbone,
         in_channels,
-        depth=64,
-        base_size=(384, 384),
-        threshold: Optional[int] = 512,
+        depth: int = 64,
+        base_size: tuple[int, int] = (384, 384),
+        threshold: int | None = 512,
         **kwargs,
-    ):
-        super(InSPyReNet, self).__init__()
+    ) -> None:
+        super().__init__()
         self.backbone = backbone
         self.in_channels = in_channels
         self.depth = depth
         self.base_size = base_size
         self.threshold = threshold
 
-        self.context1 = PAA_e(
-            self.in_channels[0], self.depth, base_size=self.base_size, stage=0
-        )
-        self.context2 = PAA_e(
-            self.in_channels[1], self.depth, base_size=self.base_size, stage=1
-        )
-        self.context3 = PAA_e(
-            self.in_channels[2], self.depth, base_size=self.base_size, stage=2
-        )
-        self.context4 = PAA_e(
-            self.in_channels[3], self.depth, base_size=self.base_size, stage=3
-        )
-        self.context5 = PAA_e(
-            self.in_channels[4], self.depth, base_size=self.base_size, stage=4
-        )
+        self.context1 = PAA_e(self.in_channels[0], self.depth, base_size=self.base_size, stage=0)
+        self.context2 = PAA_e(self.in_channels[1], self.depth, base_size=self.base_size, stage=1)
+        self.context3 = PAA_e(self.in_channels[2], self.depth, base_size=self.base_size, stage=2)
+        self.context4 = PAA_e(self.in_channels[3], self.depth, base_size=self.base_size, stage=3)
+        self.context5 = PAA_e(self.in_channels[4], self.depth, base_size=self.base_size, stage=4)
 
-        self.decoder = PAA_d(
-            self.depth * 3, depth=self.depth, base_size=base_size, stage=2
-        )
+        self.decoder = PAA_d(self.depth * 3, depth=self.depth, base_size=base_size, stage=2)
 
         self.attention0 = SICA(
-            self.depth,
-            depth=self.depth,
-            base_size=self.base_size,
-            stage=0,
-            lmap_in=True,
+            self.depth, depth=self.depth, base_size=self.base_size, stage=0, lmap_in=True
         )
         self.attention1 = SICA(
-            self.depth * 2,
-            depth=self.depth,
-            base_size=self.base_size,
-            stage=1,
-            lmap_in=True,
+            self.depth * 2, depth=self.depth, base_size=self.base_size, stage=1, lmap_in=True
         )
-        self.attention2 = SICA(
-            self.depth * 2, depth=self.depth, base_size=self.base_size, stage=2
-        )
+        self.attention2 = SICA(self.depth * 2, depth=self.depth, base_size=self.base_size, stage=2)
 
         self.sod_loss_fn = lambda x, y: weighted_bce_loss_with_logits(
             x, y, reduction="mean"
@@ -1560,9 +1437,7 @@ class InSPyReNet(nn.Module):
         self.ret = lambda x, target: F.interpolate(
             x, size=target.shape[-2:], mode="bilinear", align_corners=False
         )
-        self.res = lambda x, size: F.interpolate(
-            x, size=size, mode="bilinear", align_corners=False
-        )
+        self.res = lambda x, size: F.interpolate(x, size=size, mode="bilinear", align_corners=False)
         self.des = lambda x, size: F.interpolate(x, size=size, mode="nearest")
 
         self.image_pyramid = ImagePyramid(7, 1)
@@ -1574,20 +1449,20 @@ class InSPyReNet(nn.Module):
         self.forward = self.forward_inference
 
     def _apply(self, fn):
-        super(InSPyReNet, self)._apply(fn)
+        super()._apply(fn)
         self.image_pyramid._apply(fn)
         self.transition0._apply(fn)
         self.transition1._apply(fn)
         self.transition2._apply(fn)
         return self
 
-    def train(self, mode=True):
-        super(InSPyReNet, self).train(mode)
+    def train(self, mode: bool = True):
+        super().train(mode)
         self.forward = self.forward_train if mode else self.forward_inference
         return self
 
-    def forward_inspyre(self, x):
-        B, _, H, W = x.shape
+    def forward_inspyre(self, x: Tensor):
+        _B, _, H, W = x.shape
 
         x1, x2, x3, x4, x5 = self.backbone(x)
 
@@ -1606,23 +1481,21 @@ class InSPyReNet(nn.Module):
         x1 = self.res(x1, (H // 2, W // 2))
         f2 = self.res(f2, (H // 2, W // 2))
 
-        f1, p1 = self.attention1(
-            torch.cat([x1, f2], dim=1), d2.detach(), p2.detach()
-        )  # 2
+        f1, p1 = self.attention1(torch.cat([x1, f2], dim=1), d2.detach(), p2.detach())  # 2
         d1 = self.image_pyramid.reconstruct(d2.detach(), p1)  # 2
 
         f1 = self.res(f1, (H, W))
         _, p0 = self.attention0(f1, d1.detach(), p1.detach())  # 2
         d0 = self.image_pyramid.reconstruct(d1.detach(), p0)  # 2
 
-        out = dict()
+        out = {}
         out["saliency"] = [d3, d2, d1, d0]
         out["laplacian"] = [p2, p1, p0]
 
         return out
 
     def forward_train(self, x, y):
-        B, _, H, W = x.shape
+        _B, _, H, W = x.shape
         out = self.forward_inspyre(x)
 
         d3, d2, d1, d0 = out["saliency"]
@@ -1634,24 +1507,21 @@ class InSPyReNet(nn.Module):
 
         loss = (
             self.pc_loss_fn(
-                self.des(d3, (H, W)),
-                self.des(self.image_pyramid.reduce(d2), (H, W)).detach(),
+                self.des(d3, (H, W)), self.des(self.image_pyramid.reduce(d2), (H, W)).detach()
             )
             * 0.0001
         )
 
         loss += (
             self.pc_loss_fn(
-                self.des(d2, (H, W)),
-                self.des(self.image_pyramid.reduce(d1), (H, W)).detach(),
+                self.des(d2, (H, W)), self.des(self.image_pyramid.reduce(d1), (H, W)).detach()
             )
             * 0.0001
         )
 
         loss += (
             self.pc_loss_fn(
-                self.des(d1, (H, W)),
-                self.des(self.image_pyramid.reduce(d0), (H, W)).detach(),
+                self.des(d1, (H, W)), self.des(self.image_pyramid.reduce(d0), (H, W)).detach()
             )
             * 0.0001
         )
@@ -1665,24 +1535,23 @@ class InSPyReNet(nn.Module):
         pred = torch.sigmoid(d0)
 
         pred = (pred - pred.min()) / (pred.max() - pred.min() + 1e-8)
-        sample = {
+        return {
             "pred": pred,
             "loss": loss,
             "loss0": loss0,
             "saliency": [d3, d2, d1, d0],
             "laplacian": [p2, p1, p0],
         }
-        return sample
 
     def forward_inference(self, x):
-        B, _, H, W = x.shape
+        _B, _, H, W = x.shape
 
         if self.threshold is None:
             out = self.forward_inspyre(x)
             d3, d2, d1, d0 = out["saliency"]
             p2, p1, p0 = out["laplacian"]
 
-        elif H <= self.threshold or W <= self.threshold:
+        elif self.threshold >= H or self.threshold >= W:
             out = self.forward_inspyre(self.res(x, self.base_size))
 
             d3, d2, d1, d0 = out["saliency"]
@@ -1691,14 +1560,14 @@ class InSPyReNet(nn.Module):
         else:
             # LR Saliency Pyramid
             lr_out = self.forward_inspyre(self.res(x, self.base_size))
-            lr_d3, lr_d2, lr_d1, lr_d0 = lr_out["saliency"]
-            lr_p2, lr_p1, lr_p0 = lr_out["laplacian"]
+            _lr_d3, _lr_d2, _lr_d1, lr_d0 = lr_out["saliency"]
+            _lr_p2, _lr_p1, _lr_p0 = lr_out["laplacian"]
 
             # HR Saliency Pyramid
             if H % 32 != 0 or W % 32 != 0:
                 x = self.res(x, ((H // 32) * 32, (W // 32) * 32))
             hr_out = self.forward_inspyre(x)
-            hr_d3, hr_d2, hr_d1, hr_d0 = hr_out["saliency"]
+            hr_d3, _hr_d2, _hr_d1, _hr_d0 = hr_out["saliency"]
             hr_p2, hr_p1, hr_p0 = hr_out["laplacian"]
 
             # Pyramid Blending
@@ -1720,13 +1589,7 @@ class InSPyReNet(nn.Module):
             d0 = self.res(d0, (H, W))
         pred = torch.sigmoid(d0)
         pred = (pred - pred.min()) / (pred.max() - pred.min() + 1e-8)
-        sample = {
-            "pred": pred,
-            "loss": 0,
-            "saliency": [d3, d2, d1, d0],
-            "laplacian": [p2, p1, p0],
-        }
-        return sample
+        return {"pred": pred, "loss": 0, "saliency": [d3, d2, d1, d0], "laplacian": [p2, p1, p0]}
 
     @staticmethod
     def compute_loss(sample):
@@ -1734,11 +1597,11 @@ class InSPyReNet(nn.Module):
 
 
 def InSPyReNet_Res2Net50(
-    depth=64,
-    pretrained=True,
-    base_size: Optional[Union[int, Tuple[int, int]]] = None,
+    depth: int = 64,
+    pretrained: bool = True,
+    base_size: int | tuple[int, int] | None = None,
     **kwargs,
-):
+) -> InSPyReNet:
     if base_size is None:
         base_size = (384, 384)
     if isinstance(base_size, int):
@@ -1754,19 +1617,15 @@ def InSPyReNet_Res2Net50(
 
 
 def InSPyReNet_SwinB(
-    depth=64,
-    pretrained=False,
-    base_size: Optional[Union[int, Tuple[int, int]]] = None,
+    depth: int = 64,
+    pretrained: bool = False,
+    base_size: int | tuple[int, int] | None = None,
     **kwargs,
-):
+) -> InSPyReNet:
     if base_size is None:
         base_size = (384, 384)
     if isinstance(base_size, int):
         base_size = (base_size, base_size)
     return InSPyReNet(
-        SwinB(pretrained=pretrained),
-        [128, 128, 256, 512, 1024],
-        depth,
-        base_size,
-        **kwargs,
+        SwinB(pretrained=pretrained), [128, 128, 256, 512, 1024], depth, base_size, **kwargs
     )

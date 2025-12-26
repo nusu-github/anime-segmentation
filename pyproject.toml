@@ -22,12 +22,29 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/anime_segmentation"]
-
 [dependency-groups]
-dev = [
-    "pytest>=9.0.2",
-    "ruff>=0.14.10",
-]
+dev = ["pytest>=9.0.2", "ruff>=0.14.10"]
 
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.format]
+line-ending = "lf"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "T20",
+    "D",
+    "ANN",
+    "CPY",
+    "COM812",
+    "ERA001",
+    "S101",
+    "N812",
+    "N802",
+    "PLR2004",
+    "EM",
+]
