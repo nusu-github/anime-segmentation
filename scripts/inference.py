@@ -7,7 +7,7 @@ import torch
 from torch.cuda import amp
 from tqdm import tqdm
 
-from .train import AnimeSegmentation, net_names
+from anime_segmentation.train import AnimeSegmentation, net_names
 
 
 def get_mask(model: AnimeSegmentation, input_img, use_amp=True, s=640):
@@ -19,7 +19,7 @@ def get_mask(model: AnimeSegmentation, input_img, use_amp=True, s=640):
     img_input[ph // 2 : ph // 2 + h, pw // 2 : pw // 2 + w] = cv2.resize(input_img, (w, h))
     img_input = np.transpose(img_input, (2, 0, 1))
     img_input = img_input[np.newaxis, :]
-    tmpImg = torch.from_numpy(img_input).type(torch.FloatTensor).to(model.device)
+    tmpImg = torch.from_numpy(img_input).float().to(model.device)
     with torch.no_grad():
         if use_amp:
             with amp.autocast():

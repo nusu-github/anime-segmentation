@@ -8,7 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from scipy.ndimage import measurements
+from scipy.ndimage import center_of_mass
 from tqdm import tqdm
 
 
@@ -87,7 +87,7 @@ class DatasetGenerator:
 
         # fg random move
         h, w = output_size
-        cy, cx = measurements.center_of_mass(fg[:, :, 3])
+        cy, cx = center_of_mass(fg[:, :, 3])
         dx = w / 2 - cx
         dy = h / 2 - cy
         fg = cv2.warpAffine(

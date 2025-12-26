@@ -9,8 +9,8 @@ from torch.utils.data import DataLoader
 from tqdm.asyncio import tqdm
 
 from anime_segmentation.data_loader import create_training_datasets
-from anime_segmentation.inference import get_mask
 from anime_segmentation.train import AnimeSegmentation, net_names
+from scripts.inference import get_mask
 
 # warnings.filterwarnings("ignore")
 

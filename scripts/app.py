@@ -7,8 +7,8 @@ import gradio as gr
 import numpy as np
 import torch
 
-from anime_segmentation.inference import get_mask
 from anime_segmentation.train import AnimeSegmentation, net_names
+from scripts.inference import get_mask
 
 
 # global model state

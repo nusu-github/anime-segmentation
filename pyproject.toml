@@ -5,29 +5,52 @@ description = "Anime Segmentation Project"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "gradio",
     "huggingface-hub>=0.22",
     "kornia",
     "numpy",
     "opencv-python",
     "pillow",
-    "pytorch-lightning",
+    "lightning",
     "scipy",
     "timm",
-    "torch",
-    "torchvision",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cpu", marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [dependency-groups]
 dev = [
     "pyright>=1.1.407",
     "pytest>=9.0.2",
     "ruff>=0.14.10",
+    "scipy-stubs>=1.16.3.3",
 ]
+
+app = ["gradio>6.0,<=7.0"]
+export = ["onnx", "onnxsim"]
 
 [tool.ruff]
 line-length = 100
