@@ -3,7 +3,7 @@ import time
 import cv2
 from pathlib import Path
 from torch.utils.data import DataLoader
-from .data_loader import create_training_datasets
+from anime_segmentation.data_loader import create_training_datasets
 
 import numpy as np
 
