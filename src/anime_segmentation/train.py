@@ -1,20 +1,22 @@
 import argparse
+import math
 from argparse import Namespace
 from pathlib import Path
+from typing import Literal
 
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 import torch
-import torch.nn.functional as F
 from huggingface_hub import PyTorchModelHubMixin
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.strategies import DDPStrategy
+from lightning import Trainer
+from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
+from lightning.pytorch.strategies import DDPStrategy
 from torch import optim
-from torch.optim.adam import Adam
-from torch.types import Tensor
-from torch.utils.data import DataLoader
+from torch.optim import Optimizer
+from torchmetrics import MeanAbsoluteError, MetricCollection
+from torchmetrics.classification import BinaryFBetaScore, BinaryPrecision, BinaryRecall
 
-from .data_loader import create_training_datasets
+from .data_module import AnimeSegDataModule
 from .model import (
     U2NET,
     InSPyReNet,
@@ -28,6 +30,27 @@ from .model import (
 )
 
 # warnings.filterwarnings("ignore")
+
+
+def get_precision(fp32: bool, bf16: bool) -> Literal["32-true", "bf16-mixed", "16-mixed"]:
+    """Get precision string for Trainer based on flags."""
+    if fp32:
+        return "32-true"
+    if bf16:
+        return "bf16-mixed"
+    return "16-mixed"
+
+
+def get_strategy(devices: int) -> DDPStrategy | str:
+    """Get optimized training strategy based on device count."""
+    if devices > 1:
+        return DDPStrategy(
+            find_unused_parameters=False,
+            static_graph=True,
+            gradient_as_bucket_view=True,
+        )
+    return "auto"
+
 
 net_names = [
     "isnet_is",
@@ -59,24 +82,6 @@ def get_net(net_name: str, img_size) -> ISNetDIS | ISNetGTEncoder | InSPyReNet |
     raise NotImplementedError
 
 
-def f1_torch(pred, gt) -> tuple[Tensor, Tensor, Tensor]:
-    # micro F1-score
-    pred = pred.float().view(pred.shape[0], -1)
-    gt = gt.float().view(gt.shape[0], -1)
-    tp1 = torch.sum(pred * gt, dim=1)
-    tp_fp1 = torch.sum(pred, dim=1)
-    tp_fn1 = torch.sum(gt, dim=1)
-    pred = 1 - pred
-    gt = 1 - gt
-    tp2 = torch.sum(pred * gt, dim=1)
-    tp_fp2 = torch.sum(pred, dim=1)
-    tp_fn2 = torch.sum(gt, dim=1)
-    precision = (tp1 + tp2) / (tp_fp1 + tp_fp2 + 0.0001)
-    recall = (tp1 + tp2) / (tp_fn1 + tp_fn2 + 0.0001)
-    f1 = (1 + 0.3) * precision * recall / (0.3 * precision + recall + 0.0001)
-    return precision, recall, f1
-
-
 class AnimeSegmentation(
     pl.LightningModule,
     PyTorchModelHubMixin,
@@ -84,21 +89,32 @@ class AnimeSegmentation(
     repo_url="https://github.com/SkyTNT/anime-segmentation",
     tags=["image-segmentation"],
 ):
-    def __init__(self, net_name, img_size=None, lr: float = 1e-3) -> None:
+    def __init__(self, net_name: str, img_size: int | None = None, lr: float = 1e-3) -> None:
         super().__init__()
         assert net_name in net_names
-        self.img_size = img_size
-        self.lr = lr
+        self.save_hyperparameters()
         self.net = get_net(net_name, img_size)
-        if net_name == "isnet_is":
+        if self.hparams["net_name"] == "isnet_is":
             self.gt_encoder = get_net("isnet_gt", img_size)
             self.gt_encoder.requires_grad_(False)
         else:
             self.gt_encoder = None
 
+        # Validation metrics
+        # Original f1_torch used beta^2=0.3, so beta=sqrt(0.3)
+        self.val_metrics = MetricCollection(
+            {
+                "precision": BinaryPrecision(multidim_average="global"),
+                "recall": BinaryRecall(multidim_average="global"),
+                "f1": BinaryFBetaScore(beta=math.sqrt(0.3), multidim_average="global"),
+            },
+            prefix="val/",
+        )
+        self.val_mae = MeanAbsoluteError()
+
     @classmethod
     def try_load(cls, net_name, ckpt_path, map_location: str | None = None, img_size=None):
-        state_dict = torch.load(ckpt_path, map_location=map_location)
+        state_dict = torch.load(ckpt_path, map_location=map_location, weights_only=False)
         if "epoch" in state_dict:
             return cls.load_from_checkpoint(
                 ckpt_path, net_name=net_name, img_size=img_size, map_location=map_location
@@ -110,12 +126,16 @@ class AnimeSegmentation(
             model.net.load_state_dict(state_dict)
         return model
 
-    def configure_optimizers(self) -> Adam:
+    def configure_optimizers(self) -> Optimizer:
         return optim.Adam(
-            self.net.parameters(), lr=self.lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0
+            self.net.parameters(),
+            lr=self.hparams["lr"],
+            betas=(0.9, 0.999),
+            eps=1e-08,
+            weight_decay=0,
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         if isinstance(self.net, ISNetDIS):
             return self.net(x)[0][0].sigmoid()
         if isinstance(self.net, ISNetGTEncoder):
@@ -128,7 +148,7 @@ class AnimeSegmentation(
             return self.net.forward_inference(x)["pred"]
         raise NotImplementedError
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         images, labels = batch["image"], batch["label"]
         if isinstance(self.net, ISNetDIS):
             ds, dfs = self.net(images)
@@ -153,33 +173,47 @@ class AnimeSegmentation(
             raise NotImplementedError
 
         loss0, loss = self.net.compute_loss(loss_args)
-        self.log_dict({"train/loss": loss, "train/loss_tar": loss0})
+        self.log("train/loss", loss, prog_bar=True)
+        self.log("train/loss_tar", loss0)
         return loss
 
-    def validation_step(self, batch, batch_idx) -> None:
+    def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
         images, labels = batch["image"], batch["label"]
         if isinstance(self.net, ISNetGTEncoder):
             preds = self.forward(labels)
         else:
             preds = self.forward(images)
-        (pre, rec, f1) = f1_torch(preds.nan_to_num(nan=0, posinf=1, neginf=0), labels)
-        mae_m = F.l1_loss(preds, labels, reduction="mean")
-        pre_m = pre.mean()
-        rec_m = rec.mean()
-        f1_m = f1.mean()
-        self.log_dict(
-            {"val/precision": pre_m, "val/recall": rec_m, "val/f1": f1_m, "val/mae": mae_m},
-            sync_dist=True,
-        )
+
+        # Clean predictions for metric computation
+        preds_clean = preds.nan_to_num(nan=0, posinf=1, neginf=0)
+
+        # Flatten for global binary metrics (batch, channels, height, width) -> (N,)
+        preds_flat = preds_clean.view(-1)
+        labels_flat = labels.view(-1)
+
+        # Update metrics
+        self.val_metrics.update(preds_flat, labels_flat)
+        self.val_mae.update(preds_clean, labels)
+
+        # Log metrics (torchmetrics handles sync automatically)
+        self.log_dict(self.val_metrics, prog_bar=True)
+        self.log("val/mae", self.val_mae, prog_bar=True)
+
+    def predict_step(
+        self, batch: dict[str, torch.Tensor] | torch.Tensor, batch_idx: int
+    ) -> torch.Tensor:
+        images = batch["image"] if isinstance(batch, dict) else batch
+        return self(images)
 
 
 def get_gt_encoder(
-    train_dataloader, val_dataloader, opt
+    datamodule: AnimeSegDataModule, opt: Namespace
 ) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2NET:
+    """Train ground truth encoder for ISNet with intermediate supervision."""
     print("---start train ground truth encoder---")
     gt_encoder = AnimeSegmentation("isnet_gt")
     trainer = Trainer(
-        precision="32-true" if opt.fp32 else "16-mixed",
+        precision=get_precision(opt.fp32, opt.bf16),
         accelerator=opt.accelerator,
         devices=opt.devices,
         max_epochs=opt.gt_epoch,
@@ -187,71 +221,78 @@ def get_gt_encoder(
         accumulate_grad_batches=opt.acc_step,
         check_val_every_n_epoch=opt.val_epoch,
         log_every_n_steps=opt.log_step,
-        strategy=DDPStrategy(find_unused_parameters=False) if opt.devices > 1 else "auto",
+        strategy=get_strategy(opt.devices),
     )
-    trainer.fit(gt_encoder, train_dataloader, val_dataloader)
+    trainer.fit(gt_encoder, datamodule=datamodule)
     return gt_encoder.net
 
 
 def main(opt: Namespace) -> None:
     Path("lightning_logs").mkdir(exist_ok=True)
+    Path("checkpoints").mkdir(exist_ok=True)
 
-    train_dataset, val_dataset = create_training_datasets(
-        opt.data_dir,
-        opt.fg_dir,
-        opt.bg_dir,
-        opt.img_dir,
-        opt.mask_dir,
-        opt.fg_ext,
-        opt.bg_ext,
-        opt.img_ext,
-        opt.mask_ext,
-        opt.data_split,
-        opt.img_size,
+    # Create DataModule
+    datamodule = AnimeSegDataModule(
+        data_dir=opt.data_dir,
+        fg_dir=opt.fg_dir,
+        bg_dir=opt.bg_dir,
+        img_dir=opt.img_dir,
+        mask_dir=opt.mask_dir,
+        fg_ext=opt.fg_ext,
+        bg_ext=opt.bg_ext,
+        img_ext=opt.img_ext,
+        mask_ext=opt.mask_ext,
+        data_split=opt.data_split,
+        img_size=opt.img_size,
+        batch_size_train=opt.batch_size_train,
+        batch_size_val=opt.batch_size_val,
+        num_workers_train=opt.workers_train,
+        num_workers_val=opt.workers_val,
         with_trimap=opt.net == "modnet",
         cache_ratio=opt.cache,
         cache_update_epoch=opt.cache_epoch,
     )
 
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=opt.batch_size_train,
-        shuffle=True,
-        persistent_workers=True,
-        num_workers=opt.workers_train,
-        pin_memory=True,
-    )
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=opt.batch_size_val,
-        shuffle=False,
-        persistent_workers=True,
-        num_workers=opt.workers_val,
-        pin_memory=True,
-    )
     print("---define model---")
-
     if opt.pretrained_ckpt == "":
-        anime_seg = AnimeSegmentation(opt.net, opt.img_size)
+        anime_seg = AnimeSegmentation(opt.net, opt.img_size, lr=opt.lr)
     else:
         anime_seg = AnimeSegmentation.try_load(opt.net, opt.pretrained_ckpt, "cpu", opt.img_size)
+        anime_seg.hparams["lr"] = opt.lr
+
     if not opt.pretrained_ckpt and not opt.resume_ckpt and opt.net == "isnet_is":
-        anime_seg.gt_encoder.load_state_dict(
-            get_gt_encoder(train_dataloader, val_dataloader, opt).state_dict()
-        )
-    anime_seg.lr = opt.lr
+        assert anime_seg.gt_encoder is not None
+        anime_seg.gt_encoder.load_state_dict(get_gt_encoder(datamodule, opt).state_dict())
+
+    # Configure loggers
+    tb_logger = TensorBoardLogger(save_dir="lightning_logs", name="anime_seg")
+    csv_logger = CSVLogger(save_dir="lightning_logs", name="anime_seg")
+
+    # Configure callbacks
+    callbacks = [
+        ModelCheckpoint(
+            dirpath="checkpoints/",
+            monitor="val/f1",
+            mode="max",
+            save_top_k=3,
+            save_last=True,
+            auto_insert_metric_name=False,
+            filename="epoch={epoch:02d}-f1={val/f1:.4f}",
+            verbose=True,
+        ),
+        EarlyStopping(
+            monitor="val/f1",
+            mode="max",
+            patience=5,
+            min_delta=0.001,
+            verbose=True,
+        ),
+        LearningRateMonitor(logging_interval="epoch"),
+    ]
 
     print("---start train---")
-    checkpoint_callback = ModelCheckpoint(
-        monitor="val/f1",
-        mode="max",
-        save_top_k=1,
-        save_last=True,
-        auto_insert_metric_name=False,
-        filename="epoch={epoch},f1={val/f1:.4f}",
-    )
     trainer = Trainer(
-        precision="32-true" if opt.fp32 else "16-mixed",
+        precision=get_precision(opt.fp32, opt.bf16),
         accelerator=opt.accelerator,
         devices=opt.devices,
         max_epochs=opt.epoch,
@@ -259,10 +300,11 @@ def main(opt: Namespace) -> None:
         accumulate_grad_batches=opt.acc_step,
         check_val_every_n_epoch=opt.val_epoch,
         log_every_n_steps=opt.log_step,
-        strategy=DDPStrategy(find_unused_parameters=False) if opt.devices > 1 else "auto",
-        callbacks=[checkpoint_callback],
+        strategy=get_strategy(opt.devices),
+        callbacks=callbacks,
+        logger=[tb_logger, csv_logger],
     )
-    trainer.fit(anime_seg, train_dataloader, val_dataloader, ckpt_path=opt.resume_ckpt or None)
+    trainer.fit(anime_seg, datamodule=datamodule, ckpt_path=opt.resume_ckpt or None)
 
 
 if __name__ == "__main__":
@@ -337,7 +379,16 @@ if __name__ == "__main__":
     parser.add_argument("--devices", type=int, default=1, help="devices num")
     parser.add_argument("--fp32", action="store_true", default=False, help="disable mix precision")
     parser.add_argument(
-        "--benchmark", action="store_true", default=False, help="enable cudnn benchmark"
+        "--bf16",
+        action="store_true",
+        default=False,
+        help="use bfloat16 mixed precision (for Ampere+ GPUs)",
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        default=True,
+        help="enable cudnn benchmark (recommended for fixed input sizes)",
     )
     parser.add_argument("--log-step", type=int, default=2, help="log training loss every n steps")
     parser.add_argument("--val-epoch", type=int, default=1, help="valid and save every n epoch")
