@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from huggingface_hub import PyTorchModelHubMixin
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.strategies import DDPStrategy
 from torch import optim
 from torch.optim.adam import Adam
 from torch.types import Tensor
@@ -178,7 +179,7 @@ def get_gt_encoder(
     print("---start train ground truth encoder---")
     gt_encoder = AnimeSegmentation("isnet_gt")
     trainer = Trainer(
-        precision=32 if opt.fp32 else 16,
+        precision="32-true" if opt.fp32 else "16-mixed",
         accelerator=opt.accelerator,
         devices=opt.devices,
         max_epochs=opt.gt_epoch,
@@ -186,7 +187,7 @@ def get_gt_encoder(
         accumulate_grad_batches=opt.acc_step,
         check_val_every_n_epoch=opt.val_epoch,
         log_every_n_steps=opt.log_step,
-        strategy="ddp_find_unused_parameters_false" if opt.devices > 1 else None,
+        strategy=DDPStrategy(find_unused_parameters=False) if opt.devices > 1 else "auto",
     )
     trainer.fit(gt_encoder, train_dataloader, val_dataloader)
     return gt_encoder.net
@@ -250,7 +251,7 @@ def main(opt: Namespace) -> None:
         filename="epoch={epoch},f1={val/f1:.4f}",
     )
     trainer = Trainer(
-        precision=32 if opt.fp32 else 16,
+        precision="32-true" if opt.fp32 else "16-mixed",
         accelerator=opt.accelerator,
         devices=opt.devices,
         max_epochs=opt.epoch,
@@ -258,7 +259,7 @@ def main(opt: Namespace) -> None:
         accumulate_grad_batches=opt.acc_step,
         check_val_every_n_epoch=opt.val_epoch,
         log_every_n_steps=opt.log_step,
-        strategy="ddp_find_unused_parameters_false" if opt.devices > 1 else None,
+        strategy=DDPStrategy(find_unused_parameters=False) if opt.devices > 1 else "auto",
         callbacks=[checkpoint_callback],
     )
     trainer.fit(anime_seg, train_dataloader, val_dataloader, ckpt_path=opt.resume_ckpt or None)
