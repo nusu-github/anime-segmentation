@@ -6,7 +6,7 @@ import gradio as gr
 import numpy as np
 import torch
 
-from anime_segmentation.train import AnimeSegmentation, net_names
+from anime_segmentation.train import NET_NAMES, AnimeSegmentation
 from scripts.inference import get_mask
 
 
@@ -158,7 +158,7 @@ if __name__ == "__main__":
         with gr.Accordion("Model Settings", open=False):
             load_model_path_btn = gr.Button("Get Models")
             model_path_input = gr.Dropdown(label="Model Path")
-            model_type = gr.Dropdown(label="Model Type", value="isnet_is", choices=net_names)
+            model_type = gr.Dropdown(label="Model Type", value="isnet_is", choices=NET_NAMES)
             model_image_size = gr.Slider(
                 label="Image Size", value=1024, minimum=0, maximum=1280, step=32
             )

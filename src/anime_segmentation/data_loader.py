@@ -256,7 +256,7 @@ def create_training_datasets(
     bg_ext,
     img_ext,
     mask_ext,
-    spilt_rate,
+    split_rate,
     image_size,
     with_trimap: bool = False,
     cache_ratio: float = 0.0,
@@ -280,20 +280,20 @@ def create_training_datasets(
     random.Random(1).shuffle(train_img_list)
     random.Random(1).shuffle(train_mask_list)
     train_fg_list, val_fg_list = (
-        train_fg_list[: int(len(train_fg_list) * spilt_rate)],
-        train_fg_list[int(len(train_fg_list) * spilt_rate) :],
+        train_fg_list[: int(len(train_fg_list) * split_rate)],
+        train_fg_list[int(len(train_fg_list) * split_rate) :],
     )
     train_bg_list, val_bg_list = (
-        train_bg_list[: int(len(train_bg_list) * spilt_rate)],
-        train_bg_list[int(len(train_bg_list) * spilt_rate) :],
+        train_bg_list[: int(len(train_bg_list) * split_rate)],
+        train_bg_list[int(len(train_bg_list) * split_rate) :],
     )
     train_img_list, val_img_list = (
-        train_img_list[: int(len(train_img_list) * spilt_rate)],
-        train_img_list[int(len(train_img_list) * spilt_rate) :],
+        train_img_list[: int(len(train_img_list) * split_rate)],
+        train_img_list[int(len(train_img_list) * split_rate) :],
     )
     train_mask_list, val_mask_list = (
-        train_mask_list[: int(len(train_mask_list) * spilt_rate)],
-        train_mask_list[int(len(train_mask_list) * spilt_rate) :],
+        train_mask_list[: int(len(train_mask_list) * split_rate)],
+        train_mask_list[int(len(train_mask_list) * split_rate) :],
     )
     print("---")
     print("train fgs: ", len(train_fg_list))

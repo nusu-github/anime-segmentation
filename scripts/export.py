@@ -2,7 +2,7 @@ import argparse
 
 import torch
 
-from anime_segmentation.train import AnimeSegmentation, net_names
+from anime_segmentation.train import NET_NAMES, AnimeSegmentation
 
 
 def export_onnx(model: AnimeSegmentation, img_size, path) -> None:
@@ -33,7 +33,7 @@ def export_onnx(model: AnimeSegmentation, img_size, path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # model args
-    parser.add_argument("--net", type=str, default="isnet_is", choices=net_names, help="net name")
+    parser.add_argument("--net", type=str, default="isnet_is", choices=NET_NAMES, help="net name")
     parser.add_argument(
         "--ckpt", type=str, default="saved_models/isnetis.ckpt", help="model checkpoint path"
     )

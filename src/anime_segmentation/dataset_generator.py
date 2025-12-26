@@ -69,7 +69,7 @@ class DatasetGenerator:
                 self.fgs.append(fg)
         self.bgs_offset = mp.Array(ctypes.c_long, self.__len__())
 
-    def random_corp(self, img, out_size: list[int] | tuple[int, int] | None = None):
+    def random_crop(self, img, out_size: list[int] | tuple[int, int] | None = None):
         h, w = img.shape[:2]
         if out_size is None:
             min_s = min(h, w)
@@ -191,8 +191,8 @@ class DatasetGenerator:
 
         h, w = bg.shape[:2]
         r = min(h / output_size[0], w / output_size[1])
-        corp_size = (int(output_size[0] * r), int(output_size[1] * r))
-        bg = self.random_corp(bg, corp_size)
+        crop_size = (int(output_size[0] * r), int(output_size[1] * r))
+        bg = self.random_crop(bg, crop_size)
         bg = cv2.resize(bg, tuple(output_size[::-1]))
 
         aug = True
@@ -238,7 +238,7 @@ class DatasetGenerator:
                 fg0 = cv2.resize(fg, (new_w, new_h))
                 fg = np.zeros([*s, 4], dtype=np.float32)
                 fg[ph // 2 : ph // 2 + new_h, pw // 2 : pw // 2 + new_w] = fg0
-                fg = self.random_corp(fg, output_size)
+                fg = self.random_crop(fg, output_size)
             else:
                 scale = self.random.uniform(0.2, 0.8)
                 fg = self.process_fg(fg, output_size, scale)
@@ -380,7 +380,7 @@ class DatasetGenerator:
                 image = Image.fromarray((image * 255).astype(np.uint8))
                 image_stream = BytesIO()
                 image.save(
-                    image_stream, "JPEG", quality=self.random.randrange(20, 70), optimice=True
+                    image_stream, "JPEG", quality=self.random.randrange(20, 70), optimize=True
                 )
                 image_stream.seek(0)
                 image = np.asarray(Image.open(image_stream), dtype=np.float32) / 255

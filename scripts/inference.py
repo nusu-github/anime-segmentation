@@ -7,36 +7,36 @@ import torch
 from torch.cuda import amp
 from tqdm import tqdm
 
-from anime_segmentation.train import AnimeSegmentation, net_names
+from anime_segmentation.train import NET_NAMES, AnimeSegmentation
 
 
-def get_mask(model: AnimeSegmentation, input_img, use_amp=True, s=640):
+def get_mask(model: AnimeSegmentation, input_img, use_amp=True, img_size=640):
     input_img = (input_img / 255).astype(np.float32)
-    h, w = h0, w0 = input_img.shape[:-1]
-    h, w = (s, int(s * w / h)) if h > w else (int(s * h / w), s)
-    ph, pw = s - h, s - w
-    img_input = np.zeros([s, s, 3], dtype=np.float32)
+    h, w = orig_h, orig_w = input_img.shape[:-1]
+    h, w = (img_size, int(img_size * w / h)) if h > w else (int(img_size * h / w), img_size)
+    ph, pw = img_size - h, img_size - w
+    img_input = np.zeros([img_size, img_size, 3], dtype=np.float32)
     img_input[ph // 2 : ph // 2 + h, pw // 2 : pw // 2 + w] = cv2.resize(input_img, (w, h))
     img_input = np.transpose(img_input, (2, 0, 1))
     img_input = img_input[np.newaxis, :]
-    tmpImg = torch.from_numpy(img_input).float().to(model.device)
+    tmp_img = torch.from_numpy(img_input).float().to(model.device)
     with torch.no_grad():
         if use_amp:
             with amp.autocast():
-                pred = model(tmpImg)
+                pred = model(tmp_img)
             pred = pred.to(dtype=torch.float32)
         else:
-            pred = model(tmpImg)
+            pred = model(tmp_img)
         pred = pred.cpu().numpy()[0]
         pred = np.transpose(pred, (1, 2, 0))
         pred = pred[ph // 2 : ph // 2 + h, pw // 2 : pw // 2 + w]
-        return cv2.resize(pred, (w0, h0))[:, :, np.newaxis]
+        return cv2.resize(pred, (orig_w, orig_h))[:, :, np.newaxis]
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # model args
-    parser.add_argument("--net", type=str, default="isnet_is", choices=net_names, help="net name")
+    parser.add_argument("--net", type=str, default="isnet_is", choices=NET_NAMES, help="net name")
     parser.add_argument(
         "--ckpt", type=str, default="saved_models/isnetis.ckpt", help="model checkpoint path"
     )
@@ -73,7 +73,7 @@ if __name__ == "__main__":
 
     for i, path in enumerate(tqdm(sorted(Path(opt.data).glob("*.*")))):
         img = cv2.cvtColor(cv2.imread(str(path), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
-        mask = get_mask(model, img, use_amp=not opt.fp32, s=opt.img_size)
+        mask = get_mask(model, img, use_amp=not opt.fp32, img_size=opt.img_size)
         if opt.only_matted and opt.bg_white:
             img = np.concatenate((mask * img + 255 * (1 - mask), mask * 255), axis=2).astype(
                 np.uint8

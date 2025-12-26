@@ -18,15 +18,15 @@ from torchmetrics.classification import BinaryFBetaScore, BinaryPrecision, Binar
 
 from .data_module import AnimeSegDataModule
 from .model import (
-    U2NET,
     InSPyReNet,
     InSPyReNet_Res2Net50,
     InSPyReNet_SwinB,
     ISNetDIS,
     ISNetGTEncoder,
     MODNet,
-    U2NET_full2,
-    U2NET_lite2,
+    U2Net,
+    U2NetFull2,
+    U2NetLite2,
 )
 
 # warnings.filterwarnings("ignore")
@@ -36,9 +36,7 @@ def get_precision(fp32: bool, bf16: bool) -> Literal["32-true", "bf16-mixed", "1
     """Get precision string for Trainer based on flags."""
     if fp32:
         return "32-true"
-    if bf16:
-        return "bf16-mixed"
-    return "16-mixed"
+    return "bf16-mixed" if bf16 else "16-mixed"
 
 
 def get_strategy(devices: int) -> DDPStrategy | str:
@@ -52,7 +50,7 @@ def get_strategy(devices: int) -> DDPStrategy | str:
     return "auto"
 
 
-net_names = [
+NET_NAMES = [
     "isnet_is",
     "isnet",
     "isnet_gt",
@@ -64,22 +62,24 @@ net_names = [
 ]
 
 
-def get_net(net_name: str, img_size) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2NET:
-    if net_name in {"isnet", "isnet_is"}:
-        return ISNetDIS()
-    if net_name == "isnet_gt":
-        return ISNetGTEncoder()
-    if net_name == "u2net":
-        return U2NET_full2()
-    if net_name == "u2netl":
-        return U2NET_lite2()
-    if net_name == "modnet":
-        return MODNet()
-    if net_name == "inspyrnet_res":
-        return InSPyReNet_Res2Net50(base_size=img_size)
-    if net_name == "inspyrnet_swin":
-        return InSPyReNet_SwinB(base_size=img_size)
-    raise NotImplementedError
+def get_net(net_name: str, img_size) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2Net:
+    match net_name:
+        case "isnet" | "isnet_is":
+            return ISNetDIS()
+        case "isnet_gt":
+            return ISNetGTEncoder()
+        case "u2net":
+            return U2NetFull2()
+        case "u2netl":
+            return U2NetLite2()
+        case "modnet":
+            return MODNet()
+        case "inspyrnet_res":
+            return InSPyReNet_Res2Net50(base_size=img_size)
+        case "inspyrnet_swin":
+            return InSPyReNet_SwinB(base_size=img_size)
+        case _:
+            raise NotImplementedError
 
 
 class AnimeSegmentation(
@@ -91,7 +91,7 @@ class AnimeSegmentation(
 ):
     def __init__(self, net_name: str, img_size: int | None = None, lr: float = 1e-3) -> None:
         super().__init__()
-        assert net_name in net_names
+        assert net_name in NET_NAMES
         self.save_hyperparameters()
         self.net = get_net(net_name, img_size)
         if self.hparams["net_name"] == "isnet_is":
@@ -136,41 +136,41 @@ class AnimeSegmentation(
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if isinstance(self.net, ISNetDIS):
-            return self.net(x)[0][0].sigmoid()
-        if isinstance(self.net, ISNetGTEncoder):
-            return self.net(x)[0][0].sigmoid()
-        if isinstance(self.net, U2NET):
-            return self.net(x)[0].sigmoid()
-        if isinstance(self.net, MODNet):
-            return self.net(x, True)[2]
-        if isinstance(self.net, InSPyReNet):
-            return self.net.forward_inference(x)["pred"]
-        raise NotImplementedError
+        match self.net:
+            case ISNetDIS() | ISNetGTEncoder():
+                return self.net(x)[0][0].sigmoid()
+            case U2Net():
+                return self.net(x)[0].sigmoid()
+            case MODNet():
+                return self.net(x, True)[2]
+            case InSPyReNet():
+                return self.net.forward_inference(x)["pred"]
+            case _:
+                raise NotImplementedError
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         images, labels = batch["image"], batch["label"]
-        if isinstance(self.net, ISNetDIS):
-            ds, dfs = self.net(images)
-            loss_args = [ds, dfs, labels]
-            if self.gt_encoder is not None:
-                fs = self.gt_encoder(labels)[1]
-                loss_args.append(fs)
-        elif isinstance(self.net, ISNetGTEncoder):
-            ds = self.net(labels)[0]
-            loss_args = [ds, labels]
-        elif isinstance(self.net, U2NET):
-            ds = self.net(images)
-            loss_args = [ds, labels]
-        elif isinstance(self.net, MODNet):
-            trimaps = batch["trimap"]
-            pred_semantic, pred_detail, pred_matte = self.net(images, False)
-            loss_args = [pred_semantic, pred_detail, pred_matte, images, trimaps, labels]
-        elif isinstance(self.net, InSPyReNet):
-            out = self.net.forward_train(images, labels)
-            loss_args = out
-        else:
-            raise NotImplementedError
+        match self.net:
+            case ISNetDIS():
+                ds, dfs = self.net(images)
+                loss_args = [ds, dfs, labels]
+                if self.gt_encoder is not None:
+                    fs = self.gt_encoder(labels)[1]
+                    loss_args.append(fs)
+            case ISNetGTEncoder():
+                ds = self.net(labels)[0]
+                loss_args = [ds, labels]
+            case U2Net():
+                ds = self.net(images)
+                loss_args = [ds, labels]
+            case MODNet():
+                trimaps = batch["trimap"]
+                pred_semantic, pred_detail, pred_matte = self.net(images, False)
+                loss_args = [pred_semantic, pred_detail, pred_matte, images, trimaps, labels]
+            case InSPyReNet():
+                loss_args = self.net.forward_train(images, labels)
+            case _:
+                raise NotImplementedError
 
         loss0, loss = self.net.compute_loss(loss_args)
         self.log("train/loss", loss, prog_bar=True)
@@ -179,10 +179,11 @@ class AnimeSegmentation(
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
         images, labels = batch["image"], batch["label"]
-        if isinstance(self.net, ISNetGTEncoder):
-            preds = self.forward(labels)
-        else:
-            preds = self.forward(images)
+        match self.net:
+            case ISNetGTEncoder():
+                preds = self.forward(labels)
+            case _:
+                preds = self.forward(images)
 
         # Clean predictions for metric computation
         preds_clean = preds.nan_to_num(nan=0, posinf=1, neginf=0)
@@ -208,7 +209,7 @@ class AnimeSegmentation(
 
 def get_gt_encoder(
     datamodule: AnimeSegDataModule, opt: Namespace
-) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2NET:
+) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2Net:
     """Train ground truth encoder for ISNet with intermediate supervision."""
     print("---start train ground truth encoder---")
     gt_encoder = AnimeSegmentation("isnet_gt")
@@ -314,7 +315,7 @@ if __name__ == "__main__":
         "--net",
         type=str,
         default="isnet_is",
-        choices=net_names,
+        choices=NET_NAMES,
         help="isnet_is: Train ISNet with intermediate feature supervision, "
         "isnet: Train ISNet, "
         "u2net: Train U2Net full, "

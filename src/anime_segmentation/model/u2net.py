@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.types import Tensor
 
-__all__ = ["U2NET", "U2NET_full", "U2NET_full2", "U2NET_lite", "U2NET_lite2"]
+__all__ = ["U2Net", "U2NetFull", "U2NetFull2", "U2NetLite", "U2NetLite2"]
 
 bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
 
@@ -27,7 +27,7 @@ def _size_map(x, height: int):
     return sizes
 
 
-class REBNCONV(nn.Module):
+class RebnConv(nn.Module):
     def __init__(self, in_ch: int = 3, out_ch: int = 3, dilate: int = 1) -> None:
         super().__init__()
 
@@ -69,22 +69,22 @@ class RSU(nn.Module):
         return x + unet(x)
 
     def _make_layers(self, height, in_ch, mid_ch, out_ch, dilated=False) -> None:
-        self.add_module("rebnconvin", REBNCONV(in_ch, out_ch))
+        self.add_module("rebnconvin", RebnConv(in_ch, out_ch))
         self.add_module("downsample", nn.MaxPool2d(2, stride=2, ceil_mode=True))
 
-        self.add_module("rebnconv1", REBNCONV(out_ch, mid_ch))
-        self.add_module("rebnconv1d", REBNCONV(mid_ch * 2, out_ch))
+        self.add_module("rebnconv1", RebnConv(out_ch, mid_ch))
+        self.add_module("rebnconv1d", RebnConv(mid_ch * 2, out_ch))
 
         for i in range(2, height):
             dilate = 2 ** (i - 1) if dilated else 1
-            self.add_module(f"rebnconv{i}", REBNCONV(mid_ch, mid_ch, dilate=dilate))
-            self.add_module(f"rebnconv{i}d", REBNCONV(mid_ch * 2, mid_ch, dilate=dilate))
+            self.add_module(f"rebnconv{i}", RebnConv(mid_ch, mid_ch, dilate=dilate))
+            self.add_module(f"rebnconv{i}d", RebnConv(mid_ch * 2, mid_ch, dilate=dilate))
 
         dilate = 2 ** (height - 1) if dilated else 2
-        self.add_module(f"rebnconv{height}", REBNCONV(mid_ch, mid_ch, dilate=dilate))
+        self.add_module(f"rebnconv{height}", RebnConv(mid_ch, mid_ch, dilate=dilate))
 
 
-class U2NET(nn.Module):
+class U2Net(nn.Module):
     def __init__(self, cfgs, out_ch) -> None:
         super().__init__()
         self.out_ch = out_ch
@@ -154,7 +154,7 @@ class U2NET(nn.Module):
         self.add_module("outconv", nn.Conv2d(int(self.height * self.out_ch), self.out_ch, 1))
 
 
-def U2NET_full() -> U2NET:
+def U2NetFull() -> U2Net:
     full = {
         # cfgs for building RSUs and sides
         # {stage : [name, (height(L), in_ch, mid_ch, out_ch, dilated), side]}
@@ -170,10 +170,10 @@ def U2NET_full() -> U2NET:
         "stage2d": ["De_2", (6, 256, 32, 64), 64],
         "stage1d": ["De_1", (7, 128, 16, 64), 64],
     }
-    return U2NET(cfgs=full, out_ch=1)
+    return U2Net(cfgs=full, out_ch=1)
 
 
-def U2NET_full2() -> U2NET:
+def U2NetFull2() -> U2Net:
     full = {
         # cfgs for building RSUs and sides
         # {stage : [name, (height(L), in_ch, mid_ch, out_ch, dilated), side]}
@@ -189,10 +189,10 @@ def U2NET_full2() -> U2NET:
         "stage2d": ["De_2", (7, 256, 32, 64), 64],
         "stage1d": ["De_1", (8, 128, 16, 64), 64],
     }
-    return U2NET(cfgs=full, out_ch=1)
+    return U2Net(cfgs=full, out_ch=1)
 
 
-def U2NET_lite() -> U2NET:
+def U2NetLite() -> U2Net:
     lite = {
         # cfgs for building RSUs and sides
         # {stage : [name, (height(L), in_ch, mid_ch, out_ch, dilated), side]}
@@ -208,10 +208,10 @@ def U2NET_lite() -> U2NET:
         "stage2d": ["De_2", (6, 128, 16, 64), 64],
         "stage1d": ["De_1", (7, 128, 16, 64), 64],
     }
-    return U2NET(cfgs=lite, out_ch=1)
+    return U2Net(cfgs=lite, out_ch=1)
 
 
-def U2NET_lite2() -> U2NET:
+def U2NetLite2() -> U2Net:
     lite = {
         # cfgs for building RSUs and sides
         # {stage : [name, (height(L), in_ch, mid_ch, out_ch, dilated), side]}
@@ -227,4 +227,4 @@ def U2NET_lite2() -> U2NET:
         "stage2d": ["De_2", (7, 128, 16, 64), 64],
         "stage1d": ["De_1", (8, 128, 16, 64), 64],
     }
-    return U2NET(cfgs=lite, out_ch=1)
+    return U2Net(cfgs=lite, out_ch=1)

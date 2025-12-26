@@ -176,7 +176,7 @@ class SelfAttention(nn.Module):
         return self.gamma * out + x
 
 
-class PAA_d(nn.Module):
+class PaaDecoder(nn.Module):
     def __init__(
         self, in_channel, out_channel: int = 1, depth: int = 64, base_size=None, stage=None
     ) -> None:
@@ -219,7 +219,7 @@ class PAA_d(nn.Module):
         return fx, out
 
 
-class PAA_kernel(nn.Module):
+class PaaKernel(nn.Module):
     def __init__(self, in_channel, out_channel, receptive_size, stage_size=None) -> None:
         super().__init__()
         self.conv0 = Conv2d(in_channel, out_channel, 1)
@@ -244,7 +244,7 @@ class PAA_kernel(nn.Module):
         return self.conv3(Hx + Wx)
 
 
-class PAA_e(nn.Module):
+class PaaEncoder(nn.Module):
     def __init__(self, in_channel, out_channel, base_size=None, stage=None) -> None:
         super().__init__()
         self.relu = nn.ReLU(True)
@@ -254,9 +254,9 @@ class PAA_e(nn.Module):
             self.stage_size = None
 
         self.branch0 = Conv2d(in_channel, out_channel, 1)
-        self.branch1 = PAA_kernel(in_channel, out_channel, 3, self.stage_size)
-        self.branch2 = PAA_kernel(in_channel, out_channel, 5, self.stage_size)
-        self.branch3 = PAA_kernel(in_channel, out_channel, 7, self.stage_size)
+        self.branch1 = PaaKernel(in_channel, out_channel, 3, self.stage_size)
+        self.branch2 = PaaKernel(in_channel, out_channel, 5, self.stage_size)
+        self.branch3 = PaaKernel(in_channel, out_channel, 7, self.stage_size)
 
         self.conv_cat = Conv2d(4 * out_channel, out_channel, 3)
         self.conv_res = Conv2d(in_channel, out_channel, 1)
@@ -271,7 +271,7 @@ class PAA_e(nn.Module):
         return self.relu(x_cat + self.conv_res(x))
 
 
-class SICA(nn.Module):
+class Sica(nn.Module):
     def __init__(
         self,
         in_channel,
@@ -308,7 +308,7 @@ class SICA(nn.Module):
 
         self.threshold = Parameter(torch.tensor([0.5]))
 
-        if self.lmap_in is True:
+        if self.lmap_in:
             self.lthreshold = Parameter(torch.tensor([0.5]))
 
     def forward(self, x, smap, lmap: torch.Tensor | None = None):
@@ -1392,21 +1392,31 @@ class InSPyReNet(nn.Module):
         self.base_size = base_size
         self.threshold = threshold
 
-        self.context1 = PAA_e(self.in_channels[0], self.depth, base_size=self.base_size, stage=0)
-        self.context2 = PAA_e(self.in_channels[1], self.depth, base_size=self.base_size, stage=1)
-        self.context3 = PAA_e(self.in_channels[2], self.depth, base_size=self.base_size, stage=2)
-        self.context4 = PAA_e(self.in_channels[3], self.depth, base_size=self.base_size, stage=3)
-        self.context5 = PAA_e(self.in_channels[4], self.depth, base_size=self.base_size, stage=4)
+        self.context1 = PaaEncoder(
+            self.in_channels[0], self.depth, base_size=self.base_size, stage=0
+        )
+        self.context2 = PaaEncoder(
+            self.in_channels[1], self.depth, base_size=self.base_size, stage=1
+        )
+        self.context3 = PaaEncoder(
+            self.in_channels[2], self.depth, base_size=self.base_size, stage=2
+        )
+        self.context4 = PaaEncoder(
+            self.in_channels[3], self.depth, base_size=self.base_size, stage=3
+        )
+        self.context5 = PaaEncoder(
+            self.in_channels[4], self.depth, base_size=self.base_size, stage=4
+        )
 
-        self.decoder = PAA_d(self.depth * 3, depth=self.depth, base_size=base_size, stage=2)
+        self.decoder = PaaDecoder(self.depth * 3, depth=self.depth, base_size=base_size, stage=2)
 
-        self.attention0 = SICA(
+        self.attention0 = Sica(
             self.depth, depth=self.depth, base_size=self.base_size, stage=0, lmap_in=True
         )
-        self.attention1 = SICA(
+        self.attention1 = Sica(
             self.depth * 2, depth=self.depth, base_size=self.base_size, stage=1, lmap_in=True
         )
-        self.attention2 = SICA(self.depth * 2, depth=self.depth, base_size=self.base_size, stage=2)
+        self.attention2 = Sica(self.depth * 2, depth=self.depth, base_size=self.base_size, stage=2)
 
         self.sod_loss_fn = lambda x, y: weighted_bce_loss_with_logits(
             x, y, reduction="mean"

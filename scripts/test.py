@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm.asyncio import tqdm
 
 from anime_segmentation.data_loader import create_training_datasets
-from anime_segmentation.train import AnimeSegmentation, net_names
+from anime_segmentation.train import NET_NAMES, AnimeSegmentation
 from scripts.inference import get_mask
 
 # warnings.filterwarnings("ignore")
@@ -44,7 +44,7 @@ def main(opt: Namespace):
         image, label = data["image"][0], data["label"][0]
         image = image.permute(1, 2, 0).numpy() * 255
         label = label.permute(1, 2, 0).numpy() * 255
-        mask = get_mask(model, image, use_amp=not opt.fp32, s=opt.img_size)
+        mask = get_mask(model, image, use_amp=not opt.fp32, img_size=opt.img_size)
         image = np.concatenate((image, mask.repeat(3, 2) * 255, label.repeat(3, 2)), axis=1).astype(
             np.uint8
         )
@@ -55,7 +55,7 @@ def main(opt: Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # model args
-    parser.add_argument("--net", type=str, default="isnet_is", choices=net_names, help="net name")
+    parser.add_argument("--net", type=str, default="isnet_is", choices=NET_NAMES, help="net name")
     parser.add_argument(
         "--ckpt", type=str, default="saved_models/isnetis.ckpt", help="resume training from ckpt"
     )
