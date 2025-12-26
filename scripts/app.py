@@ -45,7 +45,7 @@ def rmbg_fn(img, img_size, white_bg_checkbox, only_matted_checkbox):
         mask = mask.repeat(3, axis=2)
         return mask, img
     except Exception as e:
-        raise gr.Error(f"Error processing image: {e!s}")
+        raise gr.Error(f"Error processing image: {e!s}") from e
 
 
 def get_available_devices() -> list[str]:
@@ -83,7 +83,10 @@ def load_model(path: str, net_name: str, img_size: int, device: str = "cuda:0"):
             device = "cpu"
 
         new_model = AnimeSegmentation.try_load(
-            net_name=net_name, img_size=int(img_size), ckpt_path=path, map_location=device
+            net_name=net_name,
+            img_size=img_size,
+            ckpt_path=path,
+            map_location=device,
         )
         new_model.eval()
         new_model.to(device)
@@ -102,8 +105,7 @@ def load_model(path: str, net_name: str, img_size: int, device: str = "cuda:0"):
 
 
 def get_model_path():
-    model_paths = sorted(glob.glob("**/*.ckpt", recursive=True))
-    if model_paths:
+    if model_paths := sorted(glob.glob("**/*.ckpt", recursive=True)):
         return gr.update(choices=model_paths, value=model_paths[0])
 
     raise gr.Error("No model files found")
@@ -136,7 +138,7 @@ def batch_inference(
             cv2.imwrite(f"{output_dir}/{i:06d}.png", processed_img)
 
     except Exception as e:
-        raise gr.Error(f"Processing error: {e!s}")
+        raise gr.Error(f"Processing error: {e!s}") from e
 
     return f"Batch processing completed: {total_images} images processed"
 

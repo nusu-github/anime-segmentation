@@ -122,15 +122,8 @@ class Conv2d(nn.Module):
             in_channels, out_channels, kernel_size, stride, pad_size, dilation, groups, bias=bias
         )
 
-        if bn is True:
-            self.bn = nn.BatchNorm2d(out_channels)
-        else:
-            self.bn = None
-
-        if relu is True:
-            self.relu = nn.ReLU(inplace=True)
-        else:
-            self.relu = None
+        self.bn = nn.BatchNorm2d(out_channels) if bn else None
+        self.relu = nn.ReLU(inplace=True) if relu else None
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.conv(x)
@@ -307,11 +300,7 @@ class SICA(nn.Module):
             Conv2d(in_channel, depth, 1, relu=True), Conv2d(depth, depth, 1, relu=True)
         )
 
-        if self.lmap_in is True:
-            self.ctx = 5
-        else:
-            self.ctx = 3
-
+        self.ctx = 5 if self.lmap_in is True else 3
         self.conv_out1 = Conv2d(depth, depth, 3, relu=True)
         self.conv_out2 = Conv2d(in_channel + depth, depth, 3, relu=True)
         self.conv_out3 = Conv2d(depth, depth, 3, relu=True)
@@ -415,10 +404,7 @@ class Bottle2neck(nn.Module):
         self.conv1 = nn.Conv2d(inplanes, width * scale, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(width * scale)
 
-        if scale == 1:
-            self.nums = 1
-        else:
-            self.nums = scale - 1
+        self.nums = 1 if scale == 1 else scale - 1
         if stype == "stage":
             self.pool = nn.AvgPool2d(kernel_size=3, stride=stride, padding=1)
         convs = []
@@ -543,8 +529,7 @@ class Res2Net(nn.Module):
                 nn.BatchNorm2d(planes * block.expansion),
             )
 
-        layers = []
-        layers.append(
+        layers = [
             block(
                 self.inplanes,
                 planes,
@@ -555,7 +540,7 @@ class Res2Net(nn.Module):
                 baseWidth=self.baseWidth,
                 scale=self.scale,
             )
-        )
+        ]
         self.inplanes = planes * block.expansion
 
         if grid is not None:
@@ -645,7 +630,7 @@ def res2net101_v1b(pretrained: bool = False, **kwargs) -> Res2Net:
 
 def res2net50_v1b_26w_4s(pretrained: bool = False, **kwargs) -> Res2Net:
     model = Res2Net(Bottle2neck, [3, 4, 6, 3], baseWidth=26, scale=4, **kwargs)
-    if pretrained is True:
+    if pretrained:
         model.load_state_dict(
             torch.load("data/backbone_ckpt/res2net50_v1b_26w_4s-3cf99910.pth", map_location="cpu")
         )
@@ -655,7 +640,7 @@ def res2net50_v1b_26w_4s(pretrained: bool = False, **kwargs) -> Res2Net:
 
 def res2net101_v1b_26w_4s(pretrained: bool = True, **kwargs) -> Res2Net:
     model = Res2Net(Bottle2neck, [3, 4, 23, 3], baseWidth=26, scale=4, **kwargs)
-    if pretrained is True:
+    if pretrained:
         model.load_state_dict(
             torch.load("data/backbone_ckpt/res2net101_v1b_26w_4s-0812c246.pth", map_location="cpu")
         )
@@ -813,10 +798,7 @@ class WindowAttention(nn.Module):
             nW = mask.shape[0]
             attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
             attn = attn.view(-1, self.num_heads, N, N)
-            attn = self.softmax(attn)
-        else:
-            attn = self.softmax(attn)
-
+        attn = self.softmax(attn)
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
@@ -1119,10 +1101,7 @@ class PatchEmbed(nn.Module):
         self.embed_dim = embed_dim
 
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        if norm_layer is not None:
-            self.norm = norm_layer(embed_dim)
-        else:
-            self.norm = None
+        self.norm = norm_layer(embed_dim) if norm_layer is not None else None
 
     def forward(self, x):
         """Forward function."""
@@ -1322,7 +1301,7 @@ def SwinT(pretrained: bool = True) -> SwinTransformer:
     model = SwinTransformer(
         embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24], window_size=7
     )
-    if pretrained is True:
+    if pretrained:
         model.load_state_dict(
             torch.load("data/backbone_ckpt/swin_tiny_patch4_window7_224.pth", map_location="cpu")[
                 "model"
@@ -1337,7 +1316,7 @@ def SwinS(pretrained: bool = True) -> SwinTransformer:
     model = SwinTransformer(
         embed_dim=96, depths=[2, 2, 18, 2], num_heads=[3, 6, 12, 24], window_size=7
     )
-    if pretrained is True:
+    if pretrained:
         model.load_state_dict(
             torch.load("data/backbone_ckpt/swin_small_patch4_window7_224.pth", map_location="cpu")[
                 "model"
@@ -1352,7 +1331,7 @@ def SwinB(pretrained: bool = True) -> SwinTransformer:
     model = SwinTransformer(
         embed_dim=128, depths=[2, 2, 18, 2], num_heads=[4, 8, 16, 32], window_size=12
     )
-    if pretrained is True:
+    if pretrained:
         model.load_state_dict(
             torch.load(
                 "data/backbone_ckpt/swin_base_patch4_window12_384_22kto1k.pth", map_location="cpu"
@@ -1367,7 +1346,7 @@ def SwinL(pretrained: bool = True) -> SwinTransformer:
     model = SwinTransformer(
         embed_dim=192, depths=[2, 2, 18, 2], num_heads=[6, 12, 24, 48], window_size=12
     )
-    if pretrained is True:
+    if pretrained:
         model.load_state_dict(
             torch.load(
                 "data/backbone_ckpt/swin_large_patch4_window12_384_22kto1k.pth", map_location="cpu"
@@ -1488,11 +1467,7 @@ class InSPyReNet(nn.Module):
         _, p0 = self.attention0(f1, d1.detach(), p1.detach())  # 2
         d0 = self.image_pyramid.reconstruct(d1.detach(), p0)  # 2
 
-        out = {}
-        out["saliency"] = [d3, d2, d1, d0]
-        out["laplacian"] = [p2, p1, p0]
-
-        return out
+        return {"saliency": [d3, d2, d1, d0], "laplacian": [p2, p1, p0]}
 
     def forward_train(self, x, y):
         _B, _, H, W = x.shape

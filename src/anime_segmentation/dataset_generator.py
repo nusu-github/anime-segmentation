@@ -44,9 +44,7 @@ class DatasetGenerator:
         characters_idx = []
         characters_total = 0
         self.random = random.Random(seed)
-        while True:
-            if characters_total >= len(fg_list):
-                break
+        while not characters_total >= len(fg_list):
             num = self.random.randint(characters_range[0], characters_range[1])
             characters_idx.append(
                 [characters_total + x for x in range(num) if characters_total + x < len(fg_list)]
@@ -370,23 +368,20 @@ class DatasetGenerator:
                 label, rot, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT
             )[:, :, np.newaxis]
 
-        # random quality
-        if aug and self.random.randint(0, 1) == 0:
-            h, w = output_size
-            image = cv2.resize(image, (w // 2, h // 2))
-            image = cv2.resize(
-                image,
-                (w, h),
-                interpolation=self.random.choice([cv2.INTER_LINEAR, cv2.INTER_NEAREST]),
-            )
-        if aug and self.random.randint(0, 1) == 0:
-            image = Image.fromarray((image * 255).astype(np.uint8))
-            image_stream = BytesIO()
-            image.save(image_stream, "JPEG", quality=self.random.randrange(20, 70), optimice=True)
-            image_stream.seek(0)
-            image = np.asarray(Image.open(image_stream), dtype=np.float32) / 255
+            if self.random.randint(0, 1) == 0:
+                h, w = output_size
+                image = cv2.resize(image, (w // 2, h // 2))
+                image = cv2.resize(
+                    image,
+                    (w, h),
+                    interpolation=self.random.choice([cv2.INTER_LINEAR, cv2.INTER_NEAREST]),
+                )
+            if self.random.randint(0, 1) == 0:
+                image = Image.fromarray((image * 255).astype(np.uint8))
+                image_stream = BytesIO()
+                image.save(
+                    image_stream, "JPEG", quality=self.random.randrange(20, 70), optimice=True
+                )
+                image_stream.seek(0)
+                image = np.asarray(Image.open(image_stream), dtype=np.float32) / 255
         return image, label
-
-
-if __name__ == "__main__":
-    pass

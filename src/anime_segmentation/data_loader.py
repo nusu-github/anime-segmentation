@@ -142,7 +142,7 @@ class AnimeSegDataset(Dataset):
         self,
         real_img_list,
         real_mask_list,
-        generator: DatasetGenerator|None = None,
+        generator: DatasetGenerator | None = None,
         transform=None,
         transform_generator=None,
         with_trimap: bool = False,
@@ -198,13 +198,12 @@ class AnimeSegDataset(Dataset):
         ):
             i = self.cache_idx[idx]
             cache = self.shared_cache[i].float() / 255
-            if self.with_trimap:
-                sample = {"image": cache[0:3], "label": cache[3:4], "trimap": cache[4:5]}
-            else:
-                sample = {"image": cache[0:3], "label": cache[3:4]}
             self.cache_use_count[idx] += 1
-            return sample
-
+            return (
+                {"image": cache[:3], "label": cache[3:4], "trimap": cache[4:5]}
+                if self.with_trimap
+                else {"image": cache[:3], "label": cache[3:4]}
+            )
         if idx < len(self.real_img_list):
             image = cv2.cvtColor(
                 cv2.imread(str(self.real_img_list[idx]), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB
@@ -269,13 +268,12 @@ def create_training_datasets(
     fgs_dir = data_root / fgs_dir
     bgs_dir = data_root / bgs_dir
 
-    train_img_list = sorted(imgs_dir.glob("*" + img_ext))
-    train_mask_list = []
-    for img_path in train_img_list:
-        train_mask_list.append(masks_dir / img_path.name.replace(img_ext, mask_ext))
-
-    train_fg_list = sorted(fgs_dir.glob("*" + fg_ext))
-    train_bg_list = sorted(bgs_dir.glob("*" + bg_ext))
+    train_img_list = sorted(imgs_dir.glob(f"*{img_ext}"))
+    train_mask_list = [
+        masks_dir / img_path.name.replace(img_ext, mask_ext) for img_path in train_img_list
+    ]
+    train_fg_list = sorted(fgs_dir.glob(f"*{fg_ext}"))
+    train_bg_list = sorted(bgs_dir.glob(f"*{bg_ext}"))
 
     random.Random(1).shuffle(train_fg_list)
     random.Random(1).shuffle(train_bg_list)
