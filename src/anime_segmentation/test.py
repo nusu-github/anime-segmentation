@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 
 import argparse
 
@@ -8,9 +8,9 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from tqdm.asyncio import tqdm
 
-from data_loader import create_training_datasets
-from train import AnimeSegmentation, net_names
-from inference import get_mask
+from .data_loader import create_training_datasets
+from .train import AnimeSegmentation, net_names
+from .inference import get_mask
 import warnings
 
 
@@ -29,8 +29,8 @@ def main(opt):
     model.eval()
     model.to(device)
 
-    if not os.path.exists(opt.out):
-        os.mkdir(opt.out)
+    out_dir = Path(opt.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     for i, data in enumerate(tqdm(salobj_dataloader)):
         image, label = data["image"][0], data["label"][0]
@@ -39,7 +39,7 @@ def main(opt):
         mask = get_mask(model, image, use_amp=not opt.fp32, s=opt.img_size)
         image = np.concatenate((image, mask.repeat(3, 2) * 255, label.repeat(3, 2)), axis=1).astype(np.uint8)
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(f'{opt.out}/{i:06d}.jpg', image)
+        cv2.imwrite(str(out_dir / f'{i:06d}.jpg'), image)
 
 
 if __name__ == "__main__":

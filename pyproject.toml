@@ -1,0 +1,33 @@
+[project]
+name = "anime-segmentation"
+version = "0.1.0"
+description = "Anime Segmentation Project"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "gradio",
+    "huggingface-hub>=0.22",
+    "kornia",
+    "numpy",
+    "opencv-python",
+    "pillow",
+    "pytorch-lightning",
+    "scipy",
+    "timm",
+    "torch",
+    "torchvision",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/anime_segmentation"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.14.10",
+]
+

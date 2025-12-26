@@ -1,14 +1,13 @@
-import os
+from pathlib import Path
 
 import argparse
 import cv2
 import torch
 import numpy as np
-import glob
 from torch.cuda import amp
 from tqdm import tqdm
 
-from train import AnimeSegmentation, net_names
+from .train import AnimeSegmentation, net_names
 
 
 def get_mask(model, input_img, use_amp=True, s=640):
@@ -67,21 +66,21 @@ if __name__ == "__main__":
     model.eval()
     model.to(device)
 
-    if not os.path.exists(opt.out):
-        os.mkdir(opt.out)
+    out_dir = Path(opt.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    for i, path in enumerate(tqdm(sorted(glob.glob(f"{opt.data}/*.*")))):
-        img = cv2.cvtColor(cv2.imread(path, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+    for i, path in enumerate(tqdm(sorted(list(Path(opt.data).glob("*.*"))))):
+        img = cv2.cvtColor(cv2.imread(str(path), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
         mask = get_mask(model, img, use_amp=not opt.fp32, s=opt.img_size)
         if opt.only_matted and opt.bg_white:
             img = np.concatenate((mask * img + 255 * (1 - mask), mask * 255), axis=2).astype(np.uint8)
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(f'{opt.out}/{i:06d}.png', img)
+            cv2.imwrite(str(out_dir / f'{i:06d}.png'), img)
         elif opt.only_matted:
             img = np.concatenate((mask * img + 1 - mask, mask * 255), axis=2).astype(np.uint8)
             img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGRA)
-            cv2.imwrite(f'{opt.out}/{i:06d}.png', img)
+            cv2.imwrite(str(out_dir / f'{i:06d}.png'), img)
         else:
             img = np.concatenate((img, mask * img, mask.repeat(3, 2) * 255), axis=1).astype(np.uint8)
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(f'{opt.out}/{i:06d}.jpg', img)
+            cv2.imwrite(str(out_dir / f'{i:06d}.jpg'), img)

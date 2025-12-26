@@ -2,7 +2,7 @@ import argparse
 
 import torch
 
-from train import AnimeSegmentation, net_names
+from anime_segmentation.train import AnimeSegmentation, net_names
 
 
 def export_onnx(model, img_size, path):

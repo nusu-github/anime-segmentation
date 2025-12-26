@@ -1,5 +1,5 @@
 import argparse
-import os
+from pathlib import Path
 
 import pytorch_lightning as pl
 import torch
@@ -10,8 +10,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 from huggingface_hub import PyTorchModelHubMixin
 
-from data_loader import create_training_datasets
-from model import ISNetDIS, ISNetGTEncoder, U2NET, U2NET_full2, U2NET_lite2, MODNet \
+from .data_loader import create_training_datasets
+from .model import ISNetDIS, ISNetGTEncoder, U2NET, U2NET_full2, U2NET_lite2, MODNet \
     , InSPyReNet, InSPyReNet_Res2Net50, InSPyReNet_SwinB
 
 
@@ -162,8 +162,7 @@ def get_gt_encoder(train_dataloader, val_dataloader, opt):
 
 
 def main(opt):
-    if not os.path.exists("lightning_logs"):
-        os.mkdir("lightning_logs")
+    Path("lightning_logs").mkdir(exist_ok=True)
 
     train_dataset, val_dataset = create_training_datasets(opt.data_dir, opt.fg_dir, opt.bg_dir, opt.img_dir,
                                                           opt.mask_dir, opt.fg_ext, opt.bg_ext, opt.img_ext,

@@ -6,8 +6,8 @@ import numpy as np
 import cv2
 import os
 
-from inference import get_mask
-from train import AnimeSegmentation, net_names
+from anime_segmentation.inference import get_mask
+from anime_segmentation.train import AnimeSegmentation, net_names
 
 # global model state
 class ModelState:
