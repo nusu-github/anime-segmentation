@@ -74,19 +74,20 @@ if __name__ == "__main__":
     for i, path in enumerate(tqdm(sorted(Path(opt.data).glob("*.*")))):
         img = cv2.cvtColor(cv2.imread(str(path), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
         mask = get_mask(model, img, use_amp=not opt.fp32, img_size=opt.img_size)
-        if opt.only_matted and opt.bg_white:
-            img = np.concatenate((mask * img + 255 * (1 - mask), mask * 255), axis=2).astype(
-                np.uint8
-            )
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(str(out_dir / f"{i:06d}.png"), img)
-        elif opt.only_matted:
-            img = np.concatenate((mask * img + 1 - mask, mask * 255), axis=2).astype(np.uint8)
-            img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGRA)
-            cv2.imwrite(str(out_dir / f"{i:06d}.png"), img)
-        else:
-            img = np.concatenate((img, mask * img, mask.repeat(3, 2) * 255), axis=1).astype(
-                np.uint8
-            )
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(str(out_dir / f"{i:06d}.jpg"), img)
+        match (opt.only_matted, opt.bg_white):
+            case (True, True):
+                img = np.concatenate((mask * img + 255 * (1 - mask), mask * 255), axis=2).astype(
+                    np.uint8
+                )
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(str(out_dir / f"{i:06d}.png"), img)
+            case (True, False):
+                img = np.concatenate((mask * img + 1 - mask, mask * 255), axis=2).astype(np.uint8)
+                img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGRA)
+                cv2.imwrite(str(out_dir / f"{i:06d}.png"), img)
+            case _:
+                img = np.concatenate((img, mask * img, mask.repeat(3, 2) * 255), axis=1).astype(
+                    np.uint8
+                )
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(str(out_dir / f"{i:06d}.jpg"), img)

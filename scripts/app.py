@@ -28,19 +28,20 @@ def rmbg_fn(img, img_size, white_bg_checkbox, only_matted_checkbox):
     try:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mask = get_mask(state.model, img, False, int(img_size))
-        if white_bg_checkbox and only_matted_checkbox:
-            img = np.concatenate((mask * img + 255 * (1 - mask), mask * 255), axis=2).astype(
-                np.uint8
-            )
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        elif only_matted_checkbox:
-            img = np.concatenate((mask * img + 1 - mask, mask * 255), axis=2).astype(np.uint8)
-            img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGRA)
-        else:
-            img = np.concatenate((img, mask * img, mask.repeat(3, 2) * 255), axis=1).astype(
-                np.uint8
-            )
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        match (white_bg_checkbox, only_matted_checkbox):
+            case (True, True):
+                img = np.concatenate((mask * img + 255 * (1 - mask), mask * 255), axis=2).astype(
+                    np.uint8
+                )
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            case (_, True):
+                img = np.concatenate((mask * img + 1 - mask, mask * 255), axis=2).astype(np.uint8)
+                img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGRA)
+            case _:
+                img = np.concatenate((img, mask * img, mask.repeat(3, 2) * 255), axis=1).astype(
+                    np.uint8
+                )
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         mask = mask.repeat(3, axis=2)
         return mask, img
     except Exception as e:

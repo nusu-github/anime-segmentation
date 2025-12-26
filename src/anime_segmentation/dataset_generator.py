@@ -32,6 +32,7 @@ class DatasetGenerator:
         output_size_range_w: tuple[int, int] = (512, 1024),
         characters_range: tuple[int, int] = (0, 3),
         seed: int = 1,
+        *,
         load_all: bool = False,
     ) -> None:
         self.bg_list = bg_list

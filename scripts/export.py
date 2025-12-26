@@ -51,9 +51,10 @@ if __name__ == "__main__":
 
     model = AnimeSegmentation.try_load(opt.net, opt.ckpt, "cpu", img_size=opt.img_size)
     model.eval()
-    if opt.to == "only_state_dict":
-        torch.save(model.state_dict(), opt.out)
-    elif opt.to == "only_net_state_dict":
-        torch.save(model.net.state_dict(), opt.out)
-    elif opt.to == "onnx":
-        export_onnx(model, opt.img_size, opt.out)
+    match opt.to:
+        case "only_state_dict":
+            torch.save(model.state_dict(), opt.out)
+        case "only_net_state_dict":
+            torch.save(model.net.state_dict(), opt.out)
+        case "onnx":
+            export_onnx(model, opt.img_size, opt.out)

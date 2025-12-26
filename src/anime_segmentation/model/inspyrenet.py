@@ -86,34 +86,37 @@ class Conv2d(nn.Module):
         in_channels,
         out_channels,
         kernel_size,
-        stride: int = 1,
-        dilation: int = 1,
+        stride: int | tuple[int, int] = 1,
+        dilation: int | tuple[int, int] = 1,
         groups: int = 1,
-        padding: str = "same",
+        padding: str | tuple[int, int] | int = "same",
         bias: bool = False,
         bn: bool = True,
         relu: bool = False,
     ) -> None:
         super().__init__()
-        if "__iter__" not in dir(kernel_size):
+        if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
-        if "__iter__" not in dir(stride):
+        if isinstance(stride, int):
             stride = (stride, stride)
-        if "__iter__" not in dir(dilation):
+        if isinstance(dilation, int):
             dilation = (dilation, dilation)
 
-        if padding == "same":
-            width_pad_size = kernel_size[0] + (kernel_size[0] - 1) * (dilation[0] - 1)
-            height_pad_size = kernel_size[1] + (kernel_size[1] - 1) * (dilation[1] - 1)
-        elif padding == "valid":
-            width_pad_size = 0
-            height_pad_size = 0
-        elif "__iter__" in dir(padding):
-            width_pad_size = padding[0] * 2
-            height_pad_size = padding[1] * 2
-        else:
-            width_pad_size = padding * 2
-            height_pad_size = padding * 2
+        match padding:
+            case "same":
+                width_pad_size = kernel_size[0] + (kernel_size[0] - 1) * (dilation[0] - 1)
+                height_pad_size = kernel_size[1] + (kernel_size[1] - 1) * (dilation[1] - 1)
+            case "valid":
+                width_pad_size = 0
+                height_pad_size = 0
+            case (pad_w, pad_h):
+                width_pad_size = pad_w * 2
+                height_pad_size = pad_h * 2
+            case int(pad):
+                width_pad_size = pad * 2
+                height_pad_size = pad * 2
+            case _:
+                raise ValueError(f"Invalid padding value: {padding}")
 
         width_pad_size = width_pad_size // 2 + (width_pad_size % 2 - 1)
         height_pad_size = height_pad_size // 2 + (height_pad_size % 2 - 1)
