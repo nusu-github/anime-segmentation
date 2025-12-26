@@ -1,6 +1,5 @@
 import argparse
-import glob
-import os
+from pathlib import Path
 
 import cv2
 import gradio as gr
@@ -61,12 +60,12 @@ def auto_load_model():
         return gr.Info("Model already loaded successfully")
 
     try:
-        model_paths = sorted(glob.glob("**/*.ckpt", recursive=True))
+        model_paths = sorted(Path().rglob("*.ckpt"))
         if not model_paths:
             raise gr.Error("No model files found")
 
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        return load_model(model_paths[0], "isnet_is", 1024, device)
+        return load_model(str(model_paths[0]), "isnet_is", 1024, device)
     except Exception as e:
         return gr.Error(f"Failed to auto-load model: {e!s}")
 
@@ -105,8 +104,9 @@ def load_model(path: str, net_name: str, img_size: int, device: str = "cuda:0"):
 
 
 def get_model_path():
-    if model_paths := sorted(glob.glob("**/*.ckpt", recursive=True)):
-        return gr.update(choices=model_paths, value=model_paths[0])
+    if model_paths := sorted(Path().rglob("*.ckpt")):
+        model_paths = [str(p) for p in model_paths]
+        return gr.Dropdown(choices=model_paths, value=model_paths[0])
 
     raise gr.Error("No model files found")
 
@@ -114,10 +114,13 @@ def get_model_path():
 def batch_inference(
     input_dir, output_dir, img_size, white_bg_checkbox, only_matted_checkbox
 ) -> str:
-    if not os.path.exists(input_dir):
+    input_path = Path(input_dir)
+    output_path = Path(output_dir)
+
+    if not input_path.exists():
         raise gr.Error("Input directory does not exist")
 
-    img_paths = sorted(glob.glob(os.path.join(input_dir, "*.*")))
+    img_paths = sorted(input_path.glob("*.*"))
     if not img_paths:
         raise gr.Error("No image files found")
 
@@ -125,17 +128,17 @@ def batch_inference(
     total_images = len(img_paths)
 
     try:
-        os.makedirs(output_dir, exist_ok=True)
+        output_path.mkdir(parents=True, exist_ok=True)
 
         for i, path in enumerate(progress.tqdm(img_paths, desc="Processing images")):
-            img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
             if img is None:
                 raise gr.Error(f"Failed to read image: {path}")
 
             # no need mask for batch processing
             _, processed_img = rmbg_fn(img, img_size, white_bg_checkbox, only_matted_checkbox)
 
-            cv2.imwrite(f"{output_dir}/{i:06d}.png", processed_img)
+            cv2.imwrite(str(output_path / f"{i:06d}.png"), processed_img)
 
     except Exception as e:
         raise gr.Error(f"Processing error: {e!s}") from e
@@ -152,7 +155,7 @@ if __name__ == "__main__":
     with app:
         app.load(auto_load_model)
 
-        with gr.Accordion(label="Model Settings", open=False):
+        with gr.Accordion("Model Settings", open=False):
             load_model_path_btn = gr.Button("Get Models")
             model_path_input = gr.Dropdown(label="Model Path")
             model_type = gr.Dropdown(label="Model Type", value="isnet_is", choices=net_names)
@@ -173,7 +176,7 @@ if __name__ == "__main__":
             )
 
         with gr.Tabs():
-            with gr.TabItem("Image Inference"):
+            with gr.Tab("Image Inference"):
                 input_img = gr.Image(label="Input Image")
 
                 white_bg_checkbox = gr.Checkbox(label="White Background", value=False)
@@ -191,7 +194,7 @@ if __name__ == "__main__":
                     outputs=[output_mask, output_img],
                 )
 
-            with gr.TabItem("Batch Processing"):
+            with gr.Tab("Batch Processing"):
                 input_dir = gr.Textbox(label="Input Directory")
                 output_dir = gr.Textbox(label="Output Directory")
 

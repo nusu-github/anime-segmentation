@@ -300,7 +300,7 @@ class SICA(nn.Module):
             Conv2d(in_channel, depth, 1, relu=True), Conv2d(depth, depth, 1, relu=True)
         )
 
-        self.ctx = 5 if self.lmap_in is True else 3
+        self.ctx = 5 if self.lmap_in else 3
         self.conv_out1 = Conv2d(depth, depth, 3, relu=True)
         self.conv_out2 = Conv2d(in_channel + depth, depth, 3, relu=True)
         self.conv_out3 = Conv2d(depth, depth, 3, relu=True)

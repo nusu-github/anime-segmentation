@@ -162,7 +162,7 @@ dev = [
 ]
 export = [
     { name = "onnx" },
-    { name = "onnxsim" },
+    { name = "onnxslim" },
 ]
 
 [package.metadata]
@@ -191,7 +191,7 @@ dev = [
 ]
 export = [
     { name = "onnx" },
-    { name = "onnxsim" },
+    { name = "onnxslim" },
 ]
 
 [[package]]
@@ -1254,14 +1254,20 @@ wheels = [
 ]
 
 [[package]]
-name = "onnxsim"
-version = "0.4.36"
+name = "onnxslim"
+version = "0.1.80"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "colorama" },
+    { name = "ml-dtypes" },
     { name = "onnx" },
-    { name = "rich" },
+    { name = "packaging" },
+    { name = "sympy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ce/9e/f34238413ebeda9a3a8802feeaa5013934455466b9ab390b48ad9c7e184f/onnxsim-0.4.36.tar.gz", hash = "sha256:6e0ee9d6d4a83042bdef7319fbe58352d9fda5f253386be2b267c7c27f0638ee", size = 20993703, upload-time = "2024-03-04T08:25:00.086Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5d/a4/3c0d946f0cda16d7acf96908498d3d2e23739f733319e7ab27addf960e85/onnxslim-0.1.80.tar.gz", hash = "sha256:0ff5c51019de3c114721032ebe710aacb4163ef042526de0cfe1a182d496665f", size = 143702, upload-time = "2025-12-15T00:37:00.663Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/87/d0/ac16f8170fdddcd664693ed9e536795a4a577031925d98c7b36762891afe/onnxslim-0.1.80-py3-none-any.whl", hash = "sha256:1c74770858359b252c5f2bd2cbd0d990c98f1dd252c8a5c4ba88760cf9282586", size = 167422, upload-time = "2025-12-15T00:36:59.449Z" },
+]
 
 [[package]]
 name = "opencv-python"

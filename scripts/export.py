@@ -7,7 +7,7 @@ from anime_segmentation.train import AnimeSegmentation, net_names
 
 def export_onnx(model: AnimeSegmentation, img_size, path) -> None:
     import onnx
-    from onnxsim import simplify
+    from onnxslim import slim
 
     torch.onnx.export(
         model,  # model being run
@@ -25,8 +25,7 @@ def export_onnx(model: AnimeSegmentation, img_size, path) -> None:
         verbose=True,
     )
     onnx_model = onnx.load(path)
-    model_simp, check = simplify(onnx_model)
-    assert check, "Simplified ONNX model could not be validated"
+    model_simp = slim(onnx_model)
     onnx.save(model_simp, path)
     print("finished exporting onnx")
 

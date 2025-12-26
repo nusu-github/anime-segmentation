@@ -44,7 +44,7 @@ class DatasetGenerator:
         characters_idx = []
         characters_total = 0
         self.random = random.Random(seed)
-        while not characters_total >= len(fg_list):
+        while characters_total < len(fg_list):
             num = self.random.randint(characters_range[0], characters_range[1])
             characters_idx.append(
                 [characters_total + x for x in range(num) if characters_total + x < len(fg_list)]

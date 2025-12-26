@@ -50,7 +50,7 @@ dev = [
 ]
 
 app = ["gradio>6.0,<=7.0"]
-export = ["onnx", "onnxsim"]
+export = ["onnx", "onnxslim"]
 
 [tool.ruff]
 line-length = 100
@@ -75,6 +75,7 @@ ignore = [
     "PLR2004",
     "EM",
     "S311",
+    "PLR0913",
 ]
 
 [tool.pyright]
