@@ -8,11 +8,11 @@ from pathlib import Path
 import lightning as L
 import torch
 from torch import Tensor
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 
-from .datasets import CombinedDataset, RealImageDataset, SyntheticDataset
+from .datasets import RealImageDataset, SyntheticDataset
 from .transforms import (
     JPEGCompression,
     RandomColor,
@@ -78,8 +78,8 @@ class AnimeSegDataModule(L.LightningDataModule):
         super().__init__()
         self.save_hyperparameters()
 
-        self.train_dataset: CombinedDataset | None = None
-        self.val_dataset: CombinedDataset | None = None
+        self.train_dataset: ConcatDataset | None = None
+        self.val_dataset: ConcatDataset | None = None
         self._with_trimap_transform: WithTrimap | None = WithTrimap() if with_trimap else None
 
     def prepare_data(self) -> None:
@@ -166,14 +166,14 @@ class AnimeSegDataModule(L.LightningDataModule):
         train_synthetic = SyntheticDataset(
             train_fg, train_bg, (img_size, img_size), transform=synthetic_transform
         )
-        self.train_dataset = CombinedDataset([train_real, train_synthetic])
+        self.train_dataset = ConcatDataset([train_real, train_synthetic])
 
         # Create val datasets
         val_real = RealImageDataset(val_img, val_mask, transform=val_transform)
         val_synthetic = SyntheticDataset(
             val_fg, val_bg, (img_size, img_size), transform=val_transform
         )
-        self.val_dataset = CombinedDataset([val_real, val_synthetic])
+        self.val_dataset = ConcatDataset([val_real, val_synthetic])
 
     def _build_real_transform(self, img_size: int) -> v2.Compose:
         """Build transform pipeline for real images."""

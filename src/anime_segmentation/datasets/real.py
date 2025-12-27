@@ -2,12 +2,12 @@
 
 from pathlib import Path
 
-import cv2
-import numpy as np
 import torch
 from torch.utils.data import Dataset
 from torchvision import tv_tensors
+from torchvision.io import ImageReadMode, decode_image
 from torchvision.transforms import v2
+from torchvision.transforms.v2.functional import to_dtype
 
 
 class RealImageDataset(Dataset):
@@ -46,35 +46,28 @@ class RealImageDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx: int) -> tuple[tv_tensors.Image, tv_tensors.Mask]:
-        # Load image (BGR -> RGB)
-        image = cv2.imread(str(self.image_paths[idx]), cv2.IMREAD_COLOR)
-        if image is None:
-            msg = f"Failed to load image: {self.image_paths[idx]}"
-            raise FileNotFoundError(msg)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # Load image (RGB, CHW, uint8)
+        image = decode_image(str(self.image_paths[idx]), mode=ImageReadMode.RGB)
 
-        # Load mask (grayscale)
-        mask = cv2.imread(str(self.mask_paths[idx]), cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            msg = f"Failed to load mask: {self.mask_paths[idx]}"
-            raise FileNotFoundError(msg)
+        # Load mask (grayscale, 1HW, uint8)
+        mask = decode_image(str(self.mask_paths[idx]), mode=ImageReadMode.GRAY)
 
-        # Normalize to [0, 1]
-        image = image.astype(np.float32) / 255
-        mask = mask.astype(np.float32) / 255
+        # Normalize to [0, 1] float32
+        image = to_dtype(image, torch.float32, scale=True)
+        mask = to_dtype(mask, torch.float32, scale=True)
 
         # Binarize mask
-        mask = (mask > self.mask_threshold).astype(np.float32)
+        mask = (mask > self.mask_threshold).float()
 
         # Crop edges (handles dataset artifacts)
         if self.edge_crop > 0:
             c = self.edge_crop
-            image = image[c:-c, c:-c]
-            mask = mask[c:-c, c:-c]
+            image = image[:, c:-c, c:-c]
+            mask = mask[:, c:-c, c:-c]
 
-        # Convert to tv_tensors (HWC -> CHW)
-        image_tensor = tv_tensors.Image(torch.from_numpy(image).permute(2, 0, 1))
-        mask_tensor = tv_tensors.Mask(torch.from_numpy(mask).unsqueeze(0))
+        # Wrap in tv_tensors
+        image_tensor = tv_tensors.Image(image)
+        mask_tensor = tv_tensors.Mask(mask)
 
         if self.transform:
             image_tensor, mask_tensor = self.transform(image_tensor, mask_tensor)

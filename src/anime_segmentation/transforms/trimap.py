@@ -1,8 +1,7 @@
 """Trimap generation transform for MODNet."""
 
 import torch
-from scipy.ndimage import grey_dilation, grey_erosion
-from torchvision import tv_tensors
+from kornia.morphology import dilation, erosion
 from torchvision.transforms import v2
 
 
@@ -40,20 +39,30 @@ class WithTrimap(v2.Transform):
         rest = inputs[2:] if len(inputs) > 2 else ()
 
         # Generate trimap from mask
-        if isinstance(mask, tv_tensors.Mask):
-            mask_np = mask[0].numpy()
-        else:
-            mask_np = mask[0].numpy() if mask.dim() == 3 else mask.numpy()
+        mask_tensor = mask.float()
 
-        h, w = mask_np.shape
+        # Ensure (B, C, H, W) format for kornia
+        if mask_tensor.dim() == 2:
+            mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)
+        elif mask_tensor.dim() == 3:
+            mask_tensor = mask_tensor.unsqueeze(0)
+
+        _, _, h, w = mask_tensor.shape
         s = int((h + w) * self.boundary_ratio)
         s = max(s, 1)  # Ensure minimum size
 
-        trimap = mask_np.copy()
-        dilated = grey_dilation(trimap, size=(s, s))
-        eroded = grey_erosion(trimap, size=(s, s))
-        trimap[(dilated - eroded) > 0.5] = 0.5  # type: ignore[operator]
+        # Create kernel for morphological operations
+        kernel = torch.ones(s, s, device=mask_tensor.device)
 
-        trimap_tensor = torch.from_numpy(trimap).unsqueeze(0).float()
+        dilated = dilation(mask_tensor, kernel)
+        eroded = erosion(mask_tensor, kernel)
 
-        return (image, mask, trimap_tensor, *rest)
+        # Create trimap: 0.5 for uncertain boundary region
+        trimap = mask_tensor.clone()
+        boundary = (dilated - eroded) > 0.5
+        trimap[boundary] = 0.5
+
+        # Return as (1, H, W) tensor
+        trimap = trimap.squeeze(0)
+
+        return (image, mask, trimap, *rest)

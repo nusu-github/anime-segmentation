@@ -4,7 +4,6 @@
 
 import math
 import random
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -250,36 +249,58 @@ class RandomColorBlocks(v2.Transform):
             return inpt
 
         h, w = params["output_size"]
-        img_np = _to_numpy_hwc(inpt.float())
 
-        # Create overlay with alpha channel
-        temp_img = np.zeros((h, w, 4), dtype=np.float32)
+        # Create overlay (RGB) and alpha mask using pure tensor operations
+        overlay = torch.zeros(3, h, w, dtype=torch.float32, device=inpt.device)
+        alpha_mask = torch.zeros(1, h, w, dtype=torch.float32, device=inpt.device)
 
-        for block in params["blocks"]:
-            color = block["color"]
-            if block["type"] == "rect":
-                cv2.rectangle(
-                    temp_img,
-                    (block["x"], block["y"]),
-                    (block["x"] + block["w"], block["y"] + block["h"]),
-                    color,
-                    cv2.FILLED,
-                )
-            else:
-                cv2.circle(temp_img, (block["x"], block["y"]), block["r"], color, cv2.FILLED)
-
-        # Apply rotation
-        angle = params["rotation_angle"]
-        trans_mat = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1)
-        temp_img = cv2.warpAffine(
-            temp_img, trans_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT
+        # Create coordinate grids for circle drawing
+        yy, xx = torch.meshgrid(
+            torch.arange(h, device=inpt.device),
+            torch.arange(w, device=inpt.device),
+            indexing="ij",
         )
 
-        # Alpha blend
-        overlay, mask = temp_img[:, :, :3], temp_img[:, :, 3:]
-        result = mask * overlay + (1 - mask) * img_np
+        for block in params["blocks"]:
+            r, g, b, a = block["color"]
+            color = torch.tensor([r, g, b], dtype=torch.float32, device=inpt.device)
 
-        return _to_tensor_chw(result.astype(np.float32), inpt)
+            if block["type"] == "rect":
+                x, y, bw, bh = block["x"], block["y"], block["w"], block["h"]
+                overlay[:, y : y + bh, x : x + bw] = color[:, None, None]
+                alpha_mask[:, y : y + bh, x : x + bw] = a
+            else:
+                # Circle: use distance from center
+                cx, cy, radius = block["x"], block["y"], block["r"]
+                dist_sq = (xx - cx) ** 2 + (yy - cy) ** 2
+                circle_mask = dist_sq <= radius**2
+                overlay[:, circle_mask] = color[:, None]
+                alpha_mask[:, circle_mask] = a
+
+        # Stack overlay and alpha for rotation (4 channels)
+        temp_img = torch.cat([overlay, alpha_mask], dim=0)  # 4xHxW
+
+        # Apply rotation using torchvision affine
+        angle = params["rotation_angle"]
+        temp_img = F.affine(
+            temp_img,
+            angle=angle,
+            translate=[0, 0],
+            scale=1.0,
+            shear=[0, 0],
+            interpolation=v2.InterpolationMode.BILINEAR,
+            fill=[0.0],
+            center=[w / 2, h / 2],
+        )
+
+        # Split back to overlay and alpha
+        overlay, alpha_mask = temp_img[:3], temp_img[3:]
+
+        # Alpha blend: result = alpha * overlay + (1 - alpha) * image
+        img_float = inpt.float()
+        result = alpha_mask * overlay + (1 - alpha_mask) * img_float
+
+        return tv_tensors.wrap(result, like=inpt)  # type: ignore[call-arg]
 
 
 class RandomTextOverlay(v2.Transform):
@@ -544,6 +565,8 @@ class ResizeBlur(v2.Transform):
 class JPEGCompression(v2.Transform):
     """Simulate JPEG compression artifacts.
 
+    Uses torchvision's native JPEG codec for efficient tensor-based compression.
+
     Args:
         p: Probability of applying the transform. Default is 0.5.
         quality_range: Range for JPEG quality (lower = more artifacts). Default is (20, 70).
@@ -569,19 +592,15 @@ class JPEGCompression(v2.Transform):
         if not isinstance(inpt, tv_tensors.Image):
             return inpt
 
-        # Convert to PIL
-        img_np = _to_numpy_hwc(inpt.float())
-        pil_img = Image.fromarray((img_np * 255).astype(np.uint8))
+        # Convert to uint8 for JPEG codec (expects 0-255)
+        img_uint8 = (inpt.float() * 255).to(torch.uint8)
 
-        # Compress via JPEG
-        buffer = BytesIO()
-        pil_img.save(buffer, "JPEG", quality=params["quality"], optimize=True)
-        buffer.seek(0)
+        # Apply JPEG compression using torchvision
+        compressed = F.jpeg(img_uint8, quality=params["quality"])
 
-        # Reload
-        result = np.asarray(Image.open(buffer)).astype(np.float32) / 255
-
-        return _to_tensor_chw(result, inpt)
+        # Convert back to float and wrap as tv_tensor
+        result = compressed.float() / 255
+        return tv_tensors.wrap(result, like=inpt)  # type: ignore[call-arg]
 
 
 # Note: RandomRotation180 has been replaced by torchvision.transforms.v2.RandomRotation
