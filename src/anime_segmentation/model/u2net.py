@@ -1,5 +1,8 @@
 # Codes are borrowed from
 # https://github.com/xuebinqin/U-2-Net/blob/master/model/u2net_refactor.py
+# Refactored for TorchScript compatibility
+
+from __future__ import annotations
 
 import math
 
@@ -12,126 +15,203 @@ __all__ = ["U2Net", "U2NetFull", "U2NetFull2", "U2NetLite", "U2NetLite2"]
 bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
 
 
-def _upsample_like(x, size) -> Tensor:
+def _upsample_like(x: Tensor, size: tuple[int, int]) -> Tensor:
     return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
 
 
-def _size_map(x, height: int):
-    # {height: size} for Upsample
-    size = list(x.shape[-2:])
-    sizes = {}
-    for h in range(1, height):
-        sizes[h] = size
-        size = [math.ceil(w / 2) for w in size]
+def _compute_sizes(h: int, w: int, height: int) -> list[tuple[int, int]]:
+    """Compute sizes for each height level. Index 0 is unused placeholder."""
+    sizes: list[tuple[int, int]] = [(0, 0)]  # placeholder for index 0
+    curr_h, curr_w = h, w
+    for _ in range(1, height):
+        sizes.append((curr_h, curr_w))
+        curr_h = math.ceil(curr_h / 2)
+        curr_w = math.ceil(curr_w / 2)
     return sizes
 
 
 class RebnConv(nn.Module):
     def __init__(self, in_ch: int = 3, out_ch: int = 3, dilate: int = 1) -> None:
         super().__init__()
-
         self.conv_s1 = nn.Conv2d(in_ch, out_ch, 3, padding=1 * dilate, dilation=1 * dilate)
         self.bn_s1 = nn.BatchNorm2d(out_ch)
         self.relu_s1 = nn.ReLU(inplace=True)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         return self.relu_s1(self.bn_s1(self.conv_s1(x)))
 
 
 class RSU(nn.Module):
-    rebnconvin: RebnConv
-    downsample: nn.MaxPool2d
+    """RSU block with TorchScript-compatible forward pass."""
 
-    def __init__(self, name, height, in_ch, mid_ch, out_ch, *, dilated: bool = False) -> None:
+    def __init__(
+        self, name: str, height: int, in_ch: int, mid_ch: int, out_ch: int, dilated: bool = False
+    ) -> None:
         super().__init__()
         self.name = name
         self.height = height
         self.dilated = dilated
-        self._make_layers(height, in_ch, mid_ch, out_ch, dilated=dilated)
 
-    def forward(self, x):
-        sizes = _size_map(x, self.height)
-        x = self.rebnconvin(x)
+        # Input conv
+        self.rebnconvin = RebnConv(in_ch, out_ch)
+        self.downsample = nn.MaxPool2d(2, stride=2, ceil_mode=True)
 
-        # U-Net like symmetric encoder-decoder structure
-        def unet(x, height=1):
-            if height < self.height:
-                x1 = getattr(self, f"rebnconv{height}")(x)
-                if not self.dilated and height < self.height - 1:
-                    x2 = unet(self.downsample(x1), height + 1)
-                else:
-                    x2 = unet(x1, height + 1)
-
-                x = getattr(self, f"rebnconv{height}d")(torch.cat((x2, x1), 1))
-                return (
-                    _upsample_like(x, sizes[height - 1]) if not self.dilated and height > 1 else x
-                )
-            return getattr(self, f"rebnconv{height}")(x)
-
-        return x + unet(x)
-
-    def _make_layers(self, height, in_ch, mid_ch, out_ch, *, dilated=False) -> None:
-        self.add_module("rebnconvin", RebnConv(in_ch, out_ch))
-        self.add_module("downsample", nn.MaxPool2d(2, stride=2, ceil_mode=True))
-
-        self.add_module("rebnconv1", RebnConv(out_ch, mid_ch))
-        self.add_module("rebnconv1d", RebnConv(mid_ch * 2, out_ch))
+        # Encoder layers (indices 0 to height-1)
+        self.enc_convs = nn.ModuleList()
+        self.enc_convs.append(RebnConv(out_ch, mid_ch))  # height=1
 
         for i in range(2, height):
             dilate = 2 ** (i - 1) if dilated else 1
-            self.add_module(f"rebnconv{i}", RebnConv(mid_ch, mid_ch, dilate=dilate))
-            self.add_module(f"rebnconv{i}d", RebnConv(mid_ch * 2, mid_ch, dilate=dilate))
+            self.enc_convs.append(RebnConv(mid_ch, mid_ch, dilate=dilate))
 
+        # Bottom conv
         dilate = 2 ** (height - 1) if dilated else 2
-        self.add_module(f"rebnconv{height}", RebnConv(mid_ch, mid_ch, dilate=dilate))
+        self.enc_convs.append(RebnConv(mid_ch, mid_ch, dilate=dilate))
+
+        # Decoder layers - stored in reverse order (height-1 to 1) for forward iteration
+        # dec_convs[0] corresponds to height-1, dec_convs[-1] corresponds to height=1
+        self.dec_convs = nn.ModuleList()
+        for i in range(height - 1, 1, -1):  # height-1, height-2, ..., 2
+            dilate = 2 ** (i - 1) if dilated else 1
+            self.dec_convs.append(RebnConv(mid_ch * 2, mid_ch, dilate=dilate))
+        self.dec_convs.append(RebnConv(mid_ch * 2, out_ch))  # height=1
+
+    def forward(self, x: Tensor) -> Tensor:
+        _, _, h, w = x.shape
+        sizes = _compute_sizes(h, w, self.height)
+
+        hx = self.rebnconvin(x)
+        residual = hx
+
+        # Encoder: collect features at each level
+        features: list[Tensor] = []
+        num_enc = self.height - 1
+        for i, conv in enumerate(self.enc_convs):
+            if i < num_enc:
+                hx = conv(hx)
+                features.append(hx)
+                if not self.dilated and i < num_enc - 1:
+                    hx = self.downsample(hx)
+            else:
+                # Bottom conv
+                hx = conv(hx)
+
+        # Decoder: fuse features from bottom to top
+        # dec_convs[i] corresponds to level (height-1-i) in the original structure
+        # features[j] corresponds to level (j+1) in the original structure
+        # We need to match dec_convs[i] with features[height-2-i]
+        num_features = len(features)
+        for i, conv in enumerate(self.dec_convs):
+            feat_idx = num_features - 1 - i  # Start from last feature, go backwards
+            hx = torch.cat([hx, features[feat_idx]], dim=1)
+            hx = conv(hx)
+            # Upsample if not dilated and not at the final output level
+            if not self.dilated and i < num_features - 1:
+                hx = _upsample_like(hx, sizes[feat_idx])
+
+        return hx + residual
 
 
 class U2Net(nn.Module):
-    downsample: nn.MaxPool2d
-    outconv: nn.Conv2d
+    """U2Net with TorchScript-compatible forward pass."""
 
-    def __init__(self, cfgs, out_ch) -> None:
+    def __init__(
+        self,
+        enc_cfgs: list[tuple[int, int, int, int] | tuple[int, int, int, int, bool]],
+        dec_cfgs: list[tuple[int, int, int, int] | tuple[int, int, int, int, bool]],
+        side_channels: list[int],
+        out_ch: int = 1,
+    ) -> None:
         super().__init__()
         self.out_ch = out_ch
-        self._make_layers(cfgs)
+        self.num_stages = len(enc_cfgs)
 
-    def forward(self, x):
-        sizes = _size_map(x, self.height)
-        maps = []  # storage for maps
+        self.downsample = nn.MaxPool2d(2, stride=2, ceil_mode=True)
 
-        # side saliency map
-        def unet(x, height=1):
-            if height < 6:
-                x1 = getattr(self, f"stage{height}")(x)
-                x2 = unet(self.downsample(x1), height + 1)
-                x = getattr(self, f"stage{height}d")(torch.cat((x2, x1), 1))
-                side(x, height)
-                return _upsample_like(x, sizes[height - 1]) if height > 1 else x
-            x = getattr(self, f"stage{height}")(x)
-            side(x, height)
-            return _upsample_like(x, sizes[height - 1])
+        # Encoder stages
+        self.enc_stages = nn.ModuleList()
+        for i, cfg in enumerate(enc_cfgs):
+            height, in_ch, mid_ch, out_ch_stage = cfg[:4]
+            dilated = cfg[4] if len(cfg) > 4 else False
+            self.enc_stages.append(RSU(f"En_{i + 1}", height, in_ch, mid_ch, out_ch_stage, dilated))
 
-        def side(x, h) -> None:
-            # side output saliency map (before sigmoid)
-            x = getattr(self, f"side{h}")(x)
-            x = _upsample_like(x, sizes[1])
-            maps.append(x)
+        # Decoder stages
+        self.dec_stages = nn.ModuleList()
+        for i, cfg in enumerate(dec_cfgs):
+            height, in_ch, mid_ch, out_ch_stage = cfg[:4]
+            dilated = cfg[4] if len(cfg) > 4 else False
+            self.dec_stages.append(
+                RSU(f"De_{self.num_stages - i}", height, in_ch, mid_ch, out_ch_stage, dilated)
+            )
 
-        def fuse():
-            # fuse saliency probability maps
-            maps.reverse()
-            x = torch.cat(maps, 1)
-            x = self.outconv(x)
-            maps.insert(0, x)
-            # return [torch.sigmoid(x) for x in maps]
-            return list(maps)
+        # Side output convolutions - split into bottom and decoder sides
+        # First one is for the bottom encoder stage, rest are for decoder stages
+        self.side_bottom = nn.Conv2d(side_channels[0], out_ch, 3, padding=1)
+        self.side_dec = nn.ModuleList()
+        for ch in side_channels[1:]:
+            self.side_dec.append(nn.Conv2d(ch, out_ch, 3, padding=1))
 
-        unet(x)
-        maps = fuse()
-        return maps
+        # Fuse layer
+        self.outconv = nn.Conv2d(len(side_channels) * out_ch, out_ch, 1)
+
+    def forward(self, x: Tensor) -> list[Tensor]:
+        _, _, h, w = x.shape
+        original_size = (h, w)
+
+        # Compute sizes for each level
+        sizes: list[tuple[int, int]] = [original_size]
+        curr_h, curr_w = h, w
+        for _ in range(self.num_stages - 1):
+            curr_h = math.ceil(curr_h / 2)
+            curr_w = math.ceil(curr_w / 2)
+            sizes.append((curr_h, curr_w))
+
+        # Encoder pass
+        enc_features: list[Tensor] = []
+        hx = x
+        num_enc = len(self.enc_stages)
+        for i, stage in enumerate(self.enc_stages):
+            hx = stage(hx)
+            enc_features.append(hx)
+            if i < num_enc - 1:
+                hx = self.downsample(hx)
+
+        # Decoder pass with side outputs
+        side_outputs: list[Tensor] = []
+
+        # Bottom stage side output
+        bottom_feat = enc_features[-1]
+        hx = bottom_feat
+        side_out = self.side_bottom(bottom_feat)
+        side_out = _upsample_like(side_out, original_size)
+        side_outputs.append(side_out)
+
+        # Process decoder stages with their side outputs
+        num_features = len(enc_features)
+        for i, (stage, side_conv) in enumerate(zip(self.dec_stages, self.side_dec, strict=True)):
+            # enc_idx goes from num_stages-2 down to 0
+            enc_idx = num_features - 2 - i
+            hx = _upsample_like(hx, sizes[enc_idx])
+            hx = torch.cat([hx, enc_features[enc_idx]], dim=1)
+            hx = stage(hx)
+
+            # Side output
+            side_out = side_conv(hx)
+            side_out = _upsample_like(side_out, original_size)
+            side_outputs.append(side_out)
+
+        # Fuse all side outputs
+        side_outputs.reverse()  # Now ordered from stage1d to stage6
+        fused = torch.cat(side_outputs, dim=1)
+        d0 = self.outconv(fused)
+
+        # Return [d0, d1, d2, d3, d4, d5, d6]
+        return [d0, *side_outputs]
 
     @staticmethod
-    def compute_loss(args):
+    def compute_loss(
+        args: tuple[list[Tensor], Tensor],
+    ) -> tuple[Tensor, Tensor]:
         preds, labels_v = args
         d0, d1, d2, d3, d4, d5, d6 = preds
         loss0 = bce_loss(d0, labels_v)
@@ -146,90 +226,85 @@ class U2Net(nn.Module):
 
         return loss0, loss
 
-    def _make_layers(self, cfgs) -> None:
-        self.height = int((len(cfgs) + 1) / 2)
-        self.add_module("downsample", nn.MaxPool2d(2, stride=2, ceil_mode=True))
-        for k, v in cfgs.items():
-            # build rsu block
-            self.add_module(k, RSU(v[0], *v[1]))
-            if v[2] > 0:
-                # build side layer
-                self.add_module(f"side{v[0][-1]}", nn.Conv2d(v[2], self.out_ch, 3, padding=1))
-        # build fuse layer
-        self.add_module("outconv", nn.Conv2d(int(self.height * self.out_ch), self.out_ch, 1))
-
 
 def U2NetFull() -> U2Net:
-    full = {
-        # cfgs for building RSUs and sides
-        # {stage : [name, (height(L), in_ch, mid_ch, out_ch, dilated), side]}
-        "stage1": ["En_1", (7, 3, 32, 64), -1],
-        "stage2": ["En_2", (6, 64, 32, 128), -1],
-        "stage3": ["En_3", (5, 128, 64, 256), -1],
-        "stage4": ["En_4", (4, 256, 128, 512), -1],
-        "stage5": ["En_5", (4, 512, 256, 512, True), -1],
-        "stage6": ["En_6", (4, 512, 256, 512, True), 512],
-        "stage5d": ["De_5", (4, 1024, 256, 512, True), 512],
-        "stage4d": ["De_4", (4, 1024, 128, 256), 256],
-        "stage3d": ["De_3", (5, 512, 64, 128), 128],
-        "stage2d": ["De_2", (6, 256, 32, 64), 64],
-        "stage1d": ["De_1", (7, 128, 16, 64), 64],
-    }
-    return U2Net(cfgs=full, out_ch=1)
+    # Encoder configs: (height, in_ch, mid_ch, out_ch, [dilated])
+    enc_cfgs: list[tuple[int, int, int, int] | tuple[int, int, int, int, bool]] = [
+        (7, 3, 32, 64),
+        (6, 64, 32, 128),
+        (5, 128, 64, 256),
+        (4, 256, 128, 512),
+        (4, 512, 256, 512, True),
+        (4, 512, 256, 512, True),
+    ]
+    # Decoder configs: (height, in_ch, mid_ch, out_ch, [dilated])
+    dec_cfgs: list[tuple[int, int, int, int] | tuple[int, int, int, int, bool]] = [
+        (4, 1024, 256, 512, True),
+        (4, 1024, 128, 256),
+        (5, 512, 64, 128),
+        (6, 256, 32, 64),
+        (7, 128, 16, 64),
+    ]
+    # Side channels: stage6, stage5d, stage4d, stage3d, stage2d, stage1d
+    side_channels = [512, 512, 256, 128, 64, 64]
+    return U2Net(enc_cfgs, dec_cfgs, side_channels, out_ch=1)
 
 
 def U2NetFull2() -> U2Net:
-    full = {
-        # cfgs for building RSUs and sides
-        # {stage : [name, (height(L), in_ch, mid_ch, out_ch, dilated), side]}
-        "stage1": ["En_1", (8, 3, 32, 64), -1],
-        "stage2": ["En_2", (7, 64, 32, 128), -1],
-        "stage3": ["En_3", (6, 128, 64, 256), -1],
-        "stage4": ["En_4", (5, 256, 128, 512), -1],
-        "stage5": ["En_5", (5, 512, 256, 512, True), -1],
-        "stage6": ["En_6", (5, 512, 256, 512, True), 512],
-        "stage5d": ["De_5", (5, 1024, 256, 512, True), 512],
-        "stage4d": ["De_4", (5, 1024, 128, 256), 256],
-        "stage3d": ["De_3", (6, 512, 64, 128), 128],
-        "stage2d": ["De_2", (7, 256, 32, 64), 64],
-        "stage1d": ["De_1", (8, 128, 16, 64), 64],
-    }
-    return U2Net(cfgs=full, out_ch=1)
+    enc_cfgs: list[tuple[int, int, int, int] | tuple[int, int, int, int, bool]] = [
+        (8, 3, 32, 64),
+        (7, 64, 32, 128),
+        (6, 128, 64, 256),
+        (5, 256, 128, 512),
+        (5, 512, 256, 512, True),
+        (5, 512, 256, 512, True),
+    ]
+    dec_cfgs: list[tuple[int, int, int, int] | tuple[int, int, int, int, bool]] = [
+        (5, 1024, 256, 512, True),
+        (5, 1024, 128, 256),
+        (6, 512, 64, 128),
+        (7, 256, 32, 64),
+        (8, 128, 16, 64),
+    ]
+    side_channels = [512, 512, 256, 128, 64, 64]
+    return U2Net(enc_cfgs, dec_cfgs, side_channels, out_ch=1)
 
 
 def U2NetLite() -> U2Net:
-    lite = {
-        # cfgs for building RSUs and sides
-        # {stage : [name, (height(L), in_ch, mid_ch, out_ch, dilated), side]}
-        "stage1": ["En_1", (7, 3, 16, 64), -1],
-        "stage2": ["En_2", (6, 64, 16, 64), -1],
-        "stage3": ["En_3", (5, 64, 16, 64), -1],
-        "stage4": ["En_4", (4, 64, 16, 64), -1],
-        "stage5": ["En_5", (4, 64, 16, 64, True), -1],
-        "stage6": ["En_6", (4, 64, 16, 64, True), 64],
-        "stage5d": ["De_5", (4, 128, 16, 64, True), 64],
-        "stage4d": ["De_4", (4, 128, 16, 64), 64],
-        "stage3d": ["De_3", (5, 128, 16, 64), 64],
-        "stage2d": ["De_2", (6, 128, 16, 64), 64],
-        "stage1d": ["De_1", (7, 128, 16, 64), 64],
-    }
-    return U2Net(cfgs=lite, out_ch=1)
+    enc_cfgs: list[tuple[int, int, int, int] | tuple[int, int, int, int, bool]] = [
+        (7, 3, 16, 64),
+        (6, 64, 16, 64),
+        (5, 64, 16, 64),
+        (4, 64, 16, 64),
+        (4, 64, 16, 64, True),
+        (4, 64, 16, 64, True),
+    ]
+    dec_cfgs: list[tuple[int, int, int, int] | tuple[int, int, int, int, bool]] = [
+        (4, 128, 16, 64, True),
+        (4, 128, 16, 64),
+        (5, 128, 16, 64),
+        (6, 128, 16, 64),
+        (7, 128, 16, 64),
+    ]
+    side_channels = [64, 64, 64, 64, 64, 64]
+    return U2Net(enc_cfgs, dec_cfgs, side_channels, out_ch=1)
 
 
 def U2NetLite2() -> U2Net:
-    lite = {
-        # cfgs for building RSUs and sides
-        # {stage : [name, (height(L), in_ch, mid_ch, out_ch, dilated), side]}
-        "stage1": ["En_1", (8, 3, 16, 64), -1],
-        "stage2": ["En_2", (7, 64, 16, 64), -1],
-        "stage3": ["En_3", (6, 64, 16, 64), -1],
-        "stage4": ["En_4", (5, 64, 16, 64), -1],
-        "stage5": ["En_5", (5, 64, 16, 64, True), -1],
-        "stage6": ["En_6", (5, 64, 16, 64, True), 64],
-        "stage5d": ["De_5", (5, 128, 16, 64, True), 64],
-        "stage4d": ["De_4", (5, 128, 16, 64), 64],
-        "stage3d": ["De_3", (6, 128, 16, 64), 64],
-        "stage2d": ["De_2", (7, 128, 16, 64), 64],
-        "stage1d": ["De_1", (8, 128, 16, 64), 64],
-    }
-    return U2Net(cfgs=lite, out_ch=1)
+    enc_cfgs: list[tuple[int, int, int, int] | tuple[int, int, int, int, bool]] = [
+        (8, 3, 16, 64),
+        (7, 64, 16, 64),
+        (6, 64, 16, 64),
+        (5, 64, 16, 64),
+        (5, 64, 16, 64, True),
+        (5, 64, 16, 64, True),
+    ]
+    dec_cfgs: list[tuple[int, int, int, int] | tuple[int, int, int, int, bool]] = [
+        (5, 128, 16, 64, True),
+        (5, 128, 16, 64),
+        (6, 128, 16, 64),
+        (7, 128, 16, 64),
+        (8, 128, 16, 64),
+    ]
+    side_channels = [64, 64, 64, 64, 64, 64]
+    return U2Net(enc_cfgs, dec_cfgs, side_channels, out_ch=1)
