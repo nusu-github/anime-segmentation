@@ -101,6 +101,8 @@ class SharpBackground(v2.Transform):
 
         # Optionally draw edge
         if params["draw_edge"]:
+            # Ensure array is contiguous for OpenCV
+            result = np.ascontiguousarray(result)
             result = cv2.drawContours(
                 result, counts, 0, params["edge_color"], params["edge_thickness"]
             )
