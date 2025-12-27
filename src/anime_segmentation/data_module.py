@@ -1,18 +1,26 @@
-"""LightningDataModule for anime segmentation training."""
+"""LightningDataModule for anime segmentation training with HuggingFace Datasets."""
 
 # ruff: noqa: ARG002
 
-import random
 from pathlib import Path
+from typing import Any, cast
 
 import lightning as L
 import torch
+from datasets import Dataset, DatasetDict
 from torch import Tensor
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import DataLoader
+from torch.utils.data import Dataset as TorchDataset
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 
-from .datasets import RealImageDataset, SyntheticDataset
+from .hf_dataset import (
+    RealImageTransform,
+    SyntheticCompositor,
+    create_synthetic_index_dataset,
+    get_image_paths_from_column,
+    load_anime_seg_dataset,
+)
 from .transforms import (
     JPEGCompression,
     RandomColor,
@@ -27,22 +35,22 @@ from .transforms import (
 )
 
 
-def segmentation_collate_fn(batch: list[tuple]) -> dict[str, Tensor]:
-    """Collate tv_tensor tuples to dict format for backward compatibility.
+def segmentation_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Tensor]:
+    """Collate HF Datasets dicts to tensor dict format.
 
     Args:
-        batch: List of (image, mask) or (image, mask, trimap) tuples.
+        batch: List of dicts with 'image' and 'mask' tensors.
 
     Returns:
-        Dict with keys "image", "label", and optionally "trimap".
+        Dict with batched 'image', 'label', and optionally 'trimap' tensors.
     """
-    images = torch.stack([b[0] for b in batch])
-    labels = torch.stack([b[1] for b in batch])
+    images = torch.stack([b["image"] for b in batch])
+    labels = torch.stack([b["mask"] for b in batch])
 
     result: dict[str, Tensor] = {"image": images, "label": labels}
 
-    if len(batch[0]) >= 3:
-        trimaps = torch.stack([b[2] for b in batch])
+    if "trimap" in batch[0]:
+        trimaps = torch.stack([b["trimap"] for b in batch])
         result["trimap"] = trimaps
 
     return result
@@ -51,13 +59,14 @@ def segmentation_collate_fn(batch: list[tuple]) -> dict[str, Tensor]:
 class AnimeSegDataModule(L.LightningDataModule):
     """LightningDataModule for anime segmentation training.
 
-    Uses torchvision.transforms.v2 and tv_tensors for modern data pipeline.
-    Supports both real image datasets and synthetic fg/bg compositing.
+    Supports loading from local directories or HuggingFace Hub.
+    Uses HuggingFace Datasets for efficient data loading and streaming.
     """
 
     def __init__(
         self,
-        data_dir: str = "../../dataset/anime-seg",
+        data_dir: str | None = None,
+        dataset_name: str | None = None,
         fg_dir: str = "fg",
         bg_dir: str = "bg",
         img_dir: str = "imgs",
@@ -72,19 +81,59 @@ class AnimeSegDataModule(L.LightningDataModule):
         batch_size_val: int = 2,
         num_workers_train: int = 4,
         num_workers_val: int = 4,
+        characters_range: tuple[int, int] = (0, 3),
         *,
         with_trimap: bool = False,
+        streaming: bool = False,
     ) -> None:
+        """Initialize the data module.
+
+        Args:
+            data_dir: Local data directory path.
+            dataset_name: HuggingFace Hub dataset name (e.g., 'user/anime-seg').
+            fg_dir: Foreground subdirectory name.
+            bg_dir: Background subdirectory name.
+            img_dir: Image subdirectory name.
+            mask_dir: Mask subdirectory name.
+            fg_ext: Foreground file extension.
+            bg_ext: Background file extension.
+            img_ext: Image file extension.
+            mask_ext: Mask file extension.
+            data_split: Train/validation split ratio.
+            img_size: Target image size.
+            batch_size_train: Training batch size.
+            batch_size_val: Validation batch size.
+            num_workers_train: Number of training data loader workers.
+            num_workers_val: Number of validation data loader workers.
+            characters_range: Range for number of characters per synthetic sample.
+            with_trimap: Whether to generate trimap for MODNet.
+            streaming: Whether to use streaming mode (Hub only).
+        """
         super().__init__()
         self.save_hyperparameters()
 
-        self.train_dataset: ConcatDataset | None = None
-        self.val_dataset: ConcatDataset | None = None
+        self.train_dataset: _InterleavedDataset | None = None
+        self.val_dataset: _InterleavedDataset | None = None
         self._with_trimap_transform: WithTrimap | None = WithTrimap() if with_trimap else None
+
+        # Store image paths for synthetic compositing (lazy loading)
+        self._train_fg_paths: list[str] | None = None
+        self._train_bg_paths: list[str] | None = None
+        self._val_fg_paths: list[str] | None = None
+        self._val_bg_paths: list[str] | None = None
 
     def prepare_data(self) -> None:
         """Verify data directories exist. Called only on rank 0 in distributed training."""
-        data_root = Path(self.hparams["data_dir"])
+        if self.hparams["dataset_name"] is not None:
+            # Hub dataset - no local verification needed
+            return
+
+        data_dir = self.hparams["data_dir"]
+        if data_dir is None:
+            msg = "Either data_dir or dataset_name must be provided"
+            raise ValueError(msg)
+
+        data_root = Path(data_dir)
         required_dirs = [
             data_root / self.hparams["img_dir"],
             data_root / self.hparams["mask_dir"],
@@ -104,76 +153,159 @@ class AnimeSegDataModule(L.LightningDataModule):
             self._create_datasets()
 
     def _create_datasets(self) -> None:
-        """Create train and validation datasets."""
-        data_root = Path(self.hparams["data_dir"])
+        """Create train and validation datasets using HuggingFace Datasets."""
         img_size = self.hparams["img_size"]
-        split_rate = self.hparams["data_split"]
+        split_ratio = self.hparams["data_split"]
+        streaming = self.hparams["streaming"]
 
-        # Collect file paths
-        imgs_dir = data_root / self.hparams["img_dir"]
-        masks_dir = data_root / self.hparams["mask_dir"]
-        fgs_dir = data_root / self.hparams["fg_dir"]
-        bgs_dir = data_root / self.hparams["bg_dir"]
+        # Load datasets
+        datasets = load_anime_seg_dataset(
+            data_dir=self.hparams["data_dir"],
+            dataset_name=self.hparams["dataset_name"],
+            fg_dir=self.hparams["fg_dir"],
+            bg_dir=self.hparams["bg_dir"],
+            img_dir=self.hparams["img_dir"],
+            mask_dir=self.hparams["mask_dir"],
+            fg_ext=self.hparams["fg_ext"],
+            bg_ext=self.hparams["bg_ext"],
+            img_ext=self.hparams["img_ext"],
+            mask_ext=self.hparams["mask_ext"],
+            split_ratio=split_ratio,
+            streaming=streaming,
+        )
 
-        img_list = sorted(imgs_dir.glob(f"*{self.hparams['img_ext']}"))
-        mask_list = [
-            masks_dir / p.name.replace(self.hparams["img_ext"], self.hparams["mask_ext"])
-            for p in img_list
-        ]
-        fg_list = sorted(fgs_dir.glob(f"*{self.hparams['fg_ext']}"))
-        bg_list = sorted(bgs_dir.glob(f"*{self.hparams['bg_ext']}"))
+        # Cast to DatasetDict (streaming mode not fully supported yet)
+        real_ds = cast("DatasetDict", datasets["real"])
+        fg_ds = cast("DatasetDict", datasets["foreground"])
+        bg_ds = cast("DatasetDict", datasets["background"])
 
-        # Shuffle with fixed seed for reproducibility
-        rng = random.Random(1)
-        rng.shuffle(fg_list)
-        rng.shuffle(bg_list)
-
-        # Shuffle image/mask pairs together
-        paired = list(zip(img_list, mask_list, strict=True))
-        rng.shuffle(paired)
-        img_list, mask_list = zip(*paired, strict=True) if paired else ([], [])
-        img_list, mask_list = list(img_list), list(mask_list)
-
-        # Split into train/val
-        def split_list(lst: list, rate: float) -> tuple[list, list]:
-            n = int(len(lst) * rate)
-            return lst[:n], lst[n:]
-
-        train_fg, val_fg = split_list(fg_list, split_rate)
-        train_bg, val_bg = split_list(bg_list, split_rate)
-        train_img, val_img = split_list(img_list, split_rate)
-        train_mask, val_mask = split_list(mask_list, split_rate)
+        # Get splits as Dataset
+        train_real_raw = cast("Dataset", real_ds["train"])
+        val_real_raw = cast("Dataset", real_ds["validation"])
+        train_fg_raw = cast("Dataset", fg_ds["train"])
+        val_fg_raw = cast("Dataset", fg_ds["validation"])
+        train_bg_raw = cast("Dataset", bg_ds["train"])
+        val_bg_raw = cast("Dataset", bg_ds["validation"])
 
         # Log dataset sizes
         print("---")
-        print(f"train fgs: {len(train_fg)}")
-        print(f"train bgs: {len(train_bg)}")
-        print(f"train imgs: {len(train_img)}")
-        print(f"train masks: {len(train_mask)}")
-        print(f"val fgs: {len(val_fg)}")
-        print(f"val bgs: {len(val_bg)}")
-        print(f"val imgs: {len(val_img)}")
-        print(f"val masks: {len(val_mask)}")
+        print(f"train real images: {len(train_real_raw)}")
+        print(f"train foregrounds: {len(train_fg_raw)}")
+        print(f"train backgrounds: {len(train_bg_raw)}")
+        print(f"val real images: {len(val_real_raw)}")
+        print(f"val foregrounds: {len(val_fg_raw)}")
+        print(f"val backgrounds: {len(val_bg_raw)}")
         print("---")
+
+        # Get FG/BG image paths for lazy loading (avoid OOM)
+        self._train_fg_paths = get_image_paths_from_column(train_fg_raw, "image")
+        self._train_bg_paths = get_image_paths_from_column(train_bg_raw, "image")
+        self._val_fg_paths = get_image_paths_from_column(val_fg_raw, "image")
+        self._val_bg_paths = get_image_paths_from_column(val_bg_raw, "image")
+
+        # Create synthetic index datasets
+        train_synthetic_idx = create_synthetic_index_dataset(
+            num_foregrounds=len(self._train_fg_paths),
+            characters_range=self.hparams["characters_range"],
+            seed=42,
+        )
+        val_synthetic_idx = create_synthetic_index_dataset(
+            num_foregrounds=len(self._val_fg_paths),
+            characters_range=self.hparams["characters_range"],
+            seed=43,
+        )
 
         # Build transforms
         real_transform = self._build_real_transform(img_size)
         synthetic_transform = self._build_synthetic_transform(img_size)
         val_transform = self._build_val_transform(img_size)
 
-        # Create train datasets
-        train_real = RealImageDataset(train_img, train_mask, transform=real_transform)
-        train_synthetic = SyntheticDataset(
-            train_fg, train_bg, (img_size, img_size), transform=synthetic_transform
+        # Create train real dataset with transform
+        train_real_raw.set_transform(
+            self._make_real_transform_fn(RealImageTransform(), real_transform)
         )
-        self.train_dataset = ConcatDataset([train_real, train_synthetic])
 
-        # Create val datasets
-        val_real = RealImageDataset(val_img, val_mask, transform=val_transform)
-        val_synthetic = SyntheticDataset(
-            val_fg, val_bg, (img_size, img_size), transform=val_transform
+        # Create train synthetic dataset with compositor
+        train_compositor = SyntheticCompositor(
+            foreground_paths=self._train_fg_paths,
+            background_paths=self._train_bg_paths,
+            output_size=(img_size, img_size),
         )
-        self.val_dataset = ConcatDataset([val_real, val_synthetic])
+        train_synthetic_idx.set_transform(
+            self._make_synthetic_transform_fn(train_compositor, synthetic_transform)
+        )
+
+        # Create val real dataset
+        val_real_raw.set_transform(
+            self._make_real_transform_fn(RealImageTransform(), val_transform)
+        )
+
+        # Create val synthetic dataset
+        val_compositor = SyntheticCompositor(
+            foreground_paths=self._val_fg_paths,
+            background_paths=self._val_bg_paths,
+            output_size=(img_size, img_size),
+            seed=43,
+        )
+        val_synthetic_idx.set_transform(
+            self._make_synthetic_transform_fn(val_compositor, val_transform)
+        )
+
+        # Combine datasets
+        # Note: We use interleaved approach instead of concatenate
+        # to avoid issues with set_transform
+        self.train_dataset = _InterleavedDataset([train_real_raw, train_synthetic_idx])
+        self.val_dataset = _InterleavedDataset([val_real_raw, val_synthetic_idx])
+
+    def _make_real_transform_fn(
+        self,
+        base_transform: RealImageTransform,
+        augmentation: v2.Compose,
+    ):
+        """Create transform function for real images."""
+
+        def transform_fn(examples: dict) -> dict:
+            # Apply base transform (PIL -> tensor)
+            result = base_transform(examples)
+
+            # Apply augmentation
+            augmented_images = []
+            augmented_masks = []
+            for img, mask in zip(result["image"], result["mask"], strict=True):
+                img_tv = tv_tensors.Image(img)
+                mask_tv = tv_tensors.Mask(mask)
+                img_aug, mask_aug = augmentation(img_tv, mask_tv)
+                augmented_images.append(img_aug)
+                augmented_masks.append(mask_aug)
+
+            return {"image": augmented_images, "mask": augmented_masks}
+
+        return transform_fn
+
+    def _make_synthetic_transform_fn(
+        self,
+        compositor: SyntheticCompositor,
+        augmentation: v2.Compose,
+    ):
+        """Create transform function for synthetic images."""
+
+        def transform_fn(examples: dict) -> dict:
+            # Apply compositor
+            result = compositor(examples)
+
+            # Apply augmentation
+            augmented_images = []
+            augmented_masks = []
+            for img, mask in zip(result["image"], result["mask"], strict=True):
+                img_tv = tv_tensors.Image(img)
+                mask_tv = tv_tensors.Mask(mask)
+                img_aug, mask_aug = augmentation(img_tv, mask_tv)
+                augmented_images.append(img_aug)
+                augmented_masks.append(mask_aug)
+
+            return {"image": augmented_images, "mask": augmented_masks}
+
+        return transform_fn
 
     def _build_real_transform(self, img_size: int) -> v2.Compose:
         """Build transform pipeline for real images."""
@@ -221,12 +353,19 @@ class AnimeSegDataModule(L.LightningDataModule):
 
     def _apply_trimap_if_needed(
         self,
-        batch: list[tuple[tv_tensors.Image, tv_tensors.Mask]],
-    ) -> list[tuple]:
+        batch: list[dict[str, Tensor]],
+    ) -> list[dict[str, Tensor]]:
         """Apply trimap transform if enabled."""
         if self._with_trimap_transform is None:
-            return batch  # type: ignore[return-value]
-        return [self._with_trimap_transform(item) for item in batch]
+            return batch
+
+        result = []
+        for item in batch:
+            img_tv = tv_tensors.Image(item["image"])
+            mask_tv = tv_tensors.Mask(item["mask"])
+            img, mask, trimap = self._with_trimap_transform((img_tv, mask_tv))
+            result.append({"image": img, "mask": mask, "trimap": trimap})
+        return result
 
     def train_dataloader(self) -> DataLoader:
         if self.train_dataset is None:
@@ -277,3 +416,29 @@ class AnimeSegDataModule(L.LightningDataModule):
     def load_state_dict(self, state_dict: dict) -> None:
         """Restore DataModule state from checkpoint."""
         # Dataset is recreated on setup(), no state to restore
+
+
+class _InterleavedDataset(TorchDataset):
+    """Simple interleaved dataset that combines multiple HF datasets.
+
+    This avoids issues with set_transform and concatenate_datasets.
+    Inherits from torch.utils.data.Dataset for DataLoader compatibility.
+    """
+
+    def __init__(self, datasets: list[Dataset]) -> None:
+        super().__init__()
+        self.datasets = datasets
+        self._lengths = [len(ds) for ds in datasets]
+        self._total_length = sum(self._lengths)
+
+    def __len__(self) -> int:
+        return self._total_length
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        # Find which dataset this index belongs to
+        for i, length in enumerate(self._lengths):
+            if idx < length:
+                return self.datasets[i][idx]  # type: ignore[return-value]
+            idx -= length
+        msg = "Index out of range"
+        raise IndexError(msg)

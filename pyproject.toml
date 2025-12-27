@@ -5,17 +5,18 @@ description = "Anime Segmentation Project"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "datasets>=4.4.2",
     "huggingface-hub>=0.22",
     "kornia",
+    "lightning",
     "numpy",
     "opencv-python",
     "pillow",
-    "lightning",
     "scipy",
     "timm",
     "torch>=2.9.1",
-    "torchvision>=0.24.1",
     "torchmetrics>=1.8.2",
+    "torchvision>=0.24.1",
 ]
 
 [build-system]
