@@ -1,17 +1,13 @@
-import argparse
 import math
 from argparse import Namespace
-from pathlib import Path
-from typing import Literal
+from typing import Any
 
 import lightning.pytorch as pl
 import torch
 from huggingface_hub import ModelCard, PyTorchModelHubMixin
 from lightning import Trainer
-from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
+from lightning.pytorch.cli import ArgsType, LightningCLI, OptimizerCallable
 from lightning.pytorch.strategies import DDPStrategy
-from torch import optim
 from torch.optim import Optimizer
 from torchmetrics import MeanAbsoluteError, MetricCollection
 from torchmetrics.classification import BinaryFBetaScore, BinaryPrecision, BinaryRecall
@@ -29,27 +25,6 @@ from .model import (
     U2NetLite2,
 )
 
-# warnings.filterwarnings("ignore")
-
-
-def get_precision(fp32: bool, bf16: bool) -> Literal["32-true", "bf16-mixed", "16-mixed"]:
-    """Get precision string for Trainer based on flags."""
-    if fp32:
-        return "32-true"
-    return "bf16-mixed" if bf16 else "16-mixed"
-
-
-def get_strategy(devices: int) -> DDPStrategy | str:
-    """Get optimized training strategy based on device count."""
-    if devices > 1:
-        return DDPStrategy(
-            find_unused_parameters=False,
-            static_graph=True,
-            gradient_as_bucket_view=True,
-        )
-    return "auto"
-
-
 NET_NAMES = [
     "isnet_is",
     "isnet",
@@ -62,7 +37,9 @@ NET_NAMES = [
 ]
 
 
-def get_net(net_name: str, img_size) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2Net:
+def get_net(
+    net_name: str, img_size: int | tuple[int, int] | None
+) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2Net:
     match net_name:
         case "isnet" | "isnet_is":
             return ISNetDIS()
@@ -91,7 +68,13 @@ class AnimeSegmentation(
     license="apache-2.0",
     tags=["image-segmentation", "anime", "background-removal", "matting"],
 ):
-    def __init__(self, net_name: str, img_size: int | None = None, lr: float = 1e-3) -> None:
+    def __init__(
+        self,
+        net_name: str,
+        img_size: int | None = None,
+        lr: float = 1e-3,
+        optimizer: OptimizerCallable = torch.optim.Adam,
+    ) -> None:
         super().__init__()
         assert net_name in NET_NAMES
         self.save_hyperparameters()
@@ -101,6 +84,8 @@ class AnimeSegmentation(
             self.gt_encoder.requires_grad_(requires_grad=False)
         else:
             self.gt_encoder = None
+
+        self.optimizer_factory = optimizer
 
         # Validation metrics
         # Original f1_torch used beta^2=0.3, so beta=sqrt(0.3)
@@ -129,13 +114,12 @@ class AnimeSegmentation(
         return model
 
     def configure_optimizers(self) -> Optimizer:
-        return optim.Adam(
-            self.net.parameters(),
-            lr=self.hparams["lr"],
-            betas=(0.9, 0.999),
-            eps=1e-08,
-            weight_decay=0,
-        )
+        # If optimizer is passed as class path in CLI, it becomes a partial/callable
+        # We invoke it with parameters. `lr` is passed if not already fixed in the callable.
+        # But usually we want to respect the `lr` argument of __init__ if provided.
+        # If the callable already has 'lr' bound (from config), this might override or duplicate.
+        # Typically, config `init_args` are bound. We pass `lr` as override or addition.
+        return self.optimizer_factory(self.parameters(), lr=self.hparams["lr"])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         match self.net:
@@ -254,191 +238,93 @@ Trained using the [anime-segmentation](https://github.com/SkyTNT/anime-segmentat
 
 
 def get_gt_encoder(
-    datamodule: AnimeSegDataModule, opt: Namespace
-) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2Net:
+    datamodule: AnimeSegDataModule, trainer_config: dict[str, Any], gt_epoch: int
+) -> torch.nn.Module:
     """Train ground truth encoder for ISNet with intermediate supervision."""
     print("---start train ground truth encoder---")
     gt_encoder = AnimeSegmentation("isnet_gt")
+
+    # Extract relevant trainer args from config
+    # We use a simple DDP or auto strategy for this aux task to avoid complex config issues
+    devices = trainer_config.get("devices", 1)
+    strategy = "auto"
+    if isinstance(devices, int) and devices > 1:
+        strategy = DDPStrategy(
+            find_unused_parameters=False,
+            static_graph=True,
+            gradient_as_bucket_view=True,
+        )
+
     trainer = Trainer(
-        precision=get_precision(opt.fp32, opt.bf16),
-        accelerator=opt.accelerator,
-        devices=opt.devices,
-        max_epochs=opt.gt_epoch,
-        benchmark=opt.benchmark,
-        accumulate_grad_batches=opt.acc_step,
-        check_val_every_n_epoch=opt.val_epoch,
-        log_every_n_steps=opt.log_step,
-        strategy=get_strategy(opt.devices),
+        precision=trainer_config.get("precision", "16-mixed"),
+        accelerator=trainer_config.get("accelerator", "auto"),
+        devices=devices,
+        max_epochs=gt_epoch,
+        benchmark=trainer_config.get("benchmark", True),
+        accumulate_grad_batches=trainer_config.get("accumulate_grad_batches", 1),
+        check_val_every_n_epoch=trainer_config.get("check_val_every_n_epoch", 1),
+        log_every_n_steps=trainer_config.get("log_every_n_steps", 50),
+        strategy=strategy,
+        enable_checkpointing=False,  # Don't save checkpoints for this aux task
+        logger=False,  # Don't log this aux task to main logger to avoid confusion
     )
     trainer.fit(gt_encoder, datamodule=datamodule)
     return gt_encoder.net
 
 
-def main(opt: Namespace) -> None:
-    Path("lightning_logs").mkdir(exist_ok=True)
-    Path("checkpoints").mkdir(exist_ok=True)
+class AnimeSegmentationCLI(LightningCLI):
+    def add_arguments_to_parser(self, parser):
+        parser.add_argument(
+            "--gt_epoch",
+            type=int,
+            default=4,
+            help="Epochs for training ground truth encoder (isnet_is only)",
+        )
 
-    # Create DataModule
-    datamodule = AnimeSegDataModule(
-        data_dir=opt.data_dir,
-        fg_dir=opt.fg_dir,
-        bg_dir=opt.bg_dir,
-        img_dir=opt.img_dir,
-        mask_dir=opt.mask_dir,
-        fg_ext=opt.fg_ext,
-        bg_ext=opt.bg_ext,
-        img_ext=opt.img_ext,
-        mask_ext=opt.mask_ext,
-        data_split=opt.data_split,
-        img_size=opt.img_size,
-        batch_size_train=opt.batch_size_train,
-        batch_size_val=opt.batch_size_val,
-        num_workers_train=opt.workers_train,
-        num_workers_val=opt.workers_val,
-        with_trimap=opt.net == "modnet",
+    def before_fit(self):
+        # Handle isnet_is pretraining
+        # We need to access the parsed config. In before_fit, self.config is available.
+        # It is a Namespace or Dict depending on setup. LightningCLI usually provides Namespace.
+        config = self.config["fit"]
+        model_config = config.get("model", {})
+        trainer_config = config.get("trainer", {})
+
+        net_name = model_config.get("net_name")
+        ckpt_path = config.get("ckpt_path")
+
+        # Check if we need to train GT encoder
+        if net_name == "isnet_is" and not ckpt_path:
+            # We assume self.model and self.datamodule are already instantiated by CLI
+            # but we need to pass the datamodule to the aux trainer.
+            # self.datamodule might be None if datamodule_class wasn't used or something else.
+            # But we passed it to CLI, so it should be in self.datamodule.
+            if self.datamodule is None:
+                raise RuntimeError("DataModule is not instantiated. Cannot train GT encoder.")
+
+            assert self.model.gt_encoder is not None
+
+            # Extract GT epochs from config (added in add_arguments_to_parser)
+            gt_epoch = config.get("gt_epoch", 4)
+
+            # We need to convert Namespace to dict if needed, or get attributes
+            # trainer_config might be a Namespace or Dict.
+            if isinstance(trainer_config, Namespace):
+                t_cfg = vars(trainer_config)
+            else:
+                t_cfg = trainer_config
+
+            trained_net = get_gt_encoder(self.datamodule, t_cfg, gt_epoch)
+            self.model.gt_encoder.load_state_dict(trained_net.state_dict())
+
+
+def cli_main(args: ArgsType = None):
+    AnimeSegmentationCLI(
+        model_class=AnimeSegmentation,
+        datamodule_class=AnimeSegDataModule,
+        save_config_kwargs={"overwrite": True},
+        args=args,
     )
-
-    print("---define model---")
-    if opt.pretrained_ckpt == "":
-        anime_seg = AnimeSegmentation(opt.net, opt.img_size, lr=opt.lr)
-    else:
-        anime_seg = AnimeSegmentation.try_load(opt.net, opt.pretrained_ckpt, "cpu", opt.img_size)
-        anime_seg.hparams["lr"] = opt.lr
-
-    if not opt.pretrained_ckpt and not opt.resume_ckpt and opt.net == "isnet_is":
-        assert anime_seg.gt_encoder is not None
-        anime_seg.gt_encoder.load_state_dict(get_gt_encoder(datamodule, opt).state_dict())
-
-    # Configure loggers
-    tb_logger = TensorBoardLogger(save_dir="lightning_logs", name="anime_seg")
-    csv_logger = CSVLogger(save_dir="lightning_logs", name="anime_seg")
-
-    # Configure callbacks
-    callbacks = [
-        ModelCheckpoint(
-            dirpath="checkpoints/",
-            monitor="val/f1",
-            mode="max",
-            save_top_k=3,
-            save_last=True,
-            auto_insert_metric_name=False,
-            filename="epoch={epoch:02d}-f1={val/f1:.4f}",
-            verbose=True,
-        ),
-        EarlyStopping(
-            monitor="val/f1",
-            mode="max",
-            patience=5,
-            min_delta=0.001,
-            verbose=True,
-        ),
-        LearningRateMonitor(logging_interval="epoch"),
-    ]
-
-    print("---start train---")
-    trainer = Trainer(
-        precision=get_precision(opt.fp32, opt.bf16),
-        accelerator=opt.accelerator,
-        devices=opt.devices,
-        max_epochs=opt.epoch,
-        benchmark=opt.benchmark,
-        accumulate_grad_batches=opt.acc_step,
-        check_val_every_n_epoch=opt.val_epoch,
-        log_every_n_steps=opt.log_step,
-        strategy=get_strategy(opt.devices),
-        callbacks=callbacks,
-        logger=[tb_logger, csv_logger],
-    )
-    trainer.fit(anime_seg, datamodule=datamodule, ckpt_path=opt.resume_ckpt or None)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    # model args
-    parser.add_argument(
-        "--net",
-        type=str,
-        default="isnet_is",
-        choices=NET_NAMES,
-        help="isnet_is: Train ISNet with intermediate feature supervision, "
-        "isnet: Train ISNet, "
-        "u2net: Train U2Net full, "
-        "u2netl: Train U2Net lite, "
-        "modnet: Train MODNet"
-        "inspyrnet_res: Train InSPyReNet_Res2Net50"
-        "inspyrnet_swin: Train InSPyReNet_SwinB",
-    )
-    parser.add_argument("--pretrained-ckpt", type=str, default="", help="load form pretrained ckpt")
-    parser.add_argument("--resume-ckpt", type=str, default="", help="resume training from ckpt")
-    parser.add_argument(
-        "--img-size",
-        type=int,
-        default=1024,
-        help="image size for training and validation,"
-        "1024 recommend for ISNet,"
-        "384 recommend for InSPyReNet"
-        "640 recommend for others,",
-    )
-
-    # dataset args
-    parser.add_argument(
-        "--data-dir", type=str, default="../../dataset/anime-seg", help="root dir of dataset"
-    )
-    parser.add_argument("--fg-dir", type=str, default="fg", help="relative dir of foreground")
-    parser.add_argument("--bg-dir", type=str, default="bg", help="relative dir of background")
-    parser.add_argument("--img-dir", type=str, default="imgs", help="relative dir of images")
-    parser.add_argument("--mask-dir", type=str, default="masks", help="relative dir of masks")
-    parser.add_argument("--fg-ext", type=str, default=".png", help="extension name of foreground")
-    parser.add_argument("--bg-ext", type=str, default=".jpg", help="extension name of background")
-    parser.add_argument("--img-ext", type=str, default=".jpg", help="extension name of images")
-    parser.add_argument("--mask-ext", type=str, default=".jpg", help="extension name of masks")
-    parser.add_argument(
-        "--data-split", type=float, default=0.95, help="split rate for training and validation"
-    )
-
-    # training args
-    parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
-    parser.add_argument("--epoch", type=int, default=40, help="epoch num")
-    parser.add_argument(
-        "--gt-epoch",
-        type=int,
-        default=4,
-        help="epoch for training ground truth encoder when net is isnet_is",
-    )
-    parser.add_argument("--batch-size-train", type=int, default=2, help="batch size for training")
-    parser.add_argument("--batch-size-val", type=int, default=2, help="batch size for val")
-    parser.add_argument(
-        "--workers-train", type=int, default=4, help="workers num for training dataloader"
-    )
-    parser.add_argument(
-        "--workers-val", type=int, default=4, help="workers num for validation dataloader"
-    )
-    parser.add_argument("--acc-step", type=int, default=4, help="gradient accumulation step")
-    parser.add_argument(
-        "--accelerator",
-        type=str,
-        default="gpu",
-        choices=["cpu", "gpu", "tpu", "ipu", "hpu", "auto"],
-        help="accelerator",
-    )
-    parser.add_argument("--devices", type=int, default=1, help="devices num")
-    parser.add_argument("--fp32", action="store_true", default=False, help="disable mix precision")
-    parser.add_argument(
-        "--bf16",
-        action="store_true",
-        default=False,
-        help="use bfloat16 mixed precision (for Ampere+ GPUs)",
-    )
-    parser.add_argument(
-        "--benchmark",
-        action="store_true",
-        default=True,
-        help="enable cudnn benchmark (recommended for fixed input sizes)",
-    )
-    parser.add_argument("--log-step", type=int, default=2, help="log training loss every n steps")
-    parser.add_argument("--val-epoch", type=int, default=1, help="valid and save every n epoch")
-
-    opt = parser.parse_args()
-    print(opt)
-
-    main(opt)
+    cli_main()

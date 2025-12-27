@@ -1,0 +1,75 @@
+# lightning_config.yaml
+seed_everything: true
+trainer:
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 40
+  benchmark: true
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 2
+  strategy:
+    class_path: lightning.pytorch.strategies.DDPStrategy
+    init_args:
+      find_unused_parameters: false
+      static_graph: true
+      gradient_as_bucket_view: true
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: checkpoints/
+        monitor: val/f1
+        mode: max
+        save_top_k: 3
+        save_last: true
+        auto_insert_metric_name: false
+        filename: "epoch={epoch:02d}-f1={val/f1:.4f}"
+        verbose: true
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/f1
+        mode: max
+        patience: 5
+        min_delta: 0.001
+        verbose: true
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        save_dir: lightning_logs
+        name: anime_seg
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        save_dir: lightning_logs
+        name: anime_seg
+
+model:
+  net_name: isnet_is
+  img_size: 1024
+  lr: 0.0001
+  optimizer:
+    class_path: torch.optim.Adam
+    init_args:
+      betas: [0.9, 0.999]
+      eps: 1e-08
+      weight_decay: 0
+
+data:
+  data_dir: dataset/
+  fg_dir: fg
+  bg_dir: bg
+  img_dir: imgs
+  mask_dir: masks
+  fg_ext: .png
+  bg_ext: .jpg
+  img_ext: .jpg
+  mask_ext: .jpg
+  data_split: 0.95
+  img_size: 1024
+  batch_size_train: 2
+  batch_size_val: 2
+  num_workers_train: 4
+  num_workers_val: 4
+  with_trimap: false

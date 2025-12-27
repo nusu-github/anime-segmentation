@@ -429,17 +429,11 @@ class AnimeSegDataModule(L.LightningDataModule):
         # IterableDataset doesn't have len(), use -1 to indicate streaming mode
         if self.train_dataset is not None:
             train_len = (
-                -1
-                if isinstance(self.train_dataset, IterableDataset)
-                else len(self.train_dataset)
+                -1 if isinstance(self.train_dataset, IterableDataset) else len(self.train_dataset)
             )
 
         if self.val_dataset is not None:
-            val_len = (
-                -1
-                if isinstance(self.val_dataset, IterableDataset)
-                else len(self.val_dataset)
-            )
+            val_len = -1 if isinstance(self.val_dataset, IterableDataset) else len(self.val_dataset)
 
         return {
             "train_dataset_len": train_len,
