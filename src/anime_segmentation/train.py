@@ -96,7 +96,7 @@ class AnimeSegmentation(
         self.net = get_net(net_name, img_size)
         if self.hparams["net_name"] == "isnet_is":
             self.gt_encoder = get_net("isnet_gt", img_size)
-            self.gt_encoder.requires_grad_(False)
+            self.gt_encoder.requires_grad_(requires_grad=False)
         else:
             self.gt_encoder = None
 
@@ -250,8 +250,6 @@ def main(opt: Namespace) -> None:
         num_workers_train=opt.workers_train,
         num_workers_val=opt.workers_val,
         with_trimap=opt.net == "modnet",
-        cache_ratio=opt.cache,
-        cache_update_epoch=opt.cache_epoch,
     )
 
     print("---define model---")
@@ -393,14 +391,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--log-step", type=int, default=2, help="log training loss every n steps")
     parser.add_argument("--val-epoch", type=int, default=1, help="valid and save every n epoch")
-    parser.add_argument("--cache-epoch", type=int, default=3, help="update cache every n epoch")
-    parser.add_argument(
-        "--cache",
-        type=float,
-        default=0,
-        help="ratio (cache to entire training dataset), "
-        "higher values require more memory, set 0 to disable cache",
-    )
 
     opt = parser.parse_args()
     print(opt)
