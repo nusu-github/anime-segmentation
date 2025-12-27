@@ -5,10 +5,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from anime_segmentation.data_loader import create_training_datasets
 from torch.utils.data import DataLoader
 from tqdm.asyncio import tqdm
 
-from anime_segmentation.data_loader import create_training_datasets
 from anime_segmentation.train import NET_NAMES, AnimeSegmentation
 from scripts.inference import get_mask
 

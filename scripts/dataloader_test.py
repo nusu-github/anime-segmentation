@@ -2,9 +2,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from torch.utils.data import DataLoader
-
 from anime_segmentation.data_loader import create_training_datasets
+from torch.utils.data import DataLoader
 
 if __name__ == "__main__":
     data_dir = Path("../../dataset/anime-seg/")
