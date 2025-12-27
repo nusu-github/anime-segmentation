@@ -1,7 +1,6 @@
 # Codes are borrowed from https://github.com/plemeri/InSPyReNet
 
 import math
-from operator import xor
 
 import cv2
 import numpy as np
@@ -19,8 +18,9 @@ from torch.nn.parameter import Parameter
 from torch.utils import checkpoint, model_zoo
 
 
-class ImagePyramid:
+class ImagePyramid(nn.Module):
     def __init__(self, ksize: int = 7, sigma: int = 1, channels: int = 1) -> None:
+        super().__init__()
         self.ksize = ksize
         self.sigma = sigma
         self.channels = channels
@@ -28,7 +28,7 @@ class ImagePyramid:
         k = cv2.getGaussianKernel(ksize, sigma)
         k = np.outer(k, k)
         k = torch.tensor(k).float()
-        self.kernel = k.repeat(channels, 1, 1, 1)
+        self.register_buffer("kernel", k.repeat(channels, 1, 1, 1))
 
     def expand(self, x: Tensor) -> Tensor:
         z = torch.zeros_like(x)
@@ -54,29 +54,25 @@ class ImagePyramid:
 
     def reconstruct(self, x: Tensor, laplacian_x: Tensor) -> Tensor:
         expanded_x = self.expand(x)
-        if laplacian_x.shape != expanded_x:
+        if laplacian_x.shape != expanded_x.shape:
             laplacian_x = F.interpolate(
                 laplacian_x, expanded_x.shape[-2:], mode="bilinear", align_corners=True
             )
         return expanded_x + laplacian_x
 
-    def _apply(self, fn) -> None:
-        self.kernel = fn(self.kernel)
 
-
-class Transition:
+class Transition(nn.Module):
     def __init__(self, k: int = 3) -> None:
-        self.kernel = torch.tensor(cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))).float()
+        super().__init__()
+        kernel = torch.tensor(cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))).float()
+        self.register_buffer("kernel", kernel)
 
-    def __call__(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         x = torch.sigmoid(x)
         dx = dilation(x, self.kernel)
         ex = erosion(x, self.kernel)
 
         return ((dx - ex) > 0.5).float()
-
-    def _apply(self, fn) -> None:
-        self.kernel = fn(self.kernel)
 
 
 class Conv2d(nn.Module):
@@ -200,14 +196,11 @@ class PaaDecoder(nn.Module):
         self.Hattn = SelfAttention(depth, "h", self.stage_size[0])
         self.Wattn = SelfAttention(depth, "w", self.stage_size[1])
 
-        self.upsample = lambda img, size: F.interpolate(
-            img, size=size, mode="bilinear", align_corners=True
-        )
-
-    def forward(self, fs):  # f3 f4 f5 -> f3 f2 f1
+    def forward(self, fs: list[Tensor]) -> tuple[Tensor, Tensor]:
         fx = fs[0]
+        target_size = fx.shape[-2:]
         for i in range(1, len(fs)):
-            fs[i] = self.upsample(fs[i], fx.shape[-2:])
+            fs[i] = F.interpolate(fs[i], size=target_size, mode="bilinear", align_corners=True)
         fx = torch.cat(fs[::-1], dim=1)
 
         fx = self.conv1(fx)
@@ -309,12 +302,12 @@ class Sica(nn.Module):
         self.conv_out4 = Conv2d(depth, out_channel, 1)
 
         self.threshold = Parameter(torch.tensor([0.5]))
+        # Always define lthreshold for TorchScript compatibility
+        self.lthreshold = Parameter(torch.tensor([0.5]))
 
-        if self.lmap_in:
-            self.lthreshold = Parameter(torch.tensor([0.5]))
-
-    def forward(self, x, smap, lmap: torch.Tensor | None = None):
-        assert not xor(self.lmap_in is True, lmap is not None)
+    def forward(self, x: Tensor, smap: Tensor, lmap: Tensor | None = None) -> tuple[Tensor, Tensor]:
+        # XOR check: lmap_in and lmap must be both True or both False
+        assert (self.lmap_in is True) == (lmap is not None)
         b, _c, h, w = x.shape
 
         # compute class probability
@@ -407,8 +400,12 @@ class Bottle2neck(nn.Module):
         self.bn1 = nn.BatchNorm2d(width * scale)
 
         self.nums = 1 if scale == 1 else scale - 1
-        if stype == "stage":
-            self.pool = nn.AvgPool2d(kernel_size=3, stride=stride, padding=1)
+        # Always define pool for TorchScript compatibility
+        self.pool: nn.Module = (
+            nn.AvgPool2d(kernel_size=3, stride=stride, padding=1)
+            if stype == "stage"
+            else nn.Identity()
+        )
         convs = []
         bns = []
         for _i in range(self.nums):
@@ -444,10 +441,14 @@ class Bottle2neck(nn.Module):
         out = self.relu(out)
 
         spx = torch.split(out, self.width, 1)
-        for i in range(self.nums):
-            sp = spx[i] if i == 0 or self.stype == "stage" else sp + spx[i]
-            sp = self.convs[i](sp)
-            sp = self.relu(self.bns[i](sp))
+        sp: Tensor = spx[0]  # Initialize for TorchScript
+        for i, (conv, bn) in enumerate(zip(self.convs, self.bns, strict=True)):
+            if i == 0 or self.stype == "stage":
+                sp = spx[i]
+            else:
+                sp = sp + spx[i]
+            sp = conv(sp)
+            sp = self.relu(bn(sp))
             out = sp if i == 0 else torch.cat((out, sp), 1)
         if self.scale != 1 and self.stype == "normal":
             out = torch.cat((out, spx[self.nums]), 1)
@@ -687,7 +688,7 @@ class Mlp(nn.Module):
         return self.drop(x)
 
 
-def window_partition(x: Tensor, window_size):
+def window_partition(x: Tensor, window_size: int) -> Tensor:
     """
     Args:
         x: (B, H, W, C)
@@ -700,7 +701,7 @@ def window_partition(x: Tensor, window_size):
     return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
 
 
-def window_reverse(windows, window_size, H: int, W: int):
+def window_reverse(windows: Tensor, window_size: int, H: int, W: int) -> Tensor:
     """
     Args:
         windows: (num_windows*B, window_size, window_size, C)
@@ -771,7 +772,7 @@ class WindowAttention(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=0.02)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x, mask=None):
+    def forward(self, x: Tensor, mask: Tensor | None = None) -> Tensor:
         """Forward function.
         Args:
             x: input features with shape of (num_windows*B, N, C)
@@ -959,7 +960,7 @@ class PatchMerging(nn.Module):
         # padding
         pad_input = (H % 2 == 1) or (W % 2 == 1)
         if pad_input:
-            x = F.pad(x, (0, 0, 0, W % 2, 0, H % 2))
+            x = F.pad(x, (0, 0, 0, int(W % 2), 0, int(H % 2)))
 
         x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
         x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
@@ -1242,11 +1243,10 @@ class SwinTransformer(nn.Module):
         num_features = [int(embed_dim * 2**i) for i in range(self.num_layers)]
         self.num_features = num_features
 
-        # add a norm layer for each output
+        # add a norm layer for each output using ModuleList
+        self.norm_layers = nn.ModuleList()
         for i_layer in out_indices:
-            layer = norm_layer(num_features[i_layer])
-            layer_name = f"norm{i_layer}"
-            self.add_module(layer_name, layer)
+            self.norm_layers.append(norm_layer(num_features[i_layer]))
 
         self._freeze_stages()
 
@@ -1267,7 +1267,7 @@ class SwinTransformer(nn.Module):
                 for param in m.parameters():
                     param.requires_grad = False
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> tuple[Tensor, ...]:
         """Forward function."""
         x = self.patch_embed(x)
 
@@ -1279,16 +1279,17 @@ class SwinTransformer(nn.Module):
             )
             x = x + absolute_pos_embed  # B Wh*Ww C
 
-        outs = [x.contiguous()]
+        outs: list[Tensor] = [x.contiguous()]
         x = x.flatten(2).transpose(1, 2)
         x = self.pos_drop(x)
+        norm_idx = 0
         for i in range(self.num_layers):
             layer = self.layers[i]
             x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww)
 
             if i in self.out_indices:
-                norm_layer = getattr(self, f"norm{i}")
-                x_out = norm_layer(x_out)
+                x_out = self.norm_layers[norm_idx](x_out)
+                norm_idx += 1
 
                 out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
                 outs.append(out)
@@ -1361,12 +1362,12 @@ def SwinL(pretrained: bool = True) -> SwinTransformer:
     return model
 
 
-def weighted_bce_loss_with_logits(pred, mask, reduction="mean") -> Tensor:
+def weighted_bce_loss_with_logits(pred: Tensor, mask: Tensor, reduction: str = "mean") -> Tensor:
     weight = 1 + 5 * torch.abs(F.avg_pool2d(mask, kernel_size=31, stride=1, padding=15) - mask)
     return F.binary_cross_entropy_with_logits(pred, mask, weight, reduction=reduction)
 
 
-def iou_loss(pred: Tensor, mask, reduction="mean"):
+def iou_loss(pred: Tensor, mask: Tensor, reduction: str = "mean") -> Tensor:
     inter = pred * mask
     union = pred + mask
     iou = 1 - (inter + 1) / (union - inter + 1)
@@ -1375,7 +1376,7 @@ def iou_loss(pred: Tensor, mask, reduction="mean"):
     return iou
 
 
-def iou_loss_with_logits(pred, mask, reduction="none"):
+def iou_loss_with_logits(pred: Tensor, mask: Tensor, reduction: str = "none") -> Tensor:
     return iou_loss(torch.sigmoid(pred), mask, reduction=reduction)
 
 
@@ -1422,16 +1423,7 @@ class InSPyReNet(nn.Module):
         )
         self.attention2 = Sica(self.depth * 2, depth=self.depth, base_size=self.base_size, stage=2)
 
-        self.sod_loss_fn = lambda x, y: weighted_bce_loss_with_logits(
-            x, y, reduction="mean"
-        ) + iou_loss_with_logits(x, y, reduction="mean")
         self.pc_loss_fn = nn.L1Loss()
-
-        self.ret = lambda x, target: F.interpolate(
-            x, size=target.shape[-2:], mode="bilinear", align_corners=False
-        )
-        self.res = lambda x, size: F.interpolate(x, size=size, mode="bilinear", align_corners=False)
-        self.des = lambda x, size: F.interpolate(x, size=size, mode="nearest")
 
         self.image_pyramid = ImagePyramid(7, 1)
 
@@ -1439,20 +1431,28 @@ class InSPyReNet(nn.Module):
         self.transition1 = Transition(9)
         self.transition2 = Transition(5)
 
-        self.forward = self.forward_inference
+    @staticmethod
+    def _sod_loss(x: Tensor, y: Tensor) -> Tensor:
+        return weighted_bce_loss_with_logits(
+            x, y, reduction="mean"
+        ) + iou_loss_with_logits(x, y, reduction="mean")
 
-    def _apply(self, fn):
-        super()._apply(fn)
-        self.image_pyramid._apply(fn)
-        self.transition0._apply(fn)
-        self.transition1._apply(fn)
-        self.transition2._apply(fn)
-        return self
+    @staticmethod
+    def _ret(x: Tensor, target: Tensor) -> Tensor:
+        return F.interpolate(x, size=target.shape[-2:], mode="bilinear", align_corners=False)
 
-    def train(self, mode: bool = True):
-        super().train(mode)
-        self.forward = self.forward_train if mode else self.forward_inference
-        return self
+    @staticmethod
+    def _res(x: Tensor, size: tuple[int, int]) -> Tensor:
+        return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
+
+    @staticmethod
+    def _des(x: Tensor, size: tuple[int, int]) -> Tensor:
+        return F.interpolate(x, size=size, mode="nearest")
+
+    def forward(self, x: Tensor, y: Tensor | None = None) -> dict[str, Tensor | list[Tensor]]:
+        if self.training and y is not None:
+            return self.forward_train(x, y)
+        return self.forward_inference(x)
 
     def forward_inspyre(self, x: Tensor):
         _B, _, H, W = x.shape
@@ -1466,18 +1466,18 @@ class InSPyReNet(nn.Module):
         x5 = self.context5(x5)  # 32
 
         f3, d3 = self.decoder([x3, x4, x5])  # 16
-        f3 = self.res(f3, (H // 4, W // 4))
+        f3 = self._res(f3, (H // 4, W // 4))
         f2, p2 = self.attention2(torch.cat([x2, f3], dim=1), d3.detach())
 
         d2 = self.image_pyramid.reconstruct(d3.detach(), p2)  # 4
 
-        x1 = self.res(x1, (H // 2, W // 2))
-        f2 = self.res(f2, (H // 2, W // 2))
+        x1 = self._res(x1, (H // 2, W // 2))
+        f2 = self._res(f2, (H // 2, W // 2))
 
         f1, p1 = self.attention1(torch.cat([x1, f2], dim=1), d2.detach(), p2.detach())  # 2
         d1 = self.image_pyramid.reconstruct(d2.detach(), p1)  # 2
 
-        f1 = self.res(f1, (H, W))
+        f1 = self._res(f1, (H, W))
         _, p0 = self.attention0(f1, d1.detach(), p1.detach())  # 2
         d0 = self.image_pyramid.reconstruct(d1.detach(), p0)  # 2
 
@@ -1496,29 +1496,29 @@ class InSPyReNet(nn.Module):
 
         loss = (
             self.pc_loss_fn(
-                self.des(d3, (H, W)), self.des(self.image_pyramid.reduce(d2), (H, W)).detach()
+                self._des(d3, (H, W)), self._des(self.image_pyramid.reduce(d2), (H, W)).detach()
             )
             * 0.0001
         )
 
         loss += (
             self.pc_loss_fn(
-                self.des(d2, (H, W)), self.des(self.image_pyramid.reduce(d1), (H, W)).detach()
+                self._des(d2, (H, W)), self._des(self.image_pyramid.reduce(d1), (H, W)).detach()
             )
             * 0.0001
         )
 
         loss += (
             self.pc_loss_fn(
-                self.des(d1, (H, W)), self.des(self.image_pyramid.reduce(d0), (H, W)).detach()
+                self._des(d1, (H, W)), self._des(self.image_pyramid.reduce(d0), (H, W)).detach()
             )
             * 0.0001
         )
 
-        loss += self.sod_loss_fn(self.des(d3, (H, W)), self.des(y3, (H, W)))
-        loss += self.sod_loss_fn(self.des(d2, (H, W)), self.des(y2, (H, W)))
-        loss += self.sod_loss_fn(self.des(d1, (H, W)), self.des(y1, (H, W)))
-        loss0 = self.sod_loss_fn(self.des(d0, (H, W)), self.des(y, (H, W)))
+        loss += self._sod_loss(self._des(d3, (H, W)), self._des(y3, (H, W)))
+        loss += self._sod_loss(self._des(d2, (H, W)), self._des(y2, (H, W)))
+        loss += self._sod_loss(self._des(d1, (H, W)), self._des(y1, (H, W)))
+        loss0 = self._sod_loss(self._des(d0, (H, W)), self._des(y, (H, W)))
         loss += loss0
 
         pred = torch.sigmoid(d0)
@@ -1532,7 +1532,7 @@ class InSPyReNet(nn.Module):
             "laplacian": [p2, p1, p0],
         }
 
-    def forward_inference(self, x):
+    def forward_inference(self, x: Tensor) -> dict[str, Tensor | list[Tensor]]:
         _B, _, H, W = x.shape
 
         if self.threshold is None:
@@ -1541,48 +1541,61 @@ class InSPyReNet(nn.Module):
             p2, p1, p0 = out["laplacian"]
 
         elif self.threshold >= H or self.threshold >= W:
-            out = self.forward_inspyre(self.res(x, self.base_size))
+            out = self.forward_inspyre(self._res(x, self.base_size))
 
             d3, d2, d1, d0 = out["saliency"]
             p2, p1, p0 = out["laplacian"]
 
         else:
             # LR Saliency Pyramid
-            lr_out = self.forward_inspyre(self.res(x, self.base_size))
+            lr_out = self.forward_inspyre(self._res(x, self.base_size))
             _lr_d3, _lr_d2, _lr_d1, lr_d0 = lr_out["saliency"]
             _lr_p2, _lr_p1, _lr_p0 = lr_out["laplacian"]
 
             # HR Saliency Pyramid
             if H % 32 != 0 or W % 32 != 0:
-                x = self.res(x, ((H // 32) * 32, (W // 32) * 32))
+                x = self._res(x, ((H // 32) * 32, (W // 32) * 32))
             hr_out = self.forward_inspyre(x)
             hr_d3, _hr_d2, _hr_d1, _hr_d0 = hr_out["saliency"]
             hr_p2, hr_p1, hr_p0 = hr_out["laplacian"]
 
             # Pyramid Blending
-            d3 = self.ret(lr_d0, hr_d3)
+            d3 = self._ret(lr_d0, hr_d3)
 
-            t2 = self.ret(self.transition2(d3), hr_p2)
+            t2 = self._ret(self.transition2(d3), hr_p2)
             p2 = t2 * hr_p2
             d2 = self.image_pyramid.reconstruct(d3, p2)
 
-            t1 = self.ret(self.transition1(d2), hr_p1)
+            t1 = self._ret(self.transition1(d2), hr_p1)
             p1 = t1 * hr_p1
             d1 = self.image_pyramid.reconstruct(d2, p1)
 
-            t0 = self.ret(self.transition0(d1), hr_p0)
+            t0 = self._ret(self.transition0(d1), hr_p0)
             p0 = t0 * hr_p0
             d0 = self.image_pyramid.reconstruct(d1, p0)
 
-        if d0.shape[2] != H or d0.shape[3] != 2:
-            d0 = self.res(d0, (H, W))
+        if d0.shape[2] != H or d0.shape[3] != W:
+            d0 = self._res(d0, (H, W))
         pred = torch.sigmoid(d0)
         pred = (pred - pred.min()) / (pred.max() - pred.min() + 1e-8)
-        return {"pred": pred, "loss": 0, "saliency": [d3, d2, d1, d0], "laplacian": [p2, p1, p0]}
+        zero_loss = torch.zeros(1, device=pred.device, dtype=pred.dtype)
+        return {
+            "pred": pred,
+            "loss": zero_loss,
+            "loss0": zero_loss,
+            "saliency": [d3, d2, d1, d0],
+            "laplacian": [p2, p1, p0],
+        }
 
     @staticmethod
-    def compute_loss(sample):
-        return sample["loss0"], sample["loss"]
+    def compute_loss(
+        sample: dict[str, Tensor | list[Tensor]],
+    ) -> tuple[Tensor, Tensor]:
+        loss0 = sample["loss0"]
+        loss = sample["loss"]
+        assert isinstance(loss0, Tensor)
+        assert isinstance(loss, Tensor)
+        return loss0, loss
 
 
 def InSPyReNet_Res2Net50(

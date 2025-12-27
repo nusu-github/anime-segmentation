@@ -4,7 +4,6 @@
 # https://github.com/ZHKKKe/MODNet/blob/master/src/models/modnet.py
 
 import math
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -62,17 +61,6 @@ class GaussianBlurLayer(nn.Module):
         Returns:
             torch.Tensor: Blurred version of the input
         """
-
-        if len(list(x.shape)) != 4:
-            print("'GaussianBlurLayer' requires a 4D tensor as input\n")
-            sys.exit()
-        elif x.shape[1] != self.channels:
-            print(
-                f"In 'GaussianBlurLayer', the required channel ({self.channels}) is"
-                f"not the same as input ({x.shape[1]})\n"
-            )
-            sys.exit()
-
         return self.op(x)
 
     def _init_kernel(self):
@@ -433,8 +421,7 @@ class MobileNetV2Backbone(BaseBackbone):
         # the pre-trained model is provided by https://github.com/thuyngch/Human-Segmentation-PyTorch
         ckpt_path = Path("./pretrained/mobilenetv2_human_seg.ckpt")
         if not ckpt_path.exists():
-            print("cannot find the pretrained mobilenetv2 backbone")
-            sys.exit()
+            raise FileNotFoundError(f"cannot find pretrained checkpoint: {ckpt_path}")
 
         ckpt = torch.load(ckpt_path)
         self.model.load_state_dict(ckpt)
@@ -551,17 +538,17 @@ class LRBranch(nn.Module):
             enc_channels[2], 1, kernel_size=3, stride=2, padding=1, with_ibn=False, with_relu=False
         )
 
-    def forward(self, img, inference):
+    def forward(self, img: Tensor, inference: bool) -> tuple[Tensor | None, Tensor, list[Tensor]]:
         enc_features = self.backbone.forward(img)
         enc2x, enc4x, enc32x = enc_features[0], enc_features[1], enc_features[4]
 
         enc32x = self.se_block(enc32x)
-        lr16x = F.interpolate(enc32x, scale_factor=2, mode="bilinear", align_corners=False)
+        lr16x = F.interpolate(enc32x, scale_factor=2.0, mode="bilinear", align_corners=False)
         lr16x = self.conv_lr16x(lr16x)
-        lr8x = F.interpolate(lr16x, scale_factor=2, mode="bilinear", align_corners=False)
+        lr8x = F.interpolate(lr16x, scale_factor=2.0, mode="bilinear", align_corners=False)
         lr8x = self.conv_lr8x(lr8x)
 
-        pred_semantic = None
+        pred_semantic: Tensor | None = None
         if not inference:
             lr = self.conv_lr(lr8x)
             pred_semantic = torch.sigmoid(lr)
@@ -601,7 +588,9 @@ class HRBranch(nn.Module):
             ),
         )
 
-    def forward(self, img, enc2x, enc4x, lr8x, inference):
+    def forward(
+        self, img: Tensor, enc2x: Tensor, enc4x: Tensor, lr8x: Tensor, inference: bool
+    ) -> tuple[Tensor | None, Tensor]:
         img2x = F.interpolate(img, scale_factor=1 / 2, mode="bilinear", align_corners=False)
         img4x = F.interpolate(img, scale_factor=1 / 4, mode="bilinear", align_corners=False)
 
@@ -611,15 +600,15 @@ class HRBranch(nn.Module):
         enc4x = self.tohr_enc4x(enc4x)
         hr4x = self.conv_enc4x(torch.cat((hr4x, enc4x), dim=1))
 
-        lr4x = F.interpolate(lr8x, scale_factor=2, mode="bilinear", align_corners=False)
+        lr4x = F.interpolate(lr8x, scale_factor=2.0, mode="bilinear", align_corners=False)
         hr4x = self.conv_hr4x(torch.cat((hr4x, lr4x, img4x), dim=1))
 
-        hr2x = F.interpolate(hr4x, scale_factor=2, mode="bilinear", align_corners=False)
+        hr2x = F.interpolate(hr4x, scale_factor=2.0, mode="bilinear", align_corners=False)
         hr2x = self.conv_hr2x(torch.cat((hr2x, enc2x), dim=1))
 
-        pred_detail = None
+        pred_detail: Tensor | None = None
         if not inference:
-            hr = F.interpolate(hr2x, scale_factor=2, mode="bilinear", align_corners=False)
+            hr = F.interpolate(hr2x, scale_factor=2.0, mode="bilinear", align_corners=False)
             hr = self.conv_hr(torch.cat((hr, img), dim=1))
             pred_detail = torch.sigmoid(hr)
 
@@ -642,12 +631,12 @@ class FusionBranch(nn.Module):
         )
 
     def forward(self, img, lr8x, hr2x) -> Tensor:
-        lr4x = F.interpolate(lr8x, scale_factor=2, mode="bilinear", align_corners=False)
+        lr4x = F.interpolate(lr8x, scale_factor=2.0, mode="bilinear", align_corners=False)
         lr4x = self.conv_lr4x(lr4x)
-        lr2x = F.interpolate(lr4x, scale_factor=2, mode="bilinear", align_corners=False)
+        lr2x = F.interpolate(lr4x, scale_factor=2.0, mode="bilinear", align_corners=False)
 
         f2x = self.conv_f2x(torch.cat((lr2x, hr2x), dim=1))
-        f = F.interpolate(f2x, scale_factor=2, mode="bilinear", align_corners=False)
+        f = F.interpolate(f2x, scale_factor=2.0, mode="bilinear", align_corners=False)
         f = self.conv_f(torch.cat((f, img), dim=1))
         return torch.sigmoid(f)
 
@@ -689,8 +678,9 @@ class MODNet(nn.Module):
         if self.backbone_pretrained:
             self.backbone.load_pretrained_ckpt()
 
-    def forward(self, img, inference):
-        pred_semantic, lr8x, [enc2x, enc4x] = self.lr_branch(img, inference)
+    def forward(self, img: Tensor, inference: bool) -> tuple[Tensor | None, Tensor | None, Tensor]:
+        pred_semantic, lr8x, enc_features = self.lr_branch(img, inference)
+        enc2x, enc4x = enc_features[0], enc_features[1]
         pred_detail, hr2x = self.hr_branch(img, enc2x, enc4x, lr8x, inference)
         pred_matte = self.f_branch(img, lr8x, hr2x)
 
