@@ -3,8 +3,7 @@
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-from torch.types import Tensor
+from torch import Tensor, nn
 
 bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
 
@@ -50,16 +49,16 @@ def multi_loss_fusion_kl(preds, target, dfs, fs, mode="MSE"):
     for i in range(len(dfs)):
         df = dfs[i]
         fs_i = fs[i]
-        if mode == "MSE":
-            loss = loss + fea_loss(
-                df, fs_i
-            )  ### add the mse loss of features as additional constraints
-        elif mode == "KL":
-            loss = loss + kl_loss(F.log_softmax(df, dim=1), F.softmax(fs_i, dim=1))
-        elif mode == "MAE":
-            loss = loss + l1_loss(df, fs_i)
-        elif mode == "SmoothL1":
-            loss = loss + smooth_l1_loss(df, fs_i)
+        match mode:
+            case "MSE":
+                # add the mse loss of features as additional constraints
+                loss = loss + fea_loss(df, fs_i)
+            case "KL":
+                loss = loss + kl_loss(F.log_softmax(df, dim=1), F.softmax(fs_i, dim=1))
+            case "MAE":
+                loss = loss + l1_loss(df, fs_i)
+            case "SmoothL1":
+                loss = loss + smooth_l1_loss(df, fs_i)
 
     return loss0, loss
 
@@ -79,12 +78,12 @@ class RebnConv(nn.Module):
         return self.relu_s1(self.bn_s1(self.conv_s1(hx)))
 
 
-## upsample tensor 'src' to have the same spatial size with tensor 'tar'
+# upsample tensor 'src' to have the same spatial size with tensor 'tar'
 def _upsample_like(src, tar) -> Tensor:
     return F.interpolate(src, size=tar.shape[2:], mode="bilinear", align_corners=False)
 
 
-### RSU-7 ###
+# RSU-7
 class RSU7(nn.Module):
     def __init__(
         self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3, img_size: int = 512
@@ -95,7 +94,7 @@ class RSU7(nn.Module):
         self.mid_ch = mid_ch
         self.out_ch = out_ch
 
-        self.rebnconvin = RebnConv(in_ch, out_ch, dirate=1)  ## 1 -> 1/2
+        self.rebnconvin = RebnConv(in_ch, out_ch, dirate=1)  # 1 -> 1/2
 
         self.rebnconv1 = RebnConv(out_ch, mid_ch, dirate=1)
         self.pool1 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
@@ -168,7 +167,7 @@ class RSU7(nn.Module):
         return hx1d + hxin
 
 
-### RSU-6 ###
+# RSU-6
 class RSU6(nn.Module):
     def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
         super().__init__()
@@ -235,7 +234,7 @@ class RSU6(nn.Module):
         return hx1d + hxin
 
 
-### RSU-5 ###
+# RSU-5
 class RSU5(nn.Module):
     def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
         super().__init__()
@@ -292,7 +291,7 @@ class RSU5(nn.Module):
         return hx1d + hxin
 
 
-### RSU-4 ###
+# RSU-4
 class RSU4(nn.Module):
     def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
         super().__init__()
@@ -339,7 +338,7 @@ class RSU4(nn.Module):
         return hx1d + hxin
 
 
-### RSU-4F ###
+# RSU-4F
 class RSU4F(nn.Module):
     def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
         super().__init__()
@@ -407,9 +406,8 @@ class ISNetGTEncoder(nn.Module):
     def __init__(self, in_ch: int = 1, out_ch: int = 1) -> None:
         super().__init__()
 
-        self.conv_in = MyRebnConv(
-            in_ch, 16, 3, stride=2, padding=1
-        )  # nn.Conv2d(in_ch,64,3,stride=2,padding=1)
+        # nn.Conv2d(in_ch, 64, 3, stride=2, padding=1)
+        self.conv_in = MyRebnConv(in_ch, 16, 3, stride=2, padding=1)
 
         self.stage1 = RSU7(16, 16, 64)
         self.pool12 = nn.MaxPool2d(2, stride=2, ceil_mode=True)

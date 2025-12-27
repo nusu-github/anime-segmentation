@@ -11,12 +11,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter
-from torch import nn
+from torch import Tensor, nn
 from torch.nn.modules.batchnorm import BatchNorm2d
 from torch.nn.modules.container import Sequential
 from torch.nn.modules.conv import Conv2d
 from torch.nn.modules.instancenorm import InstanceNorm2d
-from torch.types import Tensor
 
 # ----------------------------------------------------------------------------------
 # Loss Functions
@@ -49,7 +48,7 @@ class GaussianBlurLayer(nn.Module):
                 self.kernel_size,
                 stride=1,
                 padding=0,
-                bias=None,
+                bias=False,
                 groups=channels,
             ),
         )
@@ -254,7 +253,7 @@ class InvertedResidual(nn.Module):
 
 class MobileNetV2(nn.Module):
     def __init__(
-        self, in_channels, alpha: float = 1.0, expansion: int = 6, num_classes: int = 1000
+        self, in_channels, alpha: float = 1.0, expansion: int = 6, num_classes: int | None = 1000
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -277,33 +276,29 @@ class MobileNetV2(nn.Module):
         self.last_channel = (
             _make_divisible(last_channel * alpha, 8) if alpha > 1.0 else last_channel
         )
-        self.features = [conv_bn(self.in_channels, input_channel, 2)]
+        features: list[nn.Module] = [conv_bn(self.in_channels, input_channel, 2)]
 
         # building inverted residual blocks
         for t, c, n, s in interverted_residual_setting:
             output_channel = _make_divisible(int(c * alpha), 8)
             for i in range(n):
                 if i == 0:
-                    self.features.append(
-                        InvertedResidual(input_channel, output_channel, s, expansion=t)
-                    )
+                    features.append(InvertedResidual(input_channel, output_channel, s, expansion=t))
                 else:
-                    self.features.append(
-                        InvertedResidual(input_channel, output_channel, 1, expansion=t)
-                    )
+                    features.append(InvertedResidual(input_channel, output_channel, 1, expansion=t))
                 input_channel = output_channel
 
         # building last several layers
-        self.features.append(conv_1x1_bn(input_channel, self.last_channel))
+        features.append(conv_1x1_bn(input_channel, self.last_channel))
 
         # make it nn.Sequential
-        self.features = nn.Sequential(*self.features)
+        self.features = nn.Sequential(*features)
 
         # building classifier
         if self.num_classes is not None:
             self.classifier = nn.Sequential(
                 nn.Dropout(0.2),
-                nn.Linear(self.last_channel, num_classes),
+                nn.Linear(self.last_channel, self.num_classes),
             )
 
         # Initialize weights
@@ -490,7 +485,7 @@ class Conv2dIBNormRelu(nn.Module):
     ) -> None:
         super().__init__()
 
-        layers = [
+        layers: list[nn.Module] = [
             nn.Conv2d(
                 in_channels,
                 out_channels,
@@ -728,7 +723,7 @@ class MODNet(nn.Module):
             nn.init.constant_(norm.weight, 1)
             nn.init.constant_(norm.bias, 0)
 
-    def _apply(self, fn):
-        super()._apply(fn)
-        blurer._apply(fn)  # let blurer's device same as modnet
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        blurer._apply(fn, recurse=recurse)  # let blurer's device same as modnet
         return self

@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import torch
 from scipy.ndimage import grey_dilation, grey_erosion
-from torch.types import Tensor
+from torch import Tensor
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.transforms import functional as TF

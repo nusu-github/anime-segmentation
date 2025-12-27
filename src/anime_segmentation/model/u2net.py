@@ -5,8 +5,7 @@ import math
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-from torch.types import Tensor
+from torch import Tensor, nn
 
 __all__ = ["U2Net", "U2NetFull", "U2NetFull2", "U2NetLite", "U2NetLite2"]
 
@@ -40,12 +39,15 @@ class RebnConv(nn.Module):
 
 
 class RSU(nn.Module):
-    def __init__(self, name, height, in_ch, mid_ch, out_ch, dilated: bool = False) -> None:
+    rebnconvin: RebnConv
+    downsample: nn.MaxPool2d
+
+    def __init__(self, name, height, in_ch, mid_ch, out_ch, *, dilated: bool = False) -> None:
         super().__init__()
         self.name = name
         self.height = height
         self.dilated = dilated
-        self._make_layers(height, in_ch, mid_ch, out_ch, dilated)
+        self._make_layers(height, in_ch, mid_ch, out_ch, dilated=dilated)
 
     def forward(self, x):
         sizes = _size_map(x, self.height)
@@ -68,7 +70,7 @@ class RSU(nn.Module):
 
         return x + unet(x)
 
-    def _make_layers(self, height, in_ch, mid_ch, out_ch, dilated=False) -> None:
+    def _make_layers(self, height, in_ch, mid_ch, out_ch, *, dilated=False) -> None:
         self.add_module("rebnconvin", RebnConv(in_ch, out_ch))
         self.add_module("downsample", nn.MaxPool2d(2, stride=2, ceil_mode=True))
 
@@ -85,6 +87,9 @@ class RSU(nn.Module):
 
 
 class U2Net(nn.Module):
+    downsample: nn.MaxPool2d
+    outconv: nn.Conv2d
+
     def __init__(self, cfgs, out_ch) -> None:
         super().__init__()
         self.out_ch = out_ch

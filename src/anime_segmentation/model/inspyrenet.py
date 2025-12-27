@@ -11,12 +11,11 @@ from kornia.morphology import dilation, erosion
 from timm.layers.drop import DropPath
 from timm.layers.helpers import to_2tuple
 from timm.layers.weight_init import trunc_normal_
-from torch import nn
+from torch import Tensor, nn
 from torch.nn.modules.activation import GELU
 from torch.nn.modules.container import Sequential
 from torch.nn.modules.normalization import LayerNorm
 from torch.nn.parameter import Parameter
-from torch.types import Tensor
 from torch.utils import checkpoint, model_zoo
 
 
@@ -480,18 +479,19 @@ class Res2Net(nn.Module):
         self.baseWidth = baseWidth
         self.scale = scale
         self.output_stride = output_stride
-        if self.output_stride == 8:
-            self.grid = [1, 2, 1]
-            self.stride = [1, 2, 1, 1]
-            self.dilation = [1, 1, 2, 4]
-        elif self.output_stride == 16:
-            self.grid = [1, 2, 4]
-            self.stride = [1, 2, 2, 1]
-            self.dilation = [1, 1, 1, 2]
-        elif self.output_stride == 32:
-            self.grid = [1, 2, 4]
-            self.stride = [1, 2, 2, 2]
-            self.dilation = [1, 1, 2, 4]
+        match self.output_stride:
+            case 8:
+                self.grid = [1, 2, 1]
+                self.stride = [1, 2, 1, 1]
+                self.dilation = [1, 1, 2, 4]
+            case 16:
+                self.grid = [1, 2, 4]
+                self.stride = [1, 2, 2, 1]
+                self.dilation = [1, 1, 1, 2]
+            case 32:
+                self.grid = [1, 2, 4]
+                self.stride = [1, 2, 2, 2]
+                self.dilation = [1, 1, 2, 4]
         self.conv1 = nn.Sequential(
             nn.Conv2d(3, 32, 3, 2, 1, bias=False),
             nn.BatchNorm2d(32),
@@ -568,18 +568,19 @@ class Res2Net(nn.Module):
         if output_stride == self.output_stride:
             return
         self.output_stride = output_stride
-        if self.output_stride == 8:
-            self.grid = [1, 2, 1]
-            self.stride = [1, 2, 1, 1]
-            self.dilation = [1, 1, 2, 4]
-        elif self.output_stride == 16:
-            self.grid = [1, 2, 4]
-            self.stride = [1, 2, 2, 1]
-            self.dilation = [1, 1, 1, 2]
-        elif self.output_stride == 32:
-            self.grid = [1, 2, 4]
-            self.stride = [1, 2, 2, 2]
-            self.dilation = [1, 1, 2, 4]
+        match self.output_stride:
+            case 8:
+                self.grid = [1, 2, 1]
+                self.stride = [1, 2, 1, 1]
+                self.dilation = [1, 1, 2, 4]
+            case 16:
+                self.grid = [1, 2, 4]
+                self.stride = [1, 2, 2, 1]
+                self.dilation = [1, 1, 1, 2]
+            case 32:
+                self.grid = [1, 2, 4]
+                self.stride = [1, 2, 2, 2]
+                self.dilation = [1, 1, 2, 4]
 
         for i, layer in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
             for j, block in enumerate(layer):
