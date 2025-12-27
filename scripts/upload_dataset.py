@@ -12,6 +12,136 @@ from anime_segmentation.hf_dataset import (
 )
 
 
+def generate_dataset_card(
+    repo_id: str,
+    real_train_count: int,
+    real_val_count: int,
+    fg_train_count: int,
+    fg_val_count: int,
+    bg_train_count: int,
+    bg_val_count: int,
+) -> str:
+    """Generate a dataset card (README.md) for the anime segmentation dataset.
+
+    Args:
+        repo_id: HuggingFace Hub repository ID.
+        real_train_count: Number of real training samples.
+        real_val_count: Number of real validation samples.
+        fg_train_count: Number of foreground training samples.
+        fg_val_count: Number of foreground validation samples.
+        bg_train_count: Number of background training samples.
+        bg_val_count: Number of background validation samples.
+
+    Returns:
+        Dataset card content as markdown string.
+    """
+    return f"""---
+license: cc-by-nc-4.0
+task_categories:
+  - image-segmentation
+tags:
+  - anime
+  - segmentation
+  - matting
+  - background-removal
+pretty_name: Anime Segmentation Dataset
+size_categories:
+  - 1K<n<10K
+---
+
+# Anime Segmentation Dataset
+
+Dataset for training anime character segmentation models. Contains real annotated
+images and foreground/background components for synthetic data generation.
+
+## Dataset Structure
+
+This dataset has three configurations:
+
+### `real` - Pre-annotated Images
+Real anime images with manually annotated segmentation masks.
+
+| Split      | Samples |
+|------------|---------|
+| train      | {real_train_count:,} |
+| validation | {real_val_count:,} |
+
+### `foreground` - Character Images
+RGBA images of anime characters with alpha channel for compositing.
+
+| Split      | Samples |
+|------------|---------|
+| train      | {fg_train_count:,} |
+| validation | {fg_val_count:,} |
+
+### `background` - Background Images
+Background images for synthetic data generation.
+
+| Split      | Samples |
+|------------|---------|
+| train      | {bg_train_count:,} |
+| validation | {bg_val_count:,} |
+
+## Usage
+
+```python
+from datasets import load_dataset
+
+# Load real annotated images
+real_ds = load_dataset("{repo_id}", "real")
+
+# Load foreground characters
+fg_ds = load_dataset("{repo_id}", "foreground")
+
+# Load backgrounds
+bg_ds = load_dataset("{repo_id}", "background")
+
+# Access training split
+train_real = real_ds["train"]
+print(f"Training samples: {{len(train_real)}}")
+
+# Get a sample
+sample = train_real[0]
+image = sample["image"]  # PIL Image
+mask = sample["mask"]    # PIL Image (grayscale mask)
+```
+
+### Streaming Mode
+
+For large datasets, use streaming mode:
+
+```python
+from datasets import load_dataset
+
+# Stream without downloading
+real_ds = load_dataset("{repo_id}", "real", streaming=True)
+
+for sample in real_ds["train"]:
+    # Process sample
+    pass
+```
+
+## Training
+
+This dataset is designed for use with the
+[anime-segmentation](https://github.com/your-repo/anime-segmentation) training pipeline.
+
+```python
+from anime_segmentation.data_module import AnimeSegDataModule
+
+data_module = AnimeSegDataModule(
+    dataset_name="{repo_id}",
+    img_size=1024,
+    batch_size_train=4,
+)
+```
+
+## License
+
+This dataset is released under CC-BY-NC-4.0 license.
+"""
+
+
 def upload_dataset(
     data_dir: str,
     repo_id: str,
@@ -105,6 +235,27 @@ def upload_dataset(
     print("Uploading 'background' config...")
     bg_ds.push_to_hub(repo_id, config_name="background", private=private)
     print("  Done!")
+
+    # Generate and upload dataset card
+    print("\nGenerating dataset card...")
+    card_content = generate_dataset_card(
+        repo_id=repo_id,
+        real_train_count=len(real_ds["train"]),
+        real_val_count=len(real_ds["validation"]),
+        fg_train_count=len(fg_ds["train"]),
+        fg_val_count=len(fg_ds["validation"]),
+        bg_train_count=len(bg_ds["train"]),
+        bg_val_count=len(bg_ds["validation"]),
+    )
+
+    # Upload README.md
+    api.upload_file(
+        path_or_fileobj=card_content.encode("utf-8"),
+        path_in_repo="README.md",
+        repo_id=repo_id,
+        repo_type="dataset",
+    )
+    print("  Dataset card uploaded!")
 
     print(f"\nDataset uploaded successfully to: https://huggingface.co/datasets/{repo_id}")
     print("\nUsage:")

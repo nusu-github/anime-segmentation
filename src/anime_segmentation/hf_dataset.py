@@ -10,9 +10,11 @@ from datasets import (
     DatasetDict,
     Features,
     Image,
+    IterableDataset,
     IterableDatasetDict,
     Sequence,
     Value,
+    interleave_datasets,
     load_dataset,
 )
 from PIL import Image as PILImage
@@ -437,6 +439,8 @@ class RealImageTransform:
 def get_image_paths_from_column(dataset: Dataset, column: str = "image") -> list[str]:
     """Get file paths from dataset by temporarily disabling image decoding.
 
+    Uses batch processing for efficient extraction.
+
     Args:
         dataset: HuggingFace Dataset with image column.
         column: Name of the image column.
@@ -444,12 +448,15 @@ def get_image_paths_from_column(dataset: Dataset, column: str = "image") -> list
     Returns:
         List of image file paths.
     """
-    # Cast to decode=False to get paths
+    # Cast to decode=False to get paths without loading images
     ds_no_decode = dataset.cast_column(column, Image(decode=False))
+
+    # Use select_columns and batch access for efficiency
+    ds_column_only = ds_no_decode.select_columns([column])
+    all_data = ds_column_only[:]  # Get all data at once
+
     paths: list[str] = []
-    for i in range(len(ds_no_decode)):
-        example = ds_no_decode[i]
-        img_data = example[column]
+    for i, img_data in enumerate(all_data[column]):
         if isinstance(img_data, dict) and "path" in img_data:
             paths.append(img_data["path"])
         elif isinstance(img_data, str):
@@ -458,6 +465,55 @@ def get_image_paths_from_column(dataset: Dataset, column: str = "image") -> list
             msg = f"Cannot extract path from dataset item {i}: {type(img_data)}"
             raise ValueError(msg)
     return paths
+
+
+def create_interleaved_dataset(
+    datasets: list[Dataset],
+    probabilities: list[float] | None = None,
+    seed: int = 42,
+    num_shards: int = 64,
+    *,
+    use_iterable: bool = False,
+) -> Dataset | IterableDataset:
+    """Create an interleaved dataset from multiple datasets.
+
+    Uses HuggingFace's native interleave_datasets for optimal performance.
+    Optionally converts to IterableDataset with sharding for large datasets.
+
+    Args:
+        datasets: List of datasets to interleave.
+        probabilities: Sampling probabilities for each dataset (must sum to 1).
+        seed: Random seed for reproducibility.
+        num_shards: Number of shards for IterableDataset (for parallel loading).
+        use_iterable: If True, convert to IterableDataset with sharding.
+
+    Returns:
+        Interleaved Dataset or IterableDataset.
+    """
+    if not datasets:
+        msg = "At least one dataset must be provided"
+        raise ValueError(msg)
+
+    if len(datasets) == 1:
+        combined = datasets[0]
+    else:
+        # Calculate default probabilities based on dataset sizes
+        if probabilities is None:
+            total_len = sum(len(ds) for ds in datasets)
+            probabilities = [len(ds) / total_len for ds in datasets]
+
+        combined = interleave_datasets(
+            datasets,
+            probabilities=probabilities,
+            seed=seed,
+            stopping_strategy="all_exhausted",
+        )
+
+    if use_iterable:
+        # Convert to IterableDataset with sharding for parallel DataLoader
+        return combined.to_iterable_dataset(num_shards=num_shards)
+
+    return combined
 
 
 def load_anime_seg_dataset(

@@ -7,16 +7,16 @@ from typing import Any, cast
 
 import lightning as L
 import torch
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, IterableDataset
 from torch import Tensor
 from torch.utils.data import DataLoader
-from torch.utils.data import Dataset as TorchDataset
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 
 from .hf_dataset import (
     RealImageTransform,
     SyntheticCompositor,
+    create_interleaved_dataset,
     create_synthetic_index_dataset,
     get_image_paths_from_column,
     load_anime_seg_dataset,
@@ -112,9 +112,10 @@ class AnimeSegDataModule(L.LightningDataModule):
         super().__init__()
         self.save_hyperparameters()
 
-        self.train_dataset: _InterleavedDataset | None = None
-        self.val_dataset: _InterleavedDataset | None = None
+        self.train_dataset: Dataset | IterableDataset | None = None
+        self.val_dataset: Dataset | IterableDataset | None = None
         self._with_trimap_transform: WithTrimap | None = WithTrimap() if with_trimap else None
+        self._use_iterable = streaming
 
         # Store image paths for synthetic compositing (lazy loading)
         self._train_fg_paths: list[str] | None = None
@@ -251,11 +252,21 @@ class AnimeSegDataModule(L.LightningDataModule):
             self._make_synthetic_transform_fn(val_compositor, val_transform)
         )
 
-        # Combine datasets
-        # Note: We use interleaved approach instead of concatenate
-        # to avoid issues with set_transform
-        self.train_dataset = _InterleavedDataset([train_real_raw, train_synthetic_idx])
-        self.val_dataset = _InterleavedDataset([val_real_raw, val_synthetic_idx])
+        # Combine datasets using HuggingFace's native interleave_datasets
+        # This provides better performance and compatibility with DataLoader
+        num_shards = max(self.hparams["num_workers_train"] * 4, 16)
+        self.train_dataset = create_interleaved_dataset(
+            datasets=[train_real_raw, train_synthetic_idx],
+            seed=42,
+            num_shards=num_shards,
+            use_iterable=self._use_iterable,
+        )
+        self.val_dataset = create_interleaved_dataset(
+            datasets=[val_real_raw, val_synthetic_idx],
+            seed=43,
+            num_shards=num_shards,
+            use_iterable=self._use_iterable,
+        )
 
     def _make_real_transform_fn(
         self,
@@ -376,10 +387,14 @@ class AnimeSegDataModule(L.LightningDataModule):
             batch = self._apply_trimap_if_needed(batch)
             return segmentation_collate_fn(batch)
 
+        # IterableDataset doesn't support shuffle in DataLoader
+        # (shuffling is handled by the dataset itself via shuffle buffer)
+        is_iterable = isinstance(self.train_dataset, IterableDataset)
+
         return DataLoader(
-            self.train_dataset,
+            self.train_dataset,  # type: ignore[arg-type]
             batch_size=self.hparams["batch_size_train"],
-            shuffle=True,
+            shuffle=not is_iterable,
             drop_last=True,
             persistent_workers=self.hparams["num_workers_train"] > 0,
             num_workers=self.hparams["num_workers_train"],
@@ -397,7 +412,7 @@ class AnimeSegDataModule(L.LightningDataModule):
             return segmentation_collate_fn(batch)
 
         return DataLoader(
-            self.val_dataset,
+            self.val_dataset,  # type: ignore[arg-type]
             batch_size=self.hparams["batch_size_val"],
             shuffle=False,
             persistent_workers=self.hparams["num_workers_val"] > 0,
@@ -408,37 +423,30 @@ class AnimeSegDataModule(L.LightningDataModule):
 
     def state_dict(self) -> dict:
         """Save DataModule state for checkpointing."""
+        train_len = 0
+        val_len = 0
+
+        # IterableDataset doesn't have len(), use -1 to indicate streaming mode
+        if self.train_dataset is not None:
+            train_len = (
+                -1
+                if isinstance(self.train_dataset, IterableDataset)
+                else len(self.train_dataset)
+            )
+
+        if self.val_dataset is not None:
+            val_len = (
+                -1
+                if isinstance(self.val_dataset, IterableDataset)
+                else len(self.val_dataset)
+            )
+
         return {
-            "train_dataset_len": len(self.train_dataset) if self.train_dataset else 0,
-            "val_dataset_len": len(self.val_dataset) if self.val_dataset else 0,
+            "train_dataset_len": train_len,
+            "val_dataset_len": val_len,
+            "use_iterable": self._use_iterable,
         }
 
     def load_state_dict(self, state_dict: dict) -> None:
         """Restore DataModule state from checkpoint."""
         # Dataset is recreated on setup(), no state to restore
-
-
-class _InterleavedDataset(TorchDataset):
-    """Simple interleaved dataset that combines multiple HF datasets.
-
-    This avoids issues with set_transform and concatenate_datasets.
-    Inherits from torch.utils.data.Dataset for DataLoader compatibility.
-    """
-
-    def __init__(self, datasets: list[Dataset]) -> None:
-        super().__init__()
-        self.datasets = datasets
-        self._lengths = [len(ds) for ds in datasets]
-        self._total_length = sum(self._lengths)
-
-    def __len__(self) -> int:
-        return self._total_length
-
-    def __getitem__(self, idx: int) -> dict[str, Any]:
-        # Find which dataset this index belongs to
-        for i, length in enumerate(self._lengths):
-            if idx < length:
-                return self.datasets[i][idx]  # type: ignore[return-value]
-            idx -= length
-        msg = "Index out of range"
-        raise IndexError(msg)

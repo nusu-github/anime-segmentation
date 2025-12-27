@@ -6,7 +6,7 @@ from typing import Literal
 
 import lightning.pytorch as pl
 import torch
-from huggingface_hub import PyTorchModelHubMixin
+from huggingface_hub import ModelCard, PyTorchModelHubMixin
 from lightning import Trainer
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
@@ -87,7 +87,9 @@ class AnimeSegmentation(
     PyTorchModelHubMixin,
     library_name="anime_segmentation",
     repo_url="https://github.com/SkyTNT/anime-segmentation",
-    tags=["image-segmentation"],
+    pipeline_tag="image-segmentation",
+    license="apache-2.0",
+    tags=["image-segmentation", "anime", "background-removal", "matting"],
 ):
     def __init__(self, net_name: str, img_size: int | None = None, lr: float = 1e-3) -> None:
         super().__init__()
@@ -205,6 +207,50 @@ class AnimeSegmentation(
     ) -> torch.Tensor:
         images = batch["image"] if isinstance(batch, dict) else batch
         return self(images)
+
+    def generate_model_card(self, *args, **kwargs) -> ModelCard:
+        """Generate model card with training configuration and metrics."""
+        card = super().generate_model_card(*args, **kwargs)
+
+        # Add model architecture info to card text
+        net_name = self.hparams.get("net_name", "unknown")
+        img_size = self.hparams.get("img_size", "unknown")
+
+        card.text += f"""
+## Model Details
+
+- **Architecture**: {net_name}
+- **Input Size**: {img_size}x{img_size}
+- **Task**: Anime character segmentation / background removal
+
+## Usage
+
+```python
+from anime_segmentation import AnimeSegmentation
+
+# Load model from Hub
+model = AnimeSegmentation.from_pretrained("your-username/model-name")
+
+# Or load from local checkpoint
+model = AnimeSegmentation.try_load("{net_name}", "path/to/checkpoint.ckpt")
+
+# Inference
+import torch
+from PIL import Image
+from torchvision.transforms import functional as F
+
+image = Image.open("anime_image.png").convert("RGB")
+input_tensor = F.to_tensor(image).unsqueeze(0)
+
+with torch.no_grad():
+    mask = model(input_tensor)
+```
+
+## Training
+
+Trained using the [anime-segmentation](https://github.com/SkyTNT/anime-segmentation) pipeline.
+"""
+        return card
 
 
 def get_gt_encoder(
