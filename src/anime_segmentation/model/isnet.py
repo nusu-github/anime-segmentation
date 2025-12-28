@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from ..loss import HybridLoss, get_hybrid_loss
+from anime_segmentation.loss import HybridLoss, get_hybrid_loss
 
 # Shared hybrid loss instance (initialized lazily per model)
 _hybrid_loss: HybridLoss | None = None
@@ -30,22 +30,68 @@ def multi_loss_fusion(preds: list[Tensor], target: Tensor) -> tuple[Tensor, Tens
         Tuple of (loss at first scale, total loss across all scales)
     """
     hybrid_loss = _get_hybrid_loss()
-    loss0 = torch.tensor(0.0, device=preds[0].device, dtype=preds[0].dtype)
-    loss = torch.tensor(0.0, device=preds[0].device, dtype=preds[0].dtype)
-
-    for i, pred in enumerate(preds):
-        scale_loss = hybrid_loss(pred, target)
-        loss = loss + scale_loss
-        if i == 0:
-            loss0 = scale_loss
+    scale_losses = [hybrid_loss(pred, target) for pred in preds]
+    loss0 = scale_losses[0]
+    loss = torch.stack(scale_losses).mean()
     return loss0, loss
 
 
 # Feature distillation losses
 fea_loss = nn.MSELoss(reduction="mean")
-kl_loss = nn.KLDivLoss(reduction="mean")
+kl_loss = nn.KLDivLoss(reduction="batchmean")
 l1_loss = nn.L1Loss(reduction="mean")
 smooth_l1_loss = nn.SmoothL1Loss(reduction="mean")
+
+
+class EMALossBalancer:
+    def __init__(
+        self,
+        target_ratio: float = 0.1,
+        momentum: float = 0.99,
+        eps: float = 1e-8,
+        w_min: float = 0.0,
+        w_max: float = 1e4,
+    ) -> None:
+        self.target_ratio = target_ratio
+        self.momentum = momentum
+        self.eps = eps
+        self.w_min = w_min
+        self.w_max = w_max
+        self.ema_pixel: float | None = None
+        self.ema_feature: float | None = None
+
+    def get_feature_weight(self, pixel_loss: Tensor, feature_loss: Tensor) -> Tensor:
+        pixel_val = float(pixel_loss.detach())
+        feature_val = float(feature_loss.detach())
+
+        feature_val = max(feature_val, self.eps)
+
+        if self.ema_pixel is None or self.ema_feature is None:
+            self.ema_pixel = pixel_val
+            self.ema_feature = feature_val
+        else:
+            self.ema_pixel = self.momentum * self.ema_pixel + (1 - self.momentum) * pixel_val
+            self.ema_feature = self.momentum * self.ema_feature + (1 - self.momentum) * feature_val
+
+        ema_pixel = max(self.ema_pixel, self.eps)
+        ema_feature = max(self.ema_feature, self.eps)
+
+        w = self.target_ratio * ema_pixel / ema_feature
+        w = min(max(w, self.w_min), self.w_max)
+
+        return pixel_loss.new_tensor(w)
+
+
+# Shared EMA balancer instance for isnet_is
+_ema_balancer: EMALossBalancer | None = None
+
+
+def _get_ema_balancer() -> EMALossBalancer:
+    """Get or create the shared EMA balancer instance."""
+    global _ema_balancer
+    if _ema_balancer is None:
+        _ema_balancer = EMALossBalancer(target_ratio=0.1, momentum=0.99)
+    return _ema_balancer
 
 
 def multi_loss_fusion_kl(
@@ -57,6 +103,8 @@ def multi_loss_fusion_kl(
 ) -> tuple[Tensor, Tensor]:
     """Compute hybrid loss with feature distillation (KL/MSE).
 
+    Uses EMA-based dynamic balancing to maintain feature loss contribution.
+
     Args:
         preds: List of predictions at different scales (logits)
         target: Ground truth mask
@@ -67,22 +115,27 @@ def multi_loss_fusion_kl(
     Returns:
         Tuple of (loss at first scale, total loss including feature loss)
     """
-    # Pixel-level hybrid loss
-    loss0, loss = multi_loss_fusion(preds, target)
+    loss0, pixel_loss = multi_loss_fusion(preds, target)
 
-    # Feature distillation loss
+    fea_terms = []
     for df, fs_i in zip(dfs, fs, strict=True):
         match mode:
             case "MSE":
-                loss = loss + fea_loss(df, fs_i)
+                fea_terms.append(fea_loss(df, fs_i))
             case "KL":
-                loss = loss + kl_loss(F.log_softmax(df, dim=1), F.softmax(fs_i, dim=1))
+                fea_terms.append(kl_loss(F.log_softmax(df, dim=1), F.softmax(fs_i, dim=1)))
             case "MAE":
-                loss = loss + l1_loss(df, fs_i)
+                fea_terms.append(l1_loss(df, fs_i))
             case "SmoothL1":
-                loss = loss + smooth_l1_loss(df, fs_i)
+                fea_terms.append(smooth_l1_loss(df, fs_i))
 
-    return loss0, loss
+    feature_loss = torch.stack(fea_terms).mean()
+
+    balancer = _get_ema_balancer()
+    feature_weight = balancer.get_feature_weight(pixel_loss, feature_loss)
+
+    total_loss = pixel_loss + feature_weight * feature_loss
+    return loss0, total_loss
 
 
 class RebnConv(nn.Module):

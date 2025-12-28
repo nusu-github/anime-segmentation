@@ -1,0 +1,105 @@
+# lightning_config.yaml
+seed_everything: true
+trainer:
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 20
+  benchmark: true
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 2
+  strategy:
+    class_path: lightning.pytorch.strategies.DDPStrategy
+    init_args:
+      find_unused_parameters: false
+      static_graph: true
+      gradient_as_bucket_view: true
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: checkpoints/
+        monitor: val/Sm
+        mode: max
+        save_top_k: 3
+        save_last: true
+        auto_insert_metric_name: false
+        filename: "epoch={epoch:02d}-Sm={val/Sm:.4f}"
+        verbose: true
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/Sm
+        mode: max
+        patience: 5
+        min_delta: 0.001
+        verbose: true
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        save_dir: lightning_logs
+        name: anime_seg
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        save_dir: lightning_logs
+        name: anime_seg
+
+model:
+  net_name: isnet_is
+  img_size: 1024
+  compile: true
+  compile_mode: max-autotune  # or reduce-overhead, max-autotune
+  lr: 0.001
+  optimizer:
+    class_path: schedulefree.RAdamScheduleFree
+    init_args:
+      betas: [0.9, 0.999]
+      eps: 1e-08
+      weight_decay: 0
+  # Hybrid loss weights (BiRefNet-style: pixel/region/boundary)
+  loss_bce: 30.0 # Pixel-level BCE
+  loss_iou: 0.5 # Region-level IoU
+  loss_ssim: 10.0 # Structure similarity
+  loss_structure: 0.0 # Disabled (overlaps with BCE+IoU)
+  loss_contour: 0.0 # Disabled
+
+data:
+  # dataset_name: "your-username/your-dataset"
+  data_dir: dataset/
+  fg_dir: fg
+  bg_dir: bg
+  img_dir: imgs
+  mask_dir: masks
+  fg_ext: .png
+  bg_ext: .jpg
+  img_ext: .jpg
+  mask_ext: .jpg
+  data_split: 0.95
+  img_size: 1024
+  batch_size_train: 2
+  batch_size_val: 2
+  num_workers_train: 4
+  num_workers_val: 4
+  with_trimap: false
+  # Augmentation probabilities for synthetic images (set to 0.0 to disable)
+  aug_sharp_background_p: 0.0
+  aug_sketch_p: 0.0
+  aug_grayscale_p: 0.25
+  aug_color_blocks_p: 0.0
+  aug_text_overlay_p: 0.0
+  aug_light_p: 0.0
+  aug_resize_blur_p: 0.15
+  aug_jpeg_p: 0.15
+  aug_color_p: 0.3
+  aug_noise_p: 0.15
+  # Augmentation parameters
+  aug_rotation_degrees_synth: 25.0
+  aug_rotation_degrees_real: 15.0
+  aug_jpeg_quality_range: [50, 95]
+  aug_resize_blur_scale_range: [0.6, 0.9]
+  aug_edge_blur_p: 0.2
+  aug_edge_blur_kernel_size: 5
+  aug_noise_sigma: 0.05
+  aug_rescale_pad_ratio: 1.25
+  aug_text_font_size_ratio: 0.05

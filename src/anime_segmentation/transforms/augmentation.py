@@ -536,9 +536,7 @@ class ResizeBlur(v2.Transform):
 
     _transformed_types = (tv_tensors.Image,)
 
-    def __init__(
-        self, p: float = 0.5, scale_range: tuple[float, float] = (0.6, 0.9)
-    ) -> None:
+    def __init__(self, p: float = 0.5, scale_range: tuple[float, float] = (0.6, 0.9)) -> None:
         super().__init__()
         self.p = p
         self.scale_range = scale_range

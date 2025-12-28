@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from ..loss import HybridLoss, get_hybrid_loss
+from anime_segmentation.loss import HybridLoss, get_hybrid_loss
 
 __all__ = ["U2Net", "U2NetFull", "U2NetFull2", "U2NetLite", "U2NetLite2"]
 

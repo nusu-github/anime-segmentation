@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "datasets>=4.4.2",
     "huggingface-hub>=0.22",
+    "jsonargparse[signatures]>=4.45.0",
     "kornia",
     "lightning",
     "numpy",
@@ -17,6 +18,14 @@ dependencies = [
     "torch>=2.9.1",
     "torchmetrics>=1.8.2",
     "torchvision>=0.24.1",
+]
+
+[project.optional-dependencies]
+schedulefree = [
+    "schedulefree>=1.4.1",
+]
+came = [
+    "came-pytorch>=0.1.3",
 ]
 
 [build-system]

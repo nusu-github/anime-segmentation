@@ -17,7 +17,7 @@ from torch.nn.modules.normalization import LayerNorm
 from torch.nn.parameter import Parameter
 from torch.utils import checkpoint, model_zoo
 
-from ..loss import HybridLoss, get_hybrid_loss
+from anime_segmentation.loss import HybridLoss, get_hybrid_loss
 
 # Shared hybrid loss instance
 _hybrid_loss: HybridLoss | None = None
@@ -456,10 +456,7 @@ class Bottle2neck(nn.Module):
         spx = torch.split(out, self.width, 1)
         sp: Tensor = spx[0]  # Initialize for TorchScript
         for i, (conv, bn) in enumerate(zip(self.convs, self.bns, strict=True)):
-            if i == 0 or self.stype == "stage":
-                sp = spx[i]
-            else:
-                sp = sp + spx[i]
+            sp = spx[i] if i == 0 or self.stype == "stage" else sp + spx[i]
             sp = conv(sp)
             sp = self.relu(bn(sp))
             out = sp if i == 0 else torch.cat((out, sp), 1)

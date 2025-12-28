@@ -4,7 +4,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from torch.cuda import amp
+from torch.amp.autocast_mode import autocast
 from tqdm import tqdm
 
 from anime_segmentation.train import NET_NAMES, AnimeSegmentation
@@ -21,12 +21,9 @@ def get_mask(model: AnimeSegmentation, input_img, use_amp=True, img_size=640):
     img_input = img_input[np.newaxis, :]
     tmp_img = torch.from_numpy(img_input).float().to(model.device)
     with torch.no_grad():
-        if use_amp:
-            with amp.autocast():
-                pred = model(tmp_img)
-            pred = pred.to(dtype=torch.float32)
-        else:
+        with autocast(device_type=model.device.type, enabled=use_amp):
             pred = model(tmp_img)
+            pred = pred.to(dtype=torch.float32)
         pred = pred.cpu().numpy()[0]
         pred = np.transpose(pred, (1, 2, 0))
         pred = pred[ph // 2 : ph // 2 + h, pw // 2 : pw // 2 + w]

@@ -1,4 +1,3 @@
-import math
 from argparse import Namespace
 from typing import Any
 
@@ -6,14 +5,16 @@ import lightning.pytorch as pl
 import torch
 from huggingface_hub import ModelCard, PyTorchModelHubMixin
 from lightning import Trainer
+from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.cli import ArgsType, LightningCLI, OptimizerCallable
 from lightning.pytorch.strategies import DDPStrategy
+from torch._dynamo import OptimizedModule
 from torch.optim import Optimizer
-from torchmetrics import MeanAbsoluteError, MetricCollection
-from torchmetrics.classification import BinaryFBetaScore, BinaryPrecision, BinaryRecall
+from torchmetrics import MetricCollection
 
 from .data_module import AnimeSegDataModule
 from .loss import configure_loss_weights
+from .metrics import EMeasure, FMeasure, MAEMetric, SMeasure, WeightedFMeasure
 from .model import (
     InSPyReNet,
     InSPyReNet_Res2Net50,
@@ -60,6 +61,66 @@ def get_net(
             raise NotImplementedError
 
 
+class ScheduleFreeCallback(Callback):
+    """Schedule-Free Optimizer Callback for Lightning."""
+
+    def _is_schedule_free(self, opt) -> bool:
+        """Check if it is a Schedule-Free optimizer with train()/eval() methods"""
+        return hasattr(opt, "train") and hasattr(opt, "eval")
+
+    def _get_train_mode(self, opt) -> bool:
+        """Retrieve the current mode (the location differs between the Standard and Wrapper versions)"""
+        # Wrapper version: optimizer.train_mode
+        if hasattr(opt, "train_mode"):
+            return opt.train_mode
+        # Standard version: param_groups[0]['train_mode']
+        if hasattr(opt, "param_groups") and opt.param_groups:
+            return opt.param_groups[0].get("train_mode", False)
+        return False
+
+    def _set_mode(self, trainer: "pl.Trainer", mode: str) -> None:
+        for opt in trainer.optimizers:
+            if self._is_schedule_free(opt):
+                getattr(opt, mode)()
+
+    # === Training ===
+    def on_train_start(self, trainer, pl_module):  # noqa: ARG002
+        self._set_mode(trainer, "train")
+
+    # === Validation ===
+    def on_validation_start(self, trainer, pl_module):  # noqa: ARG002
+        self._set_mode(trainer, "eval")
+
+    def on_validation_end(self, trainer, pl_module):  # noqa: ARG002
+        if trainer.sanity_checking or trainer.training:
+            self._set_mode(trainer, "train")
+
+    # === Test / Predict ===
+    def on_test_start(self, trainer, pl_module):  # noqa: ARG002
+        self._set_mode(trainer, "eval")
+
+    def on_predict_start(self, trainer, pl_module):  # noqa: ARG002
+        self._set_mode(trainer, "eval")
+
+    # === Checkpoint ===
+    def on_save_checkpoint(self, trainer, pl_module, checkpoint):  # noqa: ARG002
+        """Save the optimizer state in eval mode"""
+        new_states = []
+        for i, opt in enumerate(trainer.optimizers):
+            if self._is_schedule_free(opt):
+                was_train = self._get_train_mode(opt)
+                if was_train:
+                    # Type Safety: switch to eval mode
+                    opt.eval()  # pyright: ignore[reportAttributeAccessIssue]
+                new_states.append(trainer.strategy.optimizer_state(opt))
+                if was_train:
+                    # Type Safety: restore to train mode
+                    opt.train()  # pyright: ignore[reportAttributeAccessIssue]
+            else:
+                new_states.append(checkpoint["optimizer_states"][i])
+        checkpoint["optimizer_states"] = new_states
+
+
 class AnimeSegmentation(
     pl.LightningModule,
     PyTorchModelHubMixin,
@@ -80,6 +141,8 @@ class AnimeSegmentation(
         loss_ssim: float = 10.0,
         loss_structure: float = 5.0,
         loss_contour: float = 5.0,
+        compile: bool = False,
+        compile_mode: str | None = None,
     ) -> None:
         super().__init__()
         assert net_name in NET_NAMES
@@ -96,6 +159,11 @@ class AnimeSegmentation(
         configure_loss_weights(loss_weights)
 
         self.net = get_net(net_name, img_size)
+
+        # Apply torch.compile to the network if enabled
+        if compile:
+            self.net = torch.compile(self.net, mode=compile_mode)
+
         if self.hparams["net_name"] == "isnet_is":
             self.gt_encoder = get_net("isnet_gt", img_size)
             self.gt_encoder.requires_grad_(requires_grad=False)
@@ -104,17 +172,22 @@ class AnimeSegmentation(
 
         self.optimizer_factory = optimizer
 
-        # Validation metrics
-        # Original f1_torch used beta^2=0.3, so beta=sqrt(0.3)
+        # Cache the original (unwrapped) network type for pattern matching
+        self._net_unwrapped = (
+            self.net._orig_mod if isinstance(self.net, OptimizedModule) else self.net
+        )
+
+        # BiRefNet-style validation metrics
         self.val_metrics = MetricCollection(
             {
-                "precision": BinaryPrecision(multidim_average="global"),
-                "recall": BinaryRecall(multidim_average="global"),
-                "f1": BinaryFBetaScore(beta=math.sqrt(0.3), multidim_average="global"),
+                "Sm": SMeasure(),
+                "Em": EMeasure(),
+                "Fm": FMeasure(beta=0.3),
+                "wFm": WeightedFMeasure(beta=1.0),
+                "MAE": MAEMetric(),
             },
             prefix="val/",
         )
-        self.val_mae = MeanAbsoluteError()
 
     @classmethod
     def try_load(cls, net_name, ckpt_path, map_location: str | None = None, img_size=None):
@@ -139,7 +212,7 @@ class AnimeSegmentation(
         return self.optimizer_factory(self.parameters(), lr=self.hparams["lr"])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        match self.net:
+        match self._net_unwrapped:
             case ISNetDIS() | ISNetGTEncoder():
                 return self.net(x)[0][0].sigmoid()
             case U2Net():
@@ -147,13 +220,14 @@ class AnimeSegmentation(
             case MODNet():
                 return self.net(x, True)[2]
             case InSPyReNet():
-                return self.net.forward_inference(x)["pred"]
+                return self.net.forward_inference(x)["pred"]  # pyright: ignore[reportReturnType, reportCallIssue, reportFunctionMemberAccess]
             case _:
                 raise NotImplementedError
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         images, labels = batch["image"], batch["label"]
-        match self.net:
+        # Use _net_unwrapped for pattern matching (handles compiled models)
+        match self._net_unwrapped:
             case ISNetDIS():
                 ds, dfs = self.net(images)
                 loss_args = [ds, dfs, labels]
@@ -171,18 +245,19 @@ class AnimeSegmentation(
                 pred_semantic, pred_detail, pred_matte = self.net(images, False)
                 loss_args = [pred_semantic, pred_detail, pred_matte, images, trimaps, labels]
             case InSPyReNet():
-                loss_args = self.net.forward_train(images, labels)
+                loss_args = self.net.forward_train(images, labels)  # pyright: ignore[reportFunctionMemberAccess, reportCallIssue]
             case _:
                 raise NotImplementedError
 
-        loss0, loss = self.net.compute_loss(loss_args)
+        loss0, loss = self._net_unwrapped.compute_loss(loss_args)
         self.log("train/loss", loss, prog_bar=True)
         self.log("train/loss_tar", loss0)
         return loss
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
         images, labels = batch["image"], batch["label"]
-        match self.net:
+        # Use _net_unwrapped for pattern matching (handles compiled models)
+        match self._net_unwrapped:
             case ISNetGTEncoder():
                 preds = self.forward(labels)
             case _:
@@ -191,17 +266,11 @@ class AnimeSegmentation(
         # Clean predictions for metric computation
         preds_clean = preds.nan_to_num(nan=0, posinf=1, neginf=0)
 
-        # Flatten for global binary metrics (batch, channels, height, width) -> (N,)
-        preds_flat = preds_clean.view(-1)
-        labels_flat = labels.view(-1)
-
-        # Update metrics
-        self.val_metrics.update(preds_flat, labels_flat)
-        self.val_mae.update(preds_clean, labels)
+        # Update BiRefNet-style metrics (expects batch of images)
+        self.val_metrics.update(preds_clean, labels)
 
         # Log metrics (torchmetrics handles sync automatically)
         self.log_dict(self.val_metrics, prog_bar=True)
-        self.log("val/mae", self.val_mae, prog_bar=True)
 
     def predict_step(
         self, batch: dict[str, torch.Tensor] | torch.Tensor, batch_idx: int
@@ -255,11 +324,15 @@ Trained using the [anime-segmentation](https://github.com/SkyTNT/anime-segmentat
 
 
 def get_gt_encoder(
-    datamodule: AnimeSegDataModule, trainer_config: dict[str, Any], gt_epoch: int
+    datamodule: AnimeSegDataModule,
+    trainer_config: dict[str, Any],
+    gt_epoch: int,
+    compile: bool = False,
+    compile_mode: str | None = None,
 ) -> torch.nn.Module:
     """Train ground truth encoder for ISNet with intermediate supervision."""
     print("---start train ground truth encoder---")
-    gt_encoder = AnimeSegmentation("isnet_gt")
+    gt_encoder = AnimeSegmentation("isnet_gt", compile=compile, compile_mode=compile_mode)
 
     # Extract relevant trainer args from config
     # We use a simple DDP or auto strategy for this aux task to avoid complex config issues
@@ -273,6 +346,7 @@ def get_gt_encoder(
         )
 
     trainer = Trainer(
+        callbacks=[ScheduleFreeCallback()],
         precision=trainer_config.get("precision", "16-mixed"),
         accelerator=trainer_config.get("accelerator", "auto"),
         devices=devices,
@@ -330,7 +404,13 @@ class AnimeSegmentationCLI(LightningCLI):
             else:
                 t_cfg = trainer_config
 
-            trained_net = get_gt_encoder(self.datamodule, t_cfg, gt_epoch)
+            # Pass compile settings to gt_encoder training
+            compile_enabled = model_config.get("compile", False)
+            compile_mode = model_config.get("compile_mode", None)
+
+            trained_net = get_gt_encoder(
+                self.datamodule, t_cfg, gt_epoch, compile_enabled, compile_mode
+            )
             self.model.gt_encoder.load_state_dict(trained_net.state_dict())
 
 
@@ -340,6 +420,7 @@ def cli_main(args: ArgsType = None):
         datamodule_class=AnimeSegDataModule,
         save_config_kwargs={"overwrite": True},
         args=args,
+        trainer_defaults={"callbacks": [ScheduleFreeCallback()]},
     )
 
 

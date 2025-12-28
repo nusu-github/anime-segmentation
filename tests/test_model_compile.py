@@ -1,10 +1,8 @@
 """Test torch.compile and torch.jit.script compatibility for all models."""
 
+import pytest
 import torch
 from torch import nn
-
-import pytest
-
 
 # Test configurations for different models
 MODEL_CONFIGS = {
@@ -36,6 +34,8 @@ INPUT_SIZES = {
 def get_model(model_name: str) -> nn.Module:
     """Create model instance by name."""
     from anime_segmentation.model import (
+        InSPyReNet_Res2Net50,
+        InSPyReNet_SwinB,
         ISNetDIS,
         ISNetGTEncoder,
         MODNet,
@@ -43,8 +43,6 @@ def get_model(model_name: str) -> nn.Module:
         U2NetFull2,
         U2NetLite,
         U2NetLite2,
-        InSPyReNet_Res2Net50,
-        InSPyReNet_SwinB,
     )
 
     model_classes = {
@@ -148,9 +146,7 @@ def test_torch_jit_script(model_name: str):
         with torch.no_grad():
             output = scripted_model(*args)
 
-        if isinstance(output, dict):
-            assert len(output) > 0
-        elif isinstance(output, (list, tuple)):
+        if isinstance(output, (dict, list, tuple)):
             assert len(output) > 0
         else:
             assert output is not None
@@ -181,7 +177,7 @@ def test_compile_summary():
             with torch.no_grad():
                 compiled(*args)
             results["torch.compile"][model_name] = "PASS"
-            print(f"  torch.compile: PASS")
+            print("  torch.compile: PASS")
         except Exception as e:
             results["torch.compile"][model_name] = f"FAIL: {e}"
             print(f"  torch.compile: FAIL - {e}")
@@ -195,7 +191,7 @@ def test_compile_summary():
             with torch.no_grad():
                 scripted(*args)
             results["torch.jit.script"][model_name] = "PASS"
-            print(f"  torch.jit.script: PASS")
+            print("  torch.jit.script: PASS")
         except Exception as e:
             results["torch.jit.script"][model_name] = f"FAIL: {e}"
             print(f"  torch.jit.script: FAIL - {e}")

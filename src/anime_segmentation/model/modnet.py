@@ -16,7 +16,7 @@ from torch.nn.modules.container import Sequential
 from torch.nn.modules.conv import Conv2d
 from torch.nn.modules.instancenorm import InstanceNorm2d
 
-from ..loss import HybridLoss, get_hybrid_loss
+from anime_segmentation.loss import HybridLoss, get_hybrid_loss
 
 # Shared hybrid loss instance
 _hybrid_loss: HybridLoss | None = None

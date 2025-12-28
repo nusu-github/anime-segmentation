@@ -175,8 +175,8 @@ class HybridLoss(nn.Module):
         bce_weight: float = 30.0,
         iou_weight: float = 0.5,
         ssim_weight: float = 10.0,
-        structure_weight: float = 5.0,
-        contour_weight: float = 5.0,
+        structure_weight: float = 0.0,
+        contour_weight: float = 0.0,
     ) -> None:
         super().__init__()
         self.bce_weight = bce_weight
@@ -240,8 +240,8 @@ DEFAULT_LOSS_WEIGHTS = {
     "bce": 30.0,
     "iou": 0.5,
     "ssim": 10.0,
-    "structure": 5.0,
-    "contour": 5.0,
+    "structure": 0.0,  # Disabled (overlaps with BCE+IoU)
+    "contour": 0.0,  # Disabled
 }
 
 # Global configured weights (can be overridden before model initialization)
@@ -276,6 +276,6 @@ def get_hybrid_loss(weights: dict[str, float] | None = None) -> HybridLoss:
         bce_weight=weights.get("bce", 30.0),
         iou_weight=weights.get("iou", 0.5),
         ssim_weight=weights.get("ssim", 10.0),
-        structure_weight=weights.get("structure", 5.0),
-        contour_weight=weights.get("contour", 5.0),
+        structure_weight=weights.get("structure", 0.0),
+        contour_weight=weights.get("contour", 0.0),
     )

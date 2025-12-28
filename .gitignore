@@ -123,5 +123,5 @@ pyrightconfig.json
 
 /out
 /lightning_logs
-/saved_models
+/checkpoints
 /dataset

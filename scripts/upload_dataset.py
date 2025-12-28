@@ -3,7 +3,8 @@
 import argparse
 from pathlib import Path
 
-from huggingface_hub import HfApi, HfHubHTTPError
+from huggingface_hub import HfApi
+from huggingface_hub.errors import HfHubHTTPError
 
 from anime_segmentation.hf_dataset import (
     load_background_dataset,
@@ -36,7 +37,6 @@ def generate_dataset_card(
         Dataset card content as markdown string.
     """
     return f"""---
-license: cc-by-nc-4.0
 task_categories:
   - image-segmentation
 tags:
@@ -45,8 +45,6 @@ tags:
   - matting
   - background-removal
 pretty_name: Anime Segmentation Dataset
-size_categories:
-  - 1K<n<10K
 ---
 
 # Anime Segmentation Dataset
@@ -135,10 +133,6 @@ data_module = AnimeSegDataModule(
     batch_size_train=4,
 )
 ```
-
-## License
-
-This dataset is released under CC-BY-NC-4.0 license.
 """
 
 

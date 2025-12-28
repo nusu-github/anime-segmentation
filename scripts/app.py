@@ -5,9 +5,29 @@ import cv2
 import gradio as gr
 import numpy as np
 import torch
+from torch.amp.autocast_mode import autocast
 
 from anime_segmentation.train import NET_NAMES, AnimeSegmentation
-from scripts.inference import get_mask
+
+
+def get_mask(model: AnimeSegmentation, input_img, use_amp=True, img_size=640):
+    input_img = (input_img / 255).astype(np.float32)
+    h, w = orig_h, orig_w = input_img.shape[:-1]
+    h, w = (img_size, int(img_size * w / h)) if h > w else (int(img_size * h / w), img_size)
+    ph, pw = img_size - h, img_size - w
+    img_input = np.zeros([img_size, img_size, 3], dtype=np.float32)
+    img_input[ph // 2 : ph // 2 + h, pw // 2 : pw // 2 + w] = cv2.resize(input_img, (w, h))
+    img_input = np.transpose(img_input, (2, 0, 1))
+    img_input = img_input[np.newaxis, :]
+    tmp_img = torch.from_numpy(img_input).float().to(model.device)
+    with torch.no_grad():
+        with autocast(device_type=model.device.type, enabled=use_amp):
+            pred = model(tmp_img)
+            pred = pred.to(dtype=torch.float32)
+        pred = pred.cpu().numpy()[0]
+        pred = np.transpose(pred, (1, 2, 0))
+        pred = pred[ph // 2 : ph // 2 + h, pw // 2 : pw // 2 + w]
+        return cv2.resize(pred, (orig_w, orig_h))[:, :, np.newaxis]
 
 
 # global model state
@@ -61,7 +81,8 @@ def auto_load_model():
         return gr.Info("Model already loaded successfully")
 
     try:
-        model_paths = sorted(Path().rglob("*.ckpt"))
+        project_root = Path(__file__).parent.parent
+        model_paths = sorted(project_root.rglob("*.ckpt"))
         if not model_paths:
             raise gr.Error("No model files found")
 
@@ -105,7 +126,9 @@ def load_model(path: str, net_name: str, img_size: int, device: str = "cuda:0"):
 
 
 def get_model_path():
-    if model_paths := sorted(Path().rglob("*.ckpt")):
+    # Search from script's parent directory (project root)
+    project_root = Path(__file__).parent.parent
+    if model_paths := sorted(project_root.rglob("*.ckpt")):
         model_paths = [str(p) for p in model_paths]
         return gr.Dropdown(choices=model_paths, value=model_paths[0])
 
