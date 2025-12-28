@@ -312,6 +312,7 @@ class RandomTextOverlay(v2.Transform):
         p: Probability of applying the transform. Default is 0.5.
         font_path: Path to font file. Default uses bundled font.
         num_texts_range: Range for number of text strings. Default is (1, 10).
+        font_size_ratio: Font size as ratio of image size. Default is 0.05.
     """
 
     _transformed_types = (tv_tensors.Image,)
@@ -321,21 +322,23 @@ class RandomTextOverlay(v2.Transform):
         p: float = 0.5,
         font_path: str | Path | None = None,
         num_texts_range: tuple[int, int] = (1, 10),
+        font_size_ratio: float = 0.05,
     ) -> None:
         super().__init__()
         self.p = p
         self.font_path = font_path or (Path(__file__).parent.parent / "assets" / "font.otf")
         self.num_texts_range = num_texts_range
+        self.font_size_ratio = font_size_ratio
         self.texts = [chr(x) for x in range(0x3040, 0x30FF + 1)]
-        self._fonts: list[ImageFont.FreeTypeFont] | None = None
+        self._fonts: dict[int, list[ImageFont.FreeTypeFont]] = {}
 
     def _get_fonts(self, min_size: int) -> list[ImageFont.FreeTypeFont]:
-        if self._fonts is None:
-            self._fonts = [
+        if min_size not in self._fonts:
+            self._fonts[min_size] = [
                 ImageFont.truetype(str(self.font_path), x, encoding="utf-8")
                 for x in range(min_size, min_size * 5, 2)
             ]
-        return self._fonts
+        return self._fonts[min_size]
 
     def make_params(self, flat_inputs: list[Any]) -> dict[str, Any]:
         if torch.rand(1).item() > self.p:
@@ -380,7 +383,7 @@ class RandomTextOverlay(v2.Transform):
             return inpt
 
         h, w = params["output_size"]
-        min_size = min(h, w) // 100
+        min_size = int(min(h, w) * self.font_size_ratio)
 
         try:
             fonts = self._get_fonts(max(1, min_size))
@@ -527,19 +530,23 @@ class ResizeBlur(v2.Transform):
 
     Args:
         p: Probability of applying the transform. Default is 0.5.
-        scale_factor: Factor to downscale by. Default is 2.
+        scale_range: Range for scale factor (min, max). Image is scaled down by this factor.
+            Default is (0.6, 0.9) meaning image is resized to 60-90% then back up.
     """
 
     _transformed_types = (tv_tensors.Image,)
 
-    def __init__(self, p: float = 0.5, scale_factor: int = 2) -> None:
+    def __init__(
+        self, p: float = 0.5, scale_range: tuple[float, float] = (0.6, 0.9)
+    ) -> None:
         super().__init__()
         self.p = p
-        self.scale_factor = scale_factor
+        self.scale_range = scale_range
 
     def make_params(self, flat_inputs: list[Any]) -> dict[str, Any]:
         return {
             "apply": torch.rand(1).item() < self.p,
+            "scale": random.uniform(*self.scale_range),
             "interpolation": random.choice(
                 [
                     v2.InterpolationMode.BILINEAR,
@@ -556,7 +563,8 @@ class ResizeBlur(v2.Transform):
             return inpt
 
         h, w = inpt.shape[-2:]
-        small_size = (h // self.scale_factor, w // self.scale_factor)
+        scale = params["scale"]
+        small_size = (int(h * scale), int(w * scale))
 
         small = F.resize(inpt, list(small_size))
         result = F.resize(small, [h, w], interpolation=params["interpolation"])

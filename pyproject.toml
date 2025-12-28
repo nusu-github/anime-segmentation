@@ -78,6 +78,7 @@ ignore = [
     "EM",
     "S311",
     "PLR0913",
+    "C901",
 ]
 
 [tool.pytest.ini_options]

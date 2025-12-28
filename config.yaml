@@ -73,3 +73,24 @@ data:
   num_workers_train: 4
   num_workers_val: 4
   with_trimap: false
+  # Augmentation probabilities for synthetic images (set to 0.0 to disable)
+  aug_sharp_background_p: 0.0
+  aug_sketch_p: 0.0
+  aug_grayscale_p: 0.25
+  aug_color_blocks_p: 0.0
+  aug_text_overlay_p: 0.0
+  aug_light_p: 0.0
+  aug_resize_blur_p: 0.15
+  aug_jpeg_p: 0.15
+  aug_color_p: 0.3
+  aug_noise_p: 0.15
+  # Augmentation parameters
+  aug_rotation_degrees_synth: 25.0
+  aug_rotation_degrees_real: 15.0
+  aug_jpeg_quality_range: [50, 95]
+  aug_resize_blur_scale_range: [0.6, 0.9]
+  aug_edge_blur_p: 0.2
+  aug_edge_blur_kernel_size: 5
+  aug_noise_sigma: 0.05
+  aug_rescale_pad_ratio: 1.25
+  aug_text_font_size_ratio: 0.05

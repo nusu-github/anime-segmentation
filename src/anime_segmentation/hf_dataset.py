@@ -223,6 +223,8 @@ class SyntheticCompositor:
         background_paths: list[str],
         output_size: tuple[int, int],
         seed: int | None = None,
+        edge_blur_p: float = 0.2,
+        edge_blur_kernel_size: int = 5,
     ) -> None:
         """Initialize compositor.
 
@@ -231,11 +233,15 @@ class SyntheticCompositor:
             background_paths: List of paths to RGB background images.
             output_size: Output image size (height, width).
             seed: Optional random seed for reproducibility.
+            edge_blur_p: Probability of applying edge blur during blending.
+            edge_blur_kernel_size: Kernel size for edge blur.
         """
         self.foreground_paths = foreground_paths
         self.background_paths = background_paths
         self.output_size = output_size
         self.rng = random.Random(seed)
+        self.edge_blur_p = edge_blur_p
+        self.edge_blur_kernel_size = edge_blur_kernel_size
 
     def __call__(self, examples: dict[str, Any]) -> dict[str, Any]:
         """Transform function for set_transform.
@@ -369,9 +375,13 @@ class SyntheticCompositor:
         fg_rgb = fg[:3]
         fg_alpha = fg[3:4]
 
-        # Soft edge blending with gaussian blur
-        blurred_alpha = F.gaussian_blur(fg_alpha, kernel_size=[5, 5])
-        mask = fg_alpha * blurred_alpha
+        # Optionally apply soft edge blending with gaussian blur
+        if self.rng.random() < self.edge_blur_p:
+            ks = self.edge_blur_kernel_size
+            blurred_alpha = F.gaussian_blur(fg_alpha, kernel_size=[ks, ks])
+            mask = fg_alpha * blurred_alpha
+        else:
+            mask = fg_alpha
 
         # Composite
         image = mask * fg_rgb + (1 - mask) * image

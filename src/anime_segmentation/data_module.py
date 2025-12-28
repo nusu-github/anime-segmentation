@@ -85,6 +85,27 @@ class AnimeSegDataModule(L.LightningDataModule):
         *,
         with_trimap: bool = False,
         streaming: bool = False,
+        # Augmentation probabilities for synthetic images (set to 0.0 to disable)
+        aug_sharp_background_p: float = 0.0,
+        aug_sketch_p: float = 0.0,
+        aug_grayscale_p: float = 0.25,
+        aug_color_blocks_p: float = 0.0,
+        aug_text_overlay_p: float = 0.0,
+        aug_light_p: float = 0.0,
+        aug_resize_blur_p: float = 0.15,
+        aug_jpeg_p: float = 0.15,
+        aug_color_p: float = 0.3,
+        aug_noise_p: float = 0.15,
+        # Augmentation parameters
+        aug_rotation_degrees_synth: float = 25.0,
+        aug_rotation_degrees_real: float = 15.0,
+        aug_jpeg_quality_range: tuple[int, int] = (50, 95),
+        aug_resize_blur_scale_range: tuple[float, float] = (0.6, 0.9),
+        aug_edge_blur_p: float = 0.2,
+        aug_edge_blur_kernel_size: int = 5,
+        aug_noise_sigma: float = 0.05,
+        aug_rescale_pad_ratio: float = 1.25,
+        aug_text_font_size_ratio: float = 0.05,
     ) -> None:
         """Initialize the data module.
 
@@ -108,6 +129,25 @@ class AnimeSegDataModule(L.LightningDataModule):
             characters_range: Range for number of characters per synthetic sample.
             with_trimap: Whether to generate trimap for MODNet.
             streaming: Whether to use streaming mode (Hub only).
+            aug_sharp_background_p: Probability for sharp background augmentation.
+            aug_sketch_p: Probability for sketch conversion.
+            aug_grayscale_p: Probability for grayscale conversion.
+            aug_color_blocks_p: Probability for random color blocks overlay.
+            aug_text_overlay_p: Probability for random text overlay.
+            aug_light_p: Probability for light simulation.
+            aug_resize_blur_p: Probability for resize blur.
+            aug_jpeg_p: Probability for JPEG compression.
+            aug_color_p: Probability for color augmentation.
+            aug_noise_p: Probability for Gaussian noise.
+            aug_rotation_degrees_synth: Max rotation degrees for synthetic images.
+            aug_rotation_degrees_real: Max rotation degrees for real images.
+            aug_jpeg_quality_range: JPEG quality range (min, max).
+            aug_resize_blur_scale_range: Resize blur scale range (min, max).
+            aug_edge_blur_p: Probability for edge blur in compositing.
+            aug_edge_blur_kernel_size: Kernel size for edge blur.
+            aug_noise_sigma: Sigma for Gaussian noise.
+            aug_rescale_pad_ratio: Ratio for rescale padding (1.25 = img_size * 1.25).
+            aug_text_font_size_ratio: Font size ratio relative to image size.
         """
         super().__init__()
         self.save_hyperparameters()
@@ -221,52 +261,62 @@ class AnimeSegDataModule(L.LightningDataModule):
         synthetic_transform = self._build_synthetic_transform(img_size)
         val_transform = self._build_val_transform(img_size)
 
-        # Create train real dataset with transform
-        train_real_raw.set_transform(
-            self._make_real_transform_fn(RealImageTransform(), real_transform)
-        )
-
-        # Create train synthetic dataset with compositor
+        # Create compositors for synthetic data
         train_compositor = SyntheticCompositor(
             foreground_paths=self._train_fg_paths,
             background_paths=self._train_bg_paths,
             output_size=(img_size, img_size),
+            edge_blur_p=self.hparams["aug_edge_blur_p"],
+            edge_blur_kernel_size=self.hparams["aug_edge_blur_kernel_size"],
         )
-        train_synthetic_idx.set_transform(
-            self._make_synthetic_transform_fn(train_compositor, synthetic_transform)
-        )
-
-        # Create val real dataset
-        val_real_raw.set_transform(
-            self._make_real_transform_fn(RealImageTransform(), val_transform)
-        )
-
-        # Create val synthetic dataset
         val_compositor = SyntheticCompositor(
             foreground_paths=self._val_fg_paths,
             background_paths=self._val_bg_paths,
             output_size=(img_size, img_size),
             seed=43,
-        )
-        val_synthetic_idx.set_transform(
-            self._make_synthetic_transform_fn(val_compositor, val_transform)
+            edge_blur_p=0.0,  # No augmentation for validation
         )
 
         # Combine datasets using HuggingFace's native interleave_datasets
-        # This provides better performance and compatibility with DataLoader
+        # Note: interleave_datasets does not preserve set_transform, so we apply
+        # transforms after interleaving using a unified transform function
         num_shards = max(self.hparams["num_workers_train"] * 4, 16)
-        self.train_dataset = create_interleaved_dataset(
+        train_interleaved = create_interleaved_dataset(
             datasets=[train_real_raw, train_synthetic_idx],
             seed=42,
             num_shards=num_shards,
             use_iterable=self._use_iterable,
         )
-        self.val_dataset = create_interleaved_dataset(
+        val_interleaved = create_interleaved_dataset(
             datasets=[val_real_raw, val_synthetic_idx],
             seed=43,
             num_shards=num_shards,
             use_iterable=self._use_iterable,
         )
+
+        # Apply unified transform that dispatches based on item type
+        # Note: set_transform is only available on Dataset, not IterableDataset
+        if hasattr(train_interleaved, "set_transform"):
+            cast("Dataset", train_interleaved).set_transform(
+                self._make_unified_transform_fn(
+                    real_base=RealImageTransform(),
+                    real_aug=real_transform,
+                    compositor=train_compositor,
+                    synthetic_aug=synthetic_transform,
+                )
+            )
+        if hasattr(val_interleaved, "set_transform"):
+            cast("Dataset", val_interleaved).set_transform(
+                self._make_unified_transform_fn(
+                    real_base=RealImageTransform(),
+                    real_aug=val_transform,
+                    compositor=val_compositor,
+                    synthetic_aug=val_transform,
+                )
+            )
+
+        self.train_dataset = train_interleaved
+        self.val_dataset = val_interleaved
 
     def _make_real_transform_fn(
         self,
@@ -318,41 +368,152 @@ class AnimeSegDataModule(L.LightningDataModule):
 
         return transform_fn
 
+    def _make_unified_transform_fn(
+        self,
+        real_base: RealImageTransform,
+        real_aug: v2.Compose,
+        compositor: SyntheticCompositor,
+        synthetic_aug: v2.Compose,
+    ):
+        """Create unified transform function that dispatches based on item type.
+
+        This is needed because interleave_datasets does not preserve set_transform.
+        We detect item type by checking for 'fg_indices' key (synthetic) vs 'image' key (real).
+        """
+
+        def transform_fn(examples: dict) -> dict:
+            # Handle mixed batches: process each item individually based on its type
+            # After interleave, both 'fg_indices' and 'image'/'mask' keys exist,
+            # but one set will have None values for each item
+            fg_indices_batch = examples.get("fg_indices", [])
+            images_batch = examples.get("image", [])
+
+            # Determine batch size
+            batch_size = len(fg_indices_batch) if fg_indices_batch else len(images_batch)
+
+            augmented_images = []
+            augmented_masks = []
+
+            for i in range(batch_size):
+                fg_idx = fg_indices_batch[i] if i < len(fg_indices_batch) else None
+                is_synthetic = fg_idx is not None
+
+                if is_synthetic:
+                    # Synthetic: apply compositor then augmentation
+                    single_example = {"fg_indices": [fg_idx]}
+                    result = compositor(single_example)
+                    img = result["image"][0]
+                    mask = result["mask"][0]
+                    img_tv = tv_tensors.Image(img)
+                    mask_tv = tv_tensors.Mask(mask)
+                    img_aug, mask_aug = synthetic_aug(img_tv, mask_tv)
+                else:
+                    # Real: apply base transform then augmentation
+                    single_example = {
+                        "image": [images_batch[i]],
+                        "mask": [examples["mask"][i]],
+                    }
+                    result = real_base(single_example)
+                    img = result["image"][0]
+                    mask = result["mask"][0]
+                    img_tv = tv_tensors.Image(img)
+                    mask_tv = tv_tensors.Mask(mask)
+                    img_aug, mask_aug = real_aug(img_tv, mask_tv)
+
+                augmented_images.append(img_aug)
+                augmented_masks.append(mask_aug)
+
+            return {"image": augmented_images, "mask": augmented_masks}
+
+        return transform_fn
+
     def _build_real_transform(self, img_size: int) -> v2.Compose:
         """Build transform pipeline for real images."""
-        return v2.Compose(
-            [
-                RescalePad(img_size + img_size // 4),
-                v2.RandomRotation(degrees=(-90, 90), fill=[0.0]),
-                v2.RandomCrop(img_size),
-                RandomColor(p=0.5),
-                v2.RandomApply([v2.GaussianNoise(mean=0.0, sigma=0.05)], p=0.5),
-            ]
-        )
+        rot_deg = self.hparams["aug_rotation_degrees_real"]
+        pad_size = int(img_size * self.hparams["aug_rescale_pad_ratio"])
+        transforms: list[v2.Transform] = [
+            RescalePad(pad_size),
+            v2.RandomRotation(degrees=(-rot_deg, rot_deg), fill=[0.0]),
+            v2.RandomCrop(img_size),
+        ]
+
+        if self.hparams["aug_color_p"] > 0:
+            transforms.append(RandomColor(p=self.hparams["aug_color_p"]))
+        if self.hparams["aug_noise_p"] > 0:
+            sigma = self.hparams["aug_noise_sigma"]
+            transforms.append(
+                v2.RandomApply(
+                    [v2.GaussianNoise(mean=0.0, sigma=sigma)], p=self.hparams["aug_noise_p"]
+                )
+            )
+
+        return v2.Compose(transforms)
 
     def _build_synthetic_transform(self, img_size: int) -> v2.Compose:
-        """Build transform pipeline for synthetic images (includes heavy augmentation)."""
-        return v2.Compose(
-            [
-                # DatasetGenerator augmentations
-                SharpBackground(p=0.5),
-                SketchConvert(p=0.25),
-                v2.RandomGrayscale(p=0.5),
-                RandomColorBlocks(p=0.5),
-                RandomTextOverlay(p=0.5),
-                SimulateLight(p=0.5),
-                v2.RandomRotation(
-                    degrees=(-180, 180),
-                    interpolation=v2.InterpolationMode.BILINEAR,
-                    fill=0.0,
-                ),
-                ResizeBlur(p=0.5),
-                JPEGCompression(p=0.5),
-                # Final color augmentations (same as real)
-                RandomColor(p=0.5),
-                v2.RandomApply([v2.GaussianNoise(mean=0.0, sigma=0.05)], p=0.5),
-            ]
+        """Build transform pipeline for synthetic images.
+
+        Augmentations are conditionally added based on their probability parameters.
+        Set a probability to 0.0 to disable that augmentation.
+        """
+        transforms: list[v2.Transform] = []
+
+        # Optional augmentations (controlled by hparams)
+        if self.hparams["aug_sharp_background_p"] > 0:
+            transforms.append(SharpBackground(p=self.hparams["aug_sharp_background_p"]))
+        if self.hparams["aug_sketch_p"] > 0:
+            transforms.append(SketchConvert(p=self.hparams["aug_sketch_p"]))
+        if self.hparams["aug_grayscale_p"] > 0:
+            transforms.append(v2.RandomGrayscale(p=self.hparams["aug_grayscale_p"]))
+        if self.hparams["aug_color_blocks_p"] > 0:
+            transforms.append(RandomColorBlocks(p=self.hparams["aug_color_blocks_p"]))
+        if self.hparams["aug_text_overlay_p"] > 0:
+            transforms.append(
+                RandomTextOverlay(
+                    p=self.hparams["aug_text_overlay_p"],
+                    font_size_ratio=self.hparams["aug_text_font_size_ratio"],
+                )
+            )
+        if self.hparams["aug_light_p"] > 0:
+            transforms.append(SimulateLight(p=self.hparams["aug_light_p"]))
+
+        # Rotation (geometric consistency)
+        rot_deg = self.hparams["aug_rotation_degrees_synth"]
+        transforms.append(
+            v2.RandomRotation(
+                degrees=(-rot_deg, rot_deg),
+                interpolation=v2.InterpolationMode.BILINEAR,
+                fill=0.0,
+            )
         )
+
+        # Quality degradation augmentations
+        if self.hparams["aug_resize_blur_p"] > 0:
+            transforms.append(
+                ResizeBlur(
+                    p=self.hparams["aug_resize_blur_p"],
+                    scale_range=self.hparams["aug_resize_blur_scale_range"],
+                )
+            )
+        if self.hparams["aug_jpeg_p"] > 0:
+            transforms.append(
+                JPEGCompression(
+                    p=self.hparams["aug_jpeg_p"],
+                    quality_range=self.hparams["aug_jpeg_quality_range"],
+                )
+            )
+
+        # Color augmentations (same as real images)
+        if self.hparams["aug_color_p"] > 0:
+            transforms.append(RandomColor(p=self.hparams["aug_color_p"]))
+        if self.hparams["aug_noise_p"] > 0:
+            sigma = self.hparams["aug_noise_sigma"]
+            transforms.append(
+                v2.RandomApply(
+                    [v2.GaussianNoise(mean=0.0, sigma=sigma)], p=self.hparams["aug_noise_p"]
+                )
+            )
+
+        return v2.Compose(transforms)
 
     def _build_val_transform(self, img_size: int) -> v2.Compose:
         """Build transform pipeline for validation (minimal augmentation)."""
