@@ -5,53 +5,75 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
+from ..loss import HybridLoss, get_hybrid_loss
+
+# Shared hybrid loss instance (initialized lazily per model)
+_hybrid_loss: HybridLoss | None = None
 
 
-def multi_loss_fusion(preds, target):
-    loss0 = 0.0
-    loss = 0.0
+def _get_hybrid_loss() -> HybridLoss:
+    """Get or create the shared HybridLoss instance."""
+    global _hybrid_loss
+    if _hybrid_loss is None:
+        _hybrid_loss = get_hybrid_loss()
+    return _hybrid_loss
 
-    for i in range(len(preds)):
-        if preds[i].shape[2] != target.shape[2] or preds[i].shape[3] != target.shape[3]:
-            tmp_target = F.interpolate(
-                target, size=preds[i].size()[2:], mode="bilinear", align_corners=True
-            )
-            loss = loss + bce_loss(preds[i], tmp_target)
-        else:
-            loss = loss + bce_loss(preds[i], target)
+
+def multi_loss_fusion(preds: list[Tensor], target: Tensor) -> tuple[Tensor, Tensor]:
+    """Compute hybrid loss across multiple prediction scales.
+
+    Args:
+        preds: List of predictions at different scales (logits)
+        target: Ground truth mask
+
+    Returns:
+        Tuple of (loss at first scale, total loss across all scales)
+    """
+    hybrid_loss = _get_hybrid_loss()
+    loss0 = torch.tensor(0.0, device=preds[0].device, dtype=preds[0].dtype)
+    loss = torch.tensor(0.0, device=preds[0].device, dtype=preds[0].dtype)
+
+    for i, pred in enumerate(preds):
+        scale_loss = hybrid_loss(pred, target)
+        loss = loss + scale_loss
         if i == 0:
-            loss0 = loss
+            loss0 = scale_loss
     return loss0, loss
 
 
+# Feature distillation losses
 fea_loss = nn.MSELoss(reduction="mean")
 kl_loss = nn.KLDivLoss(reduction="mean")
 l1_loss = nn.L1Loss(reduction="mean")
 smooth_l1_loss = nn.SmoothL1Loss(reduction="mean")
 
 
-def multi_loss_fusion_kl(preds, target, dfs, fs, mode="MSE"):
-    loss0 = 0.0
-    loss = 0.0
+def multi_loss_fusion_kl(
+    preds: list[Tensor],
+    target: Tensor,
+    dfs: list[Tensor],
+    fs: list[Tensor],
+    mode: str = "MSE",
+) -> tuple[Tensor, Tensor]:
+    """Compute hybrid loss with feature distillation (KL/MSE).
 
-    for i in range(len(preds)):
-        if preds[i].shape[2] != target.shape[2] or preds[i].shape[3] != target.shape[3]:
-            tmp_target = F.interpolate(
-                target, size=preds[i].size()[2:], mode="bilinear", align_corners=True
-            )
-            loss = loss + bce_loss(preds[i], tmp_target)
-        else:
-            loss = loss + bce_loss(preds[i], target)
-        if i == 0:
-            loss0 = loss
+    Args:
+        preds: List of predictions at different scales (logits)
+        target: Ground truth mask
+        dfs: Decoder features from main model
+        fs: Features from GT encoder (distillation targets)
+        mode: Feature loss type ("MSE", "KL", "MAE", "SmoothL1")
 
-    for i in range(len(dfs)):
-        df = dfs[i]
-        fs_i = fs[i]
+    Returns:
+        Tuple of (loss at first scale, total loss including feature loss)
+    """
+    # Pixel-level hybrid loss
+    loss0, loss = multi_loss_fusion(preds, target)
+
+    # Feature distillation loss
+    for df, fs_i in zip(dfs, fs, strict=True):
         match mode:
             case "MSE":
-                # add the mse loss of features as additional constraints
                 loss = loss + fea_loss(df, fs_i)
             case "KL":
                 loss = loss + kl_loss(F.log_softmax(df, dim=1), F.softmax(fs_i, dim=1))

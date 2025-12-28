@@ -17,6 +17,19 @@ from torch.nn.modules.normalization import LayerNorm
 from torch.nn.parameter import Parameter
 from torch.utils import checkpoint, model_zoo
 
+from ..loss import HybridLoss, get_hybrid_loss
+
+# Shared hybrid loss instance
+_hybrid_loss: HybridLoss | None = None
+
+
+def _get_hybrid_loss() -> HybridLoss:
+    """Get or create the shared HybridLoss instance."""
+    global _hybrid_loss
+    if _hybrid_loss is None:
+        _hybrid_loss = get_hybrid_loss()
+    return _hybrid_loss
+
 
 class ImagePyramid(nn.Module):
     def __init__(self, ksize: int = 7, sigma: int = 1, channels: int = 1) -> None:
@@ -1363,11 +1376,13 @@ def SwinL(pretrained: bool = True) -> SwinTransformer:
 
 
 def weighted_bce_loss_with_logits(pred: Tensor, mask: Tensor, reduction: str = "mean") -> Tensor:
+    """Boundary-weighted BCE loss (legacy, kept for reference)."""
     weight = 1 + 5 * torch.abs(F.avg_pool2d(mask, kernel_size=31, stride=1, padding=15) - mask)
     return F.binary_cross_entropy_with_logits(pred, mask, weight, reduction=reduction)
 
 
 def iou_loss(pred: Tensor, mask: Tensor, reduction: str = "mean") -> Tensor:
+    """IoU loss (legacy, kept for reference)."""
     inter = pred * mask
     union = pred + mask
     iou = 1 - (inter + 1) / (union - inter + 1)
@@ -1377,6 +1392,7 @@ def iou_loss(pred: Tensor, mask: Tensor, reduction: str = "mean") -> Tensor:
 
 
 def iou_loss_with_logits(pred: Tensor, mask: Tensor, reduction: str = "none") -> Tensor:
+    """IoU loss with logits (legacy, kept for reference)."""
     return iou_loss(torch.sigmoid(pred), mask, reduction=reduction)
 
 
@@ -1433,9 +1449,17 @@ class InSPyReNet(nn.Module):
 
     @staticmethod
     def _sod_loss(x: Tensor, y: Tensor) -> Tensor:
-        return weighted_bce_loss_with_logits(
-            x, y, reduction="mean"
-        ) + iou_loss_with_logits(x, y, reduction="mean")
+        """Compute saliency object detection loss using HybridLoss.
+
+        Args:
+            x: Predicted logits (before sigmoid)
+            y: Ground truth mask
+
+        Returns:
+            Hybrid loss combining BCE/IoU/SSIM/Structure/Contour
+        """
+        hybrid_loss = _get_hybrid_loss()
+        return hybrid_loss(x, y)
 
     @staticmethod
     def _ret(x: Tensor, target: Tensor) -> Tensor:

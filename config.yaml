@@ -55,6 +55,12 @@ model:
       betas: [0.9, 0.999]
       eps: 1e-08
       weight_decay: 0
+  # Hybrid loss weights (BiRefNet-style: pixel/region/boundary)
+  loss_bce: 30.0 # Pixel-level BCE
+  loss_iou: 0.5 # Region-level IoU
+  loss_ssim: 10.0 # Structure similarity
+  loss_structure: 5.0 # Boundary-weighted BCE + IoU
+  loss_contour: 5.0 # Edge gradient constraints
 
 data:
   data_dir: dataset/

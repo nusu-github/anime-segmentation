@@ -16,6 +16,20 @@ from torch.nn.modules.container import Sequential
 from torch.nn.modules.conv import Conv2d
 from torch.nn.modules.instancenorm import InstanceNorm2d
 
+from ..loss import HybridLoss, get_hybrid_loss
+
+# Shared hybrid loss instance
+_hybrid_loss: HybridLoss | None = None
+
+
+def _get_hybrid_loss() -> HybridLoss:
+    """Get or create the shared HybridLoss instance."""
+    global _hybrid_loss
+    if _hybrid_loss is None:
+        _hybrid_loss = get_hybrid_loss()
+    return _hybrid_loss
+
+
 # ----------------------------------------------------------------------------------
 # Loss Functions
 # ----------------------------------------------------------------------------------
@@ -90,53 +104,50 @@ def loss_func(
     detail_scale=10.0,
     matte_scale=1.0,
 ):
-    """loss of MODNet
+    """loss of MODNet with HybridLoss for matte.
+
     Arguments:
-        blurer: GaussianBlurLayer
-        pred_semantic: model output
-        pred_detail: model output
-        pred_matte: model output
-        image : input RGB image ts pixel values should be normalized
-        trimap : trimap used to calculate the losses
+        pred_semantic: model output (LR branch)
+        pred_detail: model output (HR branch)
+        pred_matte: model output (Fusion branch) - sigmoid applied
+        image: input RGB image, pixel values should be normalized
+        trimap: trimap used to calculate the losses
                 its pixel values can be 0, 0.5, or 1
                 (foreground=1, background=0, unknown=0.5)
-        gt_matte: ground truth alpha matte its pixel values are between [0, 1]
+        gt_matte: ground truth alpha matte, pixel values are between [0, 1]
         semantic_scale (float): scale of the semantic loss
-                                NOTE: please adjust according to your dataset
         detail_scale (float): scale of the detail loss
-                              NOTE: please adjust according to your dataset
         matte_scale (float): scale of the matte loss
-                             NOTE: please adjust according to your dataset
 
     Returns:
-        semantic_loss (torch.Tensor): loss of the semantic estimation [Low-Resolution (LR) Branch]
-        detail_loss (torch.Tensor): loss of the detail prediction [High-Resolution (HR) Branch]
-        matte_loss (torch.Tensor): loss of the semantic-detail fusion [Fusion Branch]
+        semantic_loss (torch.Tensor): loss of the semantic estimation [LR Branch]
+        detail_loss (torch.Tensor): loss of the detail prediction [HR Branch]
+        matte_loss (torch.Tensor): hybrid loss of the fusion [Fusion Branch]
     """
-
     trimap = trimap.float()
     # calculate the boundary mask from the trimap
     boundaries = (trimap < 0.5) + (trimap > 0.5)
 
-    # calculate the semantic loss
+    # calculate the semantic loss (MSE for low-resolution semantic map)
     gt_semantic = F.interpolate(gt_matte, scale_factor=1 / 16, mode="bilinear")
     gt_semantic = blurer(gt_semantic)
     semantic_loss = torch.mean(F.mse_loss(pred_semantic, gt_semantic))
     semantic_loss = semantic_scale * semantic_loss
 
-    # calculate the detail loss
+    # calculate the detail loss (L1 for detail refinement)
     pred_boundary_detail = torch.where(boundaries, trimap, pred_detail.float())
     gt_detail = torch.where(boundaries, trimap, gt_matte.float())
     detail_loss = torch.mean(F.l1_loss(pred_boundary_detail, gt_detail.float()))
     detail_loss = detail_scale * detail_loss
 
-    # calculate the matte loss
-    pred_boundary_matte = torch.where(boundaries, trimap, pred_matte.float())
-    matte_l1_loss = F.l1_loss(pred_matte, gt_matte) + 4.0 * F.l1_loss(pred_boundary_matte, gt_matte)
-    matte_compositional_loss = F.l1_loss(image * pred_matte, image * gt_matte) + 4.0 * F.l1_loss(
-        image * pred_boundary_matte, image * gt_matte
-    )
-    matte_loss = torch.mean(matte_l1_loss + matte_compositional_loss)
+    # calculate the matte loss using HybridLoss
+    # Note: pred_matte is already sigmoided, so we use logit for HybridLoss
+    # Clamp to avoid log(0) or log(1)
+    pred_matte_clamped = torch.clamp(pred_matte, 1e-6, 1 - 1e-6)
+    pred_matte_logit = torch.log(pred_matte_clamped / (1 - pred_matte_clamped))
+
+    hybrid_loss = _get_hybrid_loss()
+    matte_loss = hybrid_loss(pred_matte_logit, gt_matte)
     matte_loss = matte_scale * matte_loss
 
     return semantic_loss, detail_loss, matte_loss

@@ -13,6 +13,7 @@ from torchmetrics import MeanAbsoluteError, MetricCollection
 from torchmetrics.classification import BinaryFBetaScore, BinaryPrecision, BinaryRecall
 
 from .data_module import AnimeSegDataModule
+from .loss import configure_loss_weights
 from .model import (
     InSPyReNet,
     InSPyReNet_Res2Net50,
@@ -74,10 +75,26 @@ class AnimeSegmentation(
         img_size: int | None = None,
         lr: float = 1e-3,
         optimizer: OptimizerCallable = torch.optim.Adam,
+        loss_bce: float = 30.0,
+        loss_iou: float = 0.5,
+        loss_ssim: float = 10.0,
+        loss_structure: float = 5.0,
+        loss_contour: float = 5.0,
     ) -> None:
         super().__init__()
         assert net_name in NET_NAMES
         self.save_hyperparameters()
+
+        # Configure loss weights before model initialization
+        loss_weights = {
+            "bce": loss_bce,
+            "iou": loss_iou,
+            "ssim": loss_ssim,
+            "structure": loss_structure,
+            "contour": loss_contour,
+        }
+        configure_loss_weights(loss_weights)
+
         self.net = get_net(net_name, img_size)
         if self.hparams["net_name"] == "isnet_is":
             self.gt_encoder = get_net("isnet_gt", img_size)

@@ -10,9 +10,20 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..loss import HybridLoss, get_hybrid_loss
+
 __all__ = ["U2Net", "U2NetFull", "U2NetFull2", "U2NetLite", "U2NetLite2"]
 
-bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
+# Shared hybrid loss instance
+_hybrid_loss: HybridLoss | None = None
+
+
+def _get_hybrid_loss() -> HybridLoss:
+    """Get or create the shared HybridLoss instance."""
+    global _hybrid_loss
+    if _hybrid_loss is None:
+        _hybrid_loss = get_hybrid_loss()
+    return _hybrid_loss
 
 
 def _upsample_like(x: Tensor, size: tuple[int, int]) -> Tensor:
@@ -212,17 +223,25 @@ class U2Net(nn.Module):
     def compute_loss(
         args: tuple[list[Tensor], Tensor],
     ) -> tuple[Tensor, Tensor]:
-        preds, labels_v = args
-        d0, d1, d2, d3, d4, d5, d6 = preds
-        loss0 = bce_loss(d0, labels_v)
-        loss1 = bce_loss(d1, labels_v)
-        loss2 = bce_loss(d2, labels_v)
-        loss3 = bce_loss(d3, labels_v)
-        loss4 = bce_loss(d4, labels_v)
-        loss5 = bce_loss(d5, labels_v)
-        loss6 = bce_loss(d6, labels_v)
+        """Compute hybrid loss across all decoder outputs.
 
-        loss = loss0 + loss1 + loss2 + loss3 + loss4 + loss5 + loss6
+        Args:
+            args: Tuple of (predictions list, ground truth labels)
+
+        Returns:
+            Tuple of (loss at d0, total loss across all scales)
+        """
+        preds, labels_v = args
+        hybrid_loss = _get_hybrid_loss()
+
+        loss = torch.tensor(0.0, device=preds[0].device, dtype=preds[0].dtype)
+        loss0 = torch.tensor(0.0, device=preds[0].device, dtype=preds[0].dtype)
+
+        for i, pred in enumerate(preds):
+            scale_loss = hybrid_loss(pred, labels_v)
+            loss = loss + scale_loss
+            if i == 0:
+                loss0 = scale_loss
 
         return loss0, loss
 
