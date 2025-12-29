@@ -7,6 +7,7 @@ from huggingface_hub import ModelCard, PyTorchModelHubMixin
 from lightning import Trainer
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.cli import ArgsType, LightningCLI, OptimizerCallable
+from lightning.pytorch.core.optimizer import LightningOptimizer
 from lightning.pytorch.strategies import DDPStrategy
 from torch._dynamo import OptimizedModule
 from torch.optim import Optimizer
@@ -64,24 +65,30 @@ def get_net(
 class ScheduleFreeCallback(Callback):
     """Schedule-Free Optimizer Callback for Lightning."""
 
+    def _unwrap_optimizer(self, opt):
+        if isinstance(opt, LightningOptimizer):
+            return opt.optimizer
+        return opt
+
     def _is_schedule_free(self, opt) -> bool:
-        """Check if it is a Schedule-Free optimizer with train()/eval() methods"""
+        opt = self._unwrap_optimizer(opt)
         return hasattr(opt, "train") and hasattr(opt, "eval")
 
     def _get_train_mode(self, opt) -> bool:
-        """Retrieve the current mode (the location differs between the Standard and Wrapper versions)"""
-        # Wrapper version: optimizer.train_mode
+        """Check if it is a Schedule-Free optimizer with train()/eval() methods"""
+        opt = self._unwrap_optimizer(opt)
         if hasattr(opt, "train_mode"):
-            return opt.train_mode
-        # Standard version: param_groups[0]['train_mode']
+            # type safety: train_mode attribute
+            return opt.train_mode # pyright: ignore[reportAttributeAccessIssue]
         if hasattr(opt, "param_groups") and opt.param_groups:
             return opt.param_groups[0].get("train_mode", False)
         return False
 
     def _set_mode(self, trainer: "pl.Trainer", mode: str) -> None:
         for opt in trainer.optimizers:
-            if self._is_schedule_free(opt):
-                getattr(opt, mode)()
+            real_opt = self._unwrap_optimizer(opt)
+            if self._is_schedule_free(real_opt):
+                getattr(real_opt, mode)()
 
     # === Training ===
     def on_train_start(self, trainer, pl_module):  # noqa: ARG002
@@ -104,18 +111,18 @@ class ScheduleFreeCallback(Callback):
 
     # === Checkpoint ===
     def on_save_checkpoint(self, trainer, pl_module, checkpoint):  # noqa: ARG002
-        """Save the optimizer state in eval mode"""
         new_states = []
         for i, opt in enumerate(trainer.optimizers):
-            if self._is_schedule_free(opt):
-                was_train = self._get_train_mode(opt)
+            real_opt = self._unwrap_optimizer(opt)
+            if self._is_schedule_free(real_opt):
+                was_train = self._get_train_mode(real_opt)
                 if was_train:
                     # Type Safety: switch to eval mode
-                    opt.eval()  # pyright: ignore[reportAttributeAccessIssue]
+                    real_opt.eval()  # pyright: ignore[reportAttributeAccessIssue]
                 new_states.append(trainer.strategy.optimizer_state(opt))
                 if was_train:
-                    # Type Safety: restore to train mode
-                    opt.train()  # pyright: ignore[reportAttributeAccessIssue]
+                    # Type Safety: switch to train mode
+                    real_opt.train()  # pyright: ignore[reportAttributeAccessIssue]
             else:
                 new_states.append(checkpoint["optimizer_states"][i])
         checkpoint["optimizer_states"] = new_states
