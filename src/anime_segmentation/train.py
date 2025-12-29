@@ -7,8 +7,8 @@ from huggingface_hub import ModelCard, PyTorchModelHubMixin
 from lightning import Trainer
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.cli import ArgsType, LightningCLI, OptimizerCallable
-from lightning.pytorch.core.optimizer import LightningOptimizer
 from lightning.pytorch.strategies import DDPStrategy
+from lightning.pytorch.trainer.states import TrainerFn
 from torch._dynamo import OptimizedModule
 from torch.optim import Optimizer
 from torchmetrics import MetricCollection
@@ -65,64 +65,81 @@ def get_net(
 class ScheduleFreeCallback(Callback):
     """Schedule-Free Optimizer Callback for Lightning."""
 
-    def _unwrap_optimizer(self, opt):
-        if isinstance(opt, LightningOptimizer):
-            return opt.optimizer
-        return opt
+    def __init__(self, debug: bool = False) -> None:
+        super().__init__()
+        self.debug = debug
+
+    def _log(self, msg: str) -> None:
+        if self.debug:
+            print(f"[ScheduleFreeCallback] {msg}")
 
     def _is_schedule_free(self, opt) -> bool:
-        opt = self._unwrap_optimizer(opt)
-        return hasattr(opt, "train") and hasattr(opt, "eval")
+        """Check if it is a Schedule-Free optimizer with train()/eval() methods"""
+        result = hasattr(opt, "train") and hasattr(opt, "eval")
+        self._log(f"_is_schedule_free({type(opt).__name__}) = {result}")
+        return result
 
     def _get_train_mode(self, opt) -> bool:
-        """Check if it is a Schedule-Free optimizer with train()/eval() methods"""
-        opt = self._unwrap_optimizer(opt)
+        """Retrieve the current mode (the location differs between the Standard and Wrapper versions)"""
+        # Wrapper version: optimizer.train_mode
         if hasattr(opt, "train_mode"):
-            # type safety: train_mode attribute
-            return opt.train_mode # pyright: ignore[reportAttributeAccessIssue]
+            return opt.train_mode
+        # Standard version: param_groups[0]['train_mode']
         if hasattr(opt, "param_groups") and opt.param_groups:
             return opt.param_groups[0].get("train_mode", False)
         return False
 
     def _set_mode(self, trainer: "pl.Trainer", mode: str) -> None:
-        for opt in trainer.optimizers:
-            real_opt = self._unwrap_optimizer(opt)
-            if self._is_schedule_free(real_opt):
-                getattr(real_opt, mode)()
+        self._log(f"_set_mode called: mode={mode}, num_optimizers={len(trainer.optimizers)}")
+        for i, opt in enumerate(trainer.optimizers):
+            if self._is_schedule_free(opt):
+                self._log(f"  opt[{i}]: calling {mode}()")
+                getattr(opt, mode)()
 
     # === Training ===
+    def on_fit_start(self, trainer, pl_module):  # noqa: ARG002
+        self._log("on_fit_start called")
+        self._set_mode(trainer, "train")
+
     def on_train_start(self, trainer, pl_module):  # noqa: ARG002
+        self._log("on_train_start called")
         self._set_mode(trainer, "train")
 
     # === Validation ===
     def on_validation_start(self, trainer, pl_module):  # noqa: ARG002
+        self._log(f"on_validation_start called (sanity={trainer.sanity_checking})")
         self._set_mode(trainer, "eval")
 
     def on_validation_end(self, trainer, pl_module):  # noqa: ARG002
-        if trainer.sanity_checking or trainer.training:
+        # During fit, trainer.training is False while validating, so check state.fn instead
+        is_fitting = trainer.state.fn == TrainerFn.FITTING
+        self._log(f"on_validation_end called (fitting={is_fitting})")
+        if is_fitting:
             self._set_mode(trainer, "train")
 
     # === Test / Predict ===
     def on_test_start(self, trainer, pl_module):  # noqa: ARG002
+        self._log("on_test_start called")
         self._set_mode(trainer, "eval")
 
     def on_predict_start(self, trainer, pl_module):  # noqa: ARG002
+        self._log("on_predict_start called")
         self._set_mode(trainer, "eval")
 
     # === Checkpoint ===
     def on_save_checkpoint(self, trainer, pl_module, checkpoint):  # noqa: ARG002
+        """Save the optimizer state in eval mode"""
         new_states = []
         for i, opt in enumerate(trainer.optimizers):
-            real_opt = self._unwrap_optimizer(opt)
-            if self._is_schedule_free(real_opt):
-                was_train = self._get_train_mode(real_opt)
+            if self._is_schedule_free(opt):
+                was_train = self._get_train_mode(opt)
                 if was_train:
                     # Type Safety: switch to eval mode
-                    real_opt.eval()  # pyright: ignore[reportAttributeAccessIssue]
+                    opt.eval()  # pyright: ignore[reportAttributeAccessIssue]
                 new_states.append(trainer.strategy.optimizer_state(opt))
                 if was_train:
-                    # Type Safety: switch to train mode
-                    real_opt.train()  # pyright: ignore[reportAttributeAccessIssue]
+                    # Type Safety: restore to train mode
+                    opt.train()  # pyright: ignore[reportAttributeAccessIssue]
             else:
                 new_states.append(checkpoint["optimizer_states"][i])
         checkpoint["optimizer_states"] = new_states
@@ -430,8 +447,10 @@ def cli_main(args: ArgsType = None):
         model_class=AnimeSegmentation,
         datamodule_class=AnimeSegDataModule,
         save_config_kwargs={"overwrite": True},
+        trainer_defaults={
+            "callbacks": [ScheduleFreeCallback(debug=True)],
+        },
         args=args,
-        trainer_defaults={"callbacks": [ScheduleFreeCallback()]},
     )
 
 
