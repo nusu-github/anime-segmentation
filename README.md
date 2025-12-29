@@ -1,109 +1,187 @@
 # Anime Segmentation
-Segmentation for anime character
 
-![](./doc/banner.jpg)
+![Banner](./doc/banner.jpg)
 
-## Online Demo
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/skytnt/anime-remove-background)
 
-Integrated into [Huggingface Spaces 🤗](https://huggingface.co/spaces) using [Gradio](https://github.com/gradio-app/gradio). Try it out [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/skytnt/anime-remove-background)
+High-precision background removal tool specifically designed for anime characters. This project supports multiple state-of-the-art architectures including **ISNet**, **U2Net**, **MODNet**, and **InSPyReNet**, providing a complete pipeline for training, inference, and deployment.
 
-## Support Models
+## Features
 
-[ISNet](https://github.com/xuebinqin/DIS), [U2Net](https://github.com/xuebinqin/U-2-Net), [MODNet](https://github.com/ZHKKKe/MODNet), [InSPyReNet](https://github.com/plemeri/inspyrenet)
+- **Multiple Architectures**: Support for ISNet (default), U2Net, MODNet, and InSPyReNet.
+- **High Resolution**: optimized for handling high-resolution anime artwork.
+- **Web UI**: Integrated Gradio app for easy interactive usage.
+- **Training Pipeline**: Full training support with PyTorch Lightning, including distributed training and mixed precision.
+- **ONNX Export**: Tools to export models for efficient deployment.
 
-## Download Trained Models
+## Installation
 
-Models can be downloaded [here](https://huggingface.co/skytnt/anime-seg)
+Ensure you have Python 3.12 or higher installed.
 
-## Requirements
+### Using `uv` (Recommended)
 
-You need to [install pytorch](https://pytorch.org/) first
+This project uses `uv` for dependency management.
 
-Then `pip install -r requirements.txt`
-
-## Train
-
-`python train.py --net isnet_is --data-dir path/to/dataset --epoch 1000 --batch-size-train 10 --batch-size-val 4 --workers-train 10 --workers-val 5 --acc-step 3 --benchmark --log-step 10 --val-epoch 3  --img-size 1024`
-
-detail
-
-```
-arguments:
-  -h, --help            show this help message and exit
-  --net {isnet_is,isnet,u2net,u2netl,modnet,inspyrnet_res,inspyrnet_swin}
-                        isnet_is: Train ISNet with intermediate feature supervision,
-                        isnet: Train ISNet,
-                        u2net: Train U2Net full,
-                        u2netl: Train U2Net lite,
-                        modnet: Train MODNet
-                        inspyrnet_res: Train InSPyReNet_Res2Net50
-                        inspyrnet_swin: Train InSPyReNet_SwinB
-  --pretrained-ckpt PRETRAINED_CKPT
-                        load form pretrained ckpt of net
-  --resume-ckpt RESUME_CKPT
-                        resume training from ckpt
-  --img-size IMG_SIZE   image size for training and validation,
-                        1024 recommend for ISNet,
-                        384 recommend for InSPyReNet,
-                        640 recommend for others,
-
-  --data-dir DATA_DIR   root dir of dataset
-  --fg-dir FG_DIR       relative dir of foreground
-  --bg-dir BG_DIR       relative dir of background
-  --img-dir IMG_DIR     relative dir of images
-  --mask-dir MASK_DIR   relative dir of masks
-  --fg-ext FG_EXT       extension name of foreground
-  --bg-ext BG_EXT       extension name of background
-  --img-ext IMG_EXT     extension name of images
-  --mask-ext MASK_EXT   extension name of masks
-  --data-split DATA_SPLIT
-                        split rate for training and validation
-  
-  --lr LR               learning rate
-  --epoch EPOCH         epoch num
-  --gt-epoch GT_EPOCH   epoch for training ground truth encoder when net is isnet_is
-  --batch-size-train BATCH_SIZE_TRAIN
-                        batch size for training
-  --batch-size-val BATCH_SIZE_VAL
-                        batch size for val
-  --workers-train WORKERS_TRAIN
-                        workers num for training dataloader
-  --workers-val WORKERS_VAL
-                        workers num for validation dataloader
-  --acc-step ACC_STEP   gradient accumulation step
-  --accelerator {cpu,gpu,tpu,ipu,hpu,auto}
-                        accelerator
-  --devices DEVICES     devices num
-  --fp32                disable mix precision
-  --benchmark           enable cudnn benchmark
-  --log-step LOG_STEP   log training loss every n steps
-  --val-epoch VAL_EPOCH
-                        valid and save every n epoch
-  --cache-epoch CACHE_EPOCH
-                        update cache every n epoch
-  --cache CACHE         ratio (cache to entire training dataset), higher
-                        value require more memory, set 0 to disable cache
+```bash
+# Install dependencies
+uv sync
 ```
 
-## Inference
+### Using pip
 
-`python inference.py --net isnet_is --ckpt path/to/isnet_is.ckpt --data-dir path/to/input_data --out out --img-size 1024 --only-matted`
+```bash
+pip install .
+```
 
-## Export model
+## Usage
 
-`python export.py --net isnet_is --ckpt path/to/isnet_is.ckpt --to onnx --out isnet.onnx --img-size 1024`
+### Pre-trained Models
+
+Download pre-trained models from [Hugging Face](https://huggingface.co/skytnt/anime-seg) and place them in the `checkpoints/` or `saved_models/` directory.
+
+### Web UI (Gradio)
+
+The easiest way to use the tool is via the web interface.
+
+```bash
+python scripts/app.py
+```
+
+This will launch a local server (usually at `http://127.0.0.1:6006`) where you can upload images and adjust settings interactively.
+
+### Command Line Inference
+
+Run inference on a single image or a directory of images.
+
+```bash
+python scripts/inference.py \
+    --net isnet_is \
+    --ckpt checkpoints/isnetis.ckpt \
+    --data path/to/input_images \
+    --out output_directory \
+    --img-size 1024
+```
+
+**Options:**
+
+- `--net`: Model architecture (`isnet_is`, `u2net`, `modnet`, `inspyrnet_res`, etc.)
+- `--ckpt`: Path to the model checkpoint.
+- `--data`: Input directory or image path.
+- `--out`: Output directory.
+- `--only-matted`: Output only the matted image (RGBA).
+- `--bg-white`: Replace background with white instead of transparent.
+
+## Training
+
+The project uses **PyTorch Lightning** and **LightningCLI** for training. Configuration is managed via YAML files.
+
+### 1. Prepare Dataset
+
+The training pipeline expects a dataset with the following structure:
+
+```
+dataset/
+├── fg/          # Foreground images (RGBA png)
+├── bg/          # Background images (jpg/png)
+├── imgs/        # Real training images (jpg)
+└── masks/       # Corresponding masks (jpg/png)
+```
+
+Or you can use the [Hugging Face Dataset](https://huggingface.co/datasets/skytnt/anime-segmentation).
+
+### 2. Run Training
+
+Train using the default configuration:
+
+```bash
+python -m anime_segmentation.train --config config/config.yaml
+```
+
+Override parameters from CLI:
+
+```bash
+python -m anime_segmentation.train \
+    --config config/config.yaml \
+    --model.net_name u2net \
+    --data.batch_size_train 4
+```
+
+### 3. Configuration
+
+Check `config/config.yaml` to modify:
+
+- **Model**: Architecture, learning rate, optimizer.
+- **Data**: Batch size, image size, augmentation parameters.
+- **Trainer**: Epochs, GPUs, precision, callbacks.
+
+## Export to ONNX
+
+Export trained models to ONNX for use in other applications.
+
+```bash
+python scripts/export.py \
+    --net isnet_is \
+    --ckpt checkpoints/isnetis.ckpt \
+    --out exported_models/isnet.onnx \
+    --img-size 1024
+```
+
+## Supported Models
+
+| Model Code       | Description                                       | Recommended Size |
+| ---------------- | ------------------------------------------------- | ---------------- |
+| `isnet_is`       | ISNet with intermediate supervision (Recommended) | 1024             |
+| `isnet`          | Standard ISNet                                    | 1024             |
+| `u2net`          | U2Net (Full)                                      | 640              |
+| `u2netl`         | U2Net (Lite)                                      | 640              |
+| `modnet`         | MODNet (Matting)                                  | 512              |
+| `inspyrnet_res`  | InSPyReNet (Res2Net50)                            | 384/1024         |
+| `inspyrnet_swin` | InSPyReNet (Swin-B)                               | 384/1024         |
 
 ## Dataset
 
-This dataset is a combined dataset of [AniSeg](https://github.com/jerryli27/AniSeg#about-the-models) and [character_bg_seg_data](https://github.com/ShuhongChen/bizarre-pose-estimator#download).
+The official dataset is a combination of [AniSeg](https://github.com/jerryli27/AniSeg) and manual collections, cleaned and annotated for high-quality anime segmentation.
 
-I clean the dataset using [DeepDanbooru](https://github.com/KichangKim/DeepDanbooru) first then manually, to make sue all mask is anime character.
+Download via Git LFS:
 
-#### download
-
-```shell
+```bash
 git lfs install
 git clone https://huggingface.co/datasets/skytnt/anime-segmentation
-cd anime-segmentation
-unzip -q 'data/*.zip'
 ```
+
+## License
+
+This project is licensed under the Apache 2.0 License. See [LICENSE](LICENSE) for details.
+
+## Custom Modifications
+
+This fork introduces significant engineering improvements and modernization over the original [anime-segmentation](https://github.com/SkyTNT/anime-segmentation) repository:
+
+### Architecture & Engineering
+
+- **Package Structure**: Refactored into a proper `src/anime_segmentation` Python package.
+- **Dependency Management**: Migrated to **uv** for deterministic and fast dependency resolution (`pyproject.toml`).
+- **Code Quality**: Fully type-hinted codebase, formatted and linted with **Ruff**.
+- **Configuration**: Replaced `argparse` with **LightningCLI**, allowing configuration via structured YAML files (`config/config.yaml`).
+
+### Performance & Training
+
+- **Data Pipeline**: Replaced custom data loaders with **Hugging Face Datasets** for efficient caching, streaming, and multiprocessing.
+- **Augmentation**: Migrated all augmentations to **torchvision.transforms.v2** for GPU acceleration and modern API usage.
+- **Optimization**: Added support for **TorchCompile** (`torch.compile`) and **Schedule-Free Optimizers** (`schedulefree`).
+- **Metrics**: Implemented BiRefNet-style robust evaluation metrics (S-measure, E-measure, Weighted F-measure) via `torchmetrics`.
+
+### Model Improvements
+
+- **Refactoring**: Cleaned up model implementations for better TorchScript/ONNX export compatibility.
+- **Loss Functions**: Consolidated loss logic into a flexible `HybridLoss` module supporting pixel, region, and boundary constraints.
+
+## Acknowledgements
+
+- [ISNet](https://github.com/xuebinqin/DIS)
+- [U2Net](https://github.com/xuebinqin/U-2-Net)
+- [MODNet](https://github.com/ZHKKKe/MODNet)
+- [InSPyReNet](https://github.com/plemeri/InSPyReNet)
+- [BiRefNet](https://github.com/ZhengPeng7/BiRefNet) (for loss and metric implementations)
