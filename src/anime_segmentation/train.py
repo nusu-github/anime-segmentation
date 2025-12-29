@@ -360,7 +360,11 @@ def get_gt_encoder(
         logger=False,  # Don't log this aux task to main logger to avoid confusion
     )
     trainer.fit(gt_encoder, datamodule=datamodule)
-    return gt_encoder.net
+    # Unwrap compiled module to get clean state_dict without _orig_mod prefix
+    net = gt_encoder.net
+    if isinstance(net, OptimizedModule):
+        net = net._orig_mod
+    return net
 
 
 class AnimeSegmentationCLI(LightningCLI):

@@ -335,8 +335,8 @@ class WeightedFMeasure(Metric):
         device = pred.device
 
         # Convert to numpy for distance transform
-        gt_np = (gt > 0.5).cpu().numpy()
-        pred_np = pred.cpu().numpy()
+        gt_np = (gt > 0.5).cpu().to(torch.float32).numpy()
+        pred_np = pred.cpu().to(torch.float32).numpy()
 
         # Distance transform
         dst, idxt = bwdist(gt_np == 0, return_indices=True)
@@ -347,8 +347,8 @@ class WeightedFMeasure(Metric):
         et[gt_np == 0] = et[idxt[0][gt_np == 0], idxt[1][gt_np == 0]]
 
         # Gaussian smoothing
-        k = self._matlab_style_gauss2d((7, 7), sigma=5)
-        ea = convolve(et.astype(np.float64), weights=k, mode="constant", cval=0)
+        k = self._matlab_style_gauss2d((7, 7), sigma=5).astype(np.float32)
+        ea = convolve(et.astype(np.float32), weights=k, mode="constant", cval=0)
 
         # Min of E and EA
         min_e_ea = e.copy()
