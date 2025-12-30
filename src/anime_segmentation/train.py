@@ -17,6 +17,7 @@ from .data_module import AnimeSegDataModule
 from .loss import configure_loss_weights
 from .metrics import EMeasure, FMeasure, MAEMetric, SMeasure, WeightedFMeasure
 from .model import (
+    IBISNet,
     InSPyReNet,
     InSPyReNet_Res2Net50,
     InSPyReNet_SwinB,
@@ -29,6 +30,8 @@ from .model import (
 )
 
 NET_NAMES = [
+    "ibisnet_is",
+    "ibisnet",
     "isnet_is",
     "isnet",
     "isnet_gt",
@@ -42,8 +45,11 @@ NET_NAMES = [
 
 def get_net(
     net_name: str, img_size: int | tuple[int, int] | None
-) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2Net:
+) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2Net | IBISNet:
     match net_name:
+        case "ibisnet" | "ibisnet_is":
+            ibis_img_size = img_size[0] if isinstance(img_size, tuple) else img_size
+            return IBISNet(img_size=ibis_img_size)
         case "isnet" | "isnet_is":
             return ISNetDIS()
         case "isnet_gt":
@@ -188,7 +194,7 @@ class AnimeSegmentation(
         if compile:
             self.net = torch.compile(self.net, mode=compile_mode)
 
-        if self.hparams["net_name"] == "isnet_is":
+        if self.hparams["net_name"] in {"isnet_is", "ibisnet_is"}:
             self.gt_encoder = get_net("isnet_gt", img_size)
             self.gt_encoder.requires_grad_(requires_grad=False)
         else:
@@ -237,6 +243,9 @@ class AnimeSegmentation(
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         match self._net_unwrapped:
+            case IBISNet():
+                outputs = self.net(x)
+                return outputs["ds"][0].sigmoid()
             case ISNetDIS() | ISNetGTEncoder():
                 return self.net(x)[0][0].sigmoid()
             case U2Net():
@@ -252,6 +261,12 @@ class AnimeSegmentation(
         images, labels = batch["image"], batch["label"]
         # Use _net_unwrapped for pattern matching (handles compiled models)
         match self._net_unwrapped:
+            case IBISNet():
+                outputs = self.net(images)
+                loss_args = [outputs, labels]
+                if self.gt_encoder is not None:
+                    fs = self.gt_encoder(labels)[1]
+                    loss_args.append(fs)
             case ISNetDIS():
                 ds, dfs = self.net(images)
                 loss_args = [ds, dfs, labels]
@@ -412,7 +427,7 @@ class AnimeSegmentationCLI(LightningCLI):
         ckpt_path = config.get("ckpt_path")
 
         # Check if we need to train GT encoder
-        if net_name == "isnet_is" and not ckpt_path:
+        if net_name in {"isnet_is", "ibisnet_is"} and not ckpt_path:
             # We assume self.model and self.datamodule are already instantiated by CLI
             # but we need to pass the datamodule to the aux trainer.
             # self.datamodule might be None if datamodule_class wasn't used or something else.

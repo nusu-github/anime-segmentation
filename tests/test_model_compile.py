@@ -6,6 +6,7 @@ from torch import nn
 
 # Test configurations for different models
 MODEL_CONFIGS = {
+    "IBISNet": {"img_size": 256},
     "ISNetDIS": {"in_ch": 3, "out_ch": 1},
     "ISNetGTEncoder": {"in_ch": 1, "out_ch": 1},
     "U2NetFull": {},
@@ -19,6 +20,7 @@ MODEL_CONFIGS = {
 
 # Input size configurations
 INPUT_SIZES = {
+    "IBISNet": (1, 3, 256, 256),
     "ISNetDIS": (1, 3, 256, 256),
     "ISNetGTEncoder": (1, 1, 256, 256),
     "U2NetFull": (1, 3, 256, 256),
@@ -34,6 +36,7 @@ INPUT_SIZES = {
 def get_model(model_name: str) -> nn.Module:
     """Create model instance by name."""
     from anime_segmentation.model import (
+        IBISNet,
         InSPyReNet_Res2Net50,
         InSPyReNet_SwinB,
         ISNetDIS,
@@ -46,6 +49,7 @@ def get_model(model_name: str) -> nn.Module:
     )
 
     model_classes = {
+        "IBISNet": IBISNet,
         "ISNetDIS": ISNetDIS,
         "ISNetGTEncoder": ISNetGTEncoder,
         "U2NetFull": U2NetFull,
