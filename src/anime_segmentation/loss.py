@@ -59,9 +59,7 @@ def _ssim(
         (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
     )
 
-    if size_average:
-        return ssim_map.mean()  # type: ignore[return-value]
-    return ssim_map.mean(1).mean(1).mean(1)
+    return ssim_map.mean() if size_average else ssim_map.mean(1).mean(1).mean(1)
 
 
 def _iou_single(pred: Tensor, target: Tensor) -> Tensor:
