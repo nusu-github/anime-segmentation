@@ -13,6 +13,7 @@ from math import exp
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.func import vmap
 
 
 def gaussian(window_size: int, sigma: float) -> Tensor:
@@ -63,18 +64,21 @@ def _ssim(
     return ssim_map.mean(1).mean(1).mean(1)
 
 
+def _iou_single(pred: Tensor, target: Tensor) -> Tensor:
+    """Compute IoU loss for a single sample."""
+    iand = torch.sum(target * pred)
+    ior = torch.sum(target) + torch.sum(pred) - iand
+    return 1 - iand / (ior + 1e-8)
+
+
 class IoULoss(nn.Module):
-    """Intersection over Union loss for region-level supervision."""
+    """Intersection over Union loss for region-level supervision.
+
+    Uses vmap for efficient batched computation.
+    """
 
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
-        b = pred.shape[0]
-        iou_loss = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-        for i in range(b):
-            iand = torch.sum(target[i] * pred[i])
-            ior = torch.sum(target[i]) + torch.sum(pred[i]) - iand
-            iou = iand / (ior + 1e-8)
-            iou_loss = iou_loss + (1 - iou)
-        return iou_loss / b
+        return vmap(_iou_single)(pred, target).mean()
 
 
 class SSIMLoss(nn.Module):

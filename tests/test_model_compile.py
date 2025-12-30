@@ -102,6 +102,78 @@ def test_torch_compile(model_name: str):
 
 
 @pytest.mark.parametrize("model_name", list(MODEL_CONFIGS.keys()))
+def test_torch_compile_fullgraph(model_name: str):
+    """Test that models can be compiled with fullgraph=True (no graph breaks)."""
+    # Some models might naturally have graph breaks (e.g. data dependent flow).
+    # We primarily want to ensure ISNet models are graph-break free after optimization.
+
+    if model_name not in ["ISNetDIS", "ISNetGTEncoder"]:
+        pytest.skip(f"Skipping fullgraph check for {model_name} (focusing on ISNet)")
+
+    model = get_model(model_name)
+    model.eval()
+
+    try:
+        # fullgraph=True raises an error if there are any graph breaks
+        compiled_model = torch.compile(model, backend="eager", fullgraph=True)
+        args = get_forward_args(model_name)
+
+        with torch.no_grad():
+            compiled_model(*args)
+
+        print(f"[PASS] {model_name}: torch.compile(fullgraph=True) works")
+
+    except Exception as e:
+        pytest.fail(f"[FAIL] {model_name}: torch.compile(fullgraph=True) failed - {e}")
+
+
+def test_isnet_loss_fullgraph():
+    """Test that ISNet loss computation is compile-friendly (no graph breaks).
+
+    This verifies that EMALossBalancer and other loss logic do not trigger graph breaks.
+    """
+    from anime_segmentation.model.isnet import ISNetDIS
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Mock inputs for ISNetDIS.compute_loss (KL mode)
+    # It expects: [preds, dfs, targets, fs]
+    B, _C, H, W = 1, 1, 64, 64
+
+    # 6 scales for ISNet
+    preds = [torch.randn(B, 1, H, W, device=device) for _ in range(6)]
+    targets = torch.rand(B, 1, H, W, device=device)
+
+    # Feature shapes vary, but for loss computation structure verification,
+    # we just need matching shapes between dfs and fs.
+    # ISNet features: 64, 128, 256, 512, 512, 512 (approx, simplified here)
+    feat_channels = [16, 32, 64, 128, 256, 256]
+    dfs = [
+        torch.randn(B, c, H // (2**i), W // (2**i), device=device)
+        for i, c in enumerate(feat_channels)
+    ]
+    fs = [
+        torch.randn(B, c, H // (2**i), W // (2**i), device=device)
+        for i, c in enumerate(feat_channels)
+    ]
+
+    def loss_wrapper(p, t, d, f):
+        # Wrap static method call
+        return ISNetDIS.compute_loss([p, d, t, f])
+
+    # Compile with fullgraph=True to catch graph breaks
+    opt_loss = torch.compile(loss_wrapper, backend="eager", fullgraph=True)
+
+    try:
+        _loss0, loss = opt_loss(preds, targets, dfs, fs)
+        assert isinstance(loss, torch.Tensor)
+        assert loss.item() > 0
+        print("[PASS] ISNetDIS loss compilation (fullgraph=True) works")
+    except Exception as e:
+        pytest.fail(f"[FAIL] ISNetDIS loss compilation (fullgraph=True) failed - {e}")
+
+
+@pytest.mark.parametrize("model_name", list(MODEL_CONFIGS.keys()))
 def test_torch_compile_inductor(model_name: str):
     """Test that models can be compiled with torch.compile using inductor backend."""
     if not torch.cuda.is_available():

@@ -13,6 +13,7 @@ import torch
 from scipy.ndimage import convolve
 from scipy.ndimage import distance_transform_edt as bwdist
 from torch import Tensor
+from torch.func import vmap
 from torchmetrics import Metric
 
 _EPS = 1e-8
@@ -27,6 +28,9 @@ def _prepare_data(pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
 
     Returns:
         Normalized pred (0-1) and binary gt
+
+    Note:
+        Uses torch.where instead of if-else for vmap compatibility.
     """
     # Binarize GT at 0.5 threshold
     gt = (gt > 0.5).float()
@@ -34,8 +38,9 @@ def _prepare_data(pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
     # Normalize pred to 0-1 range
     pred_min = pred.min()
     pred_max = pred.max()
-    if pred_max != pred_min:
-        pred = (pred - pred_min) / (pred_max - pred_min)
+    denom = pred_max - pred_min
+    # Use where to avoid data-dependent control flow
+    pred = torch.where(denom > 0, (pred - pred_min) / (denom + _EPS), pred)
 
     return pred, gt
 
@@ -191,8 +196,59 @@ class SMeasure(Metric):
         return self.sum_sm / self.count.clamp(min=1)
 
 
+def _cal_em_single(pred: Tensor, gt: Tensor) -> Tensor:
+    """Calculate adaptive E-measure for a single sample (vmap-compatible)."""
+    pred, gt = _prepare_data(pred, gt)
+    adaptive_threshold = _get_adaptive_threshold(pred)
+
+    gt_fg_numel = gt.sum()
+    gt_size = float(gt.numel())
+
+    binarized_pred = (pred >= adaptive_threshold).float()
+    fg_fg_numel = (binarized_pred * gt).sum()
+    fg_bg_numel = (binarized_pred * (1 - gt)).sum()
+
+    fg_numel = fg_fg_numel + fg_bg_numel
+    bg_numel = gt_size - fg_numel
+
+    # Calculate enhanced alignment (general case)
+    bg_fg_numel = gt_fg_numel - fg_fg_numel
+    bg_bg_numel = bg_numel - bg_fg_numel
+
+    mean_pred_value = fg_numel / gt_size
+    mean_gt_value = gt_fg_numel / gt_size
+
+    demeaned_pred_fg = 1 - mean_pred_value
+    demeaned_pred_bg = -mean_pred_value
+    demeaned_gt_fg = 1 - mean_gt_value
+    demeaned_gt_bg = -mean_gt_value
+
+    # Vectorized computation of all 4 parts
+    part_numels = torch.stack([fg_fg_numel, fg_bg_numel, bg_fg_numel, bg_bg_numel])
+    pred_vals = torch.stack(
+        [demeaned_pred_fg, demeaned_pred_fg, demeaned_pred_bg, demeaned_pred_bg]
+    )
+    gt_vals = torch.stack([demeaned_gt_fg, demeaned_gt_bg, demeaned_gt_fg, demeaned_gt_bg])
+
+    align_matrix_values = 2 * pred_vals * gt_vals / (pred_vals**2 + gt_vals**2 + _EPS)
+    enhanced_matrix_values = (align_matrix_values + 1) ** 2 / 4
+    enhanced_matrix_sum_general = (enhanced_matrix_values * part_numels).sum()
+
+    # Use torch.where to handle edge cases without data-dependent control flow
+    enhanced_matrix_sum = torch.where(
+        gt_fg_numel == 0,
+        bg_numel,
+        torch.where(gt_fg_numel == gt_size, fg_numel, enhanced_matrix_sum_general),
+    )
+
+    return enhanced_matrix_sum / (gt_size - 1 + _EPS)
+
+
 class EMeasure(Metric):
-    """Enhanced-alignment measure for segmentation evaluation."""
+    """Enhanced-alignment measure for segmentation evaluation.
+
+    Optimized with vmap for efficient batched computation.
+    """
 
     higher_is_better = True
     full_state_update = False
@@ -203,71 +259,37 @@ class EMeasure(Metric):
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, pred: Tensor, gt: Tensor) -> None:
-        for i in range(pred.shape[0]):
-            p = pred[i].squeeze()
-            g = gt[i].squeeze()
-            p, g = _prepare_data(p, g)
-            em = self._cal_em(p, g)
-            self.sum_em += em
-            self.count += 1
+        # Squeeze channel dim and use vmap for batched computation
+        pred_squeezed = pred.squeeze(1) if pred.dim() == 4 else pred
+        gt_squeezed = gt.squeeze(1) if gt.dim() == 4 else gt
 
-    def _cal_em(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Calculate adaptive E-measure for a single image."""
-        adaptive_threshold = _get_adaptive_threshold(pred)
-        return self._cal_em_with_threshold(pred, gt, adaptive_threshold)
-
-    def _cal_em_with_threshold(self, pred: Tensor, gt: Tensor, threshold: Tensor) -> Tensor:
-        """Calculate E-measure with a specific threshold."""
-        gt_fg_numel = gt.sum()
-        gt_size = gt.numel()
-
-        binarized_pred = (pred >= threshold).float()
-        fg_fg_numel = (binarized_pred * gt).sum()
-        fg_bg_numel = (binarized_pred * (1 - gt)).sum()
-
-        fg_numel = fg_fg_numel + fg_bg_numel
-        bg_numel = gt_size - fg_numel
-
-        if gt_fg_numel == 0:
-            enhanced_matrix_sum = bg_numel
-        elif gt_fg_numel == gt_size:
-            enhanced_matrix_sum = fg_numel
-        else:
-            # Calculate parts for enhanced alignment
-            bg_fg_numel = gt_fg_numel - fg_fg_numel
-            bg_bg_numel = bg_numel - bg_fg_numel
-
-            mean_pred_value = fg_numel / gt_size
-            mean_gt_value = gt_fg_numel / gt_size
-
-            demeaned_pred_fg = 1 - mean_pred_value
-            demeaned_pred_bg = -mean_pred_value
-            demeaned_gt_fg = 1 - mean_gt_value
-            demeaned_gt_bg = -mean_gt_value
-
-            parts = [
-                (fg_fg_numel, demeaned_pred_fg, demeaned_gt_fg),
-                (fg_bg_numel, demeaned_pred_fg, demeaned_gt_bg),
-                (bg_fg_numel, demeaned_pred_bg, demeaned_gt_fg),
-                (bg_bg_numel, demeaned_pred_bg, demeaned_gt_bg),
-            ]
-
-            enhanced_matrix_sum = torch.tensor(0.0, device=pred.device)
-            for part_numel, pred_val, gt_val in parts:
-                align_matrix_value = 2 * pred_val * gt_val / (pred_val**2 + gt_val**2 + _EPS)
-                enhanced_matrix_value = (align_matrix_value + 1) ** 2 / 4
-                enhanced_matrix_sum += enhanced_matrix_value * part_numel
-
-        return enhanced_matrix_sum / (gt_size - 1 + _EPS)
+        ems = vmap(_cal_em_single)(pred_squeezed, gt_squeezed)
+        self.sum_em += ems.sum()
+        self.count += pred.shape[0]
 
     def compute(self) -> Tensor:
         return self.sum_em / self.count.clamp(min=1)
+
+
+def _cal_adaptive_fm_single(pred: Tensor, gt: Tensor, beta: float) -> Tensor:
+    """Calculate adaptive F-measure for a single sample."""
+    pred, gt = _prepare_data(pred, gt)
+    adaptive_threshold = _get_adaptive_threshold(pred)
+    binary_pred = (pred >= adaptive_threshold).float()
+
+    area_intersection = (binary_pred * gt).sum()
+    # Use where instead of if to keep vmap-compatible (no data-dependent control flow)
+    pre = area_intersection / binary_pred.sum().clamp(min=_EPS)
+    rec = area_intersection / gt.sum().clamp(min=_EPS)
+    fm = (1 + beta) * pre * rec / (beta * pre + rec + _EPS)
+    return torch.where(area_intersection == 0, torch.zeros_like(fm), fm)
 
 
 class FMeasure(Metric):
     """F-measure (F-beta score) for segmentation evaluation.
 
     Uses adaptive thresholding for binarization.
+    Optimized with vmap for efficient batched computation.
     """
 
     higher_is_better = True
@@ -280,26 +302,16 @@ class FMeasure(Metric):
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, pred: Tensor, gt: Tensor) -> None:
-        for i in range(pred.shape[0]):
-            p = pred[i].squeeze()
-            g = gt[i].squeeze()
-            p, g = _prepare_data(p, g)
-            fm = self._cal_adaptive_fm(p, g)
-            self.sum_fm += fm
-            self.count += 1
+        # Squeeze channel dim and use vmap for batched computation
+        pred_squeezed = pred.squeeze(1) if pred.dim() == 4 else pred
+        gt_squeezed = gt.squeeze(1) if gt.dim() == 4 else gt
 
-    def _cal_adaptive_fm(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Calculate adaptive F-measure."""
-        adaptive_threshold = _get_adaptive_threshold(pred)
-        binary_pred = (pred >= adaptive_threshold).float()
+        from functools import partial
 
-        area_intersection = (binary_pred * gt).sum()
-        if area_intersection == 0:
-            return torch.tensor(0.0, device=pred.device)
-
-        pre = area_intersection / binary_pred.sum().clamp(min=_EPS)
-        rec = area_intersection / gt.sum().clamp(min=_EPS)
-        return (1 + self.beta) * pre * rec / (self.beta * pre + rec + _EPS)
+        fm_fn = partial(_cal_adaptive_fm_single, beta=self.beta)
+        fms = vmap(fm_fn)(pred_squeezed, gt_squeezed)
+        self.sum_fm += fms.sum()
+        self.count += pred.shape[0]
 
     def compute(self) -> Tensor:
         return self.sum_fm / self.count.clamp(min=1)
