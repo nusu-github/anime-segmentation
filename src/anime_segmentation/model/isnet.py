@@ -5,137 +5,62 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from anime_segmentation.loss import HybridLoss, get_hybrid_loss
-
-# Shared hybrid loss instance (initialized lazily per model)
-_hybrid_loss: HybridLoss | None = None
+bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
 
 
-def _get_hybrid_loss() -> HybridLoss:
-    """Get or create the shared HybridLoss instance."""
-    global _hybrid_loss
-    if _hybrid_loss is None:
-        _hybrid_loss = get_hybrid_loss()
-    return _hybrid_loss
+def multi_loss_fusion(preds, target):
+    loss0 = 0.0
+    loss = 0.0
 
-
-def multi_loss_fusion(preds: list[Tensor], target: Tensor) -> tuple[Tensor, Tensor]:
-    """Compute hybrid loss across multiple prediction scales.
-
-    Args:
-        preds: List of predictions at different scales (logits)
-        target: Ground truth mask
-
-    Returns:
-        Tuple of (loss at first scale, total loss across all scales)
-    """
-    hybrid_loss = _get_hybrid_loss()
-    scale_losses = [hybrid_loss(pred, target) for pred in preds]
-    loss0 = scale_losses[0]
-    loss = torch.stack(scale_losses).mean()
+    for i in range(len(preds)):
+        if preds[i].shape[2] != target.shape[2] or preds[i].shape[3] != target.shape[3]:
+            tmp_target = F.interpolate(
+                target, size=preds[i].size()[2:], mode="bilinear", align_corners=True
+            )
+            loss = loss + bce_loss(preds[i], tmp_target)
+        else:
+            loss = loss + bce_loss(preds[i], target)
+        if i == 0:
+            loss0 = loss
     return loss0, loss
 
 
-# Feature distillation losses
 fea_loss = nn.MSELoss(reduction="mean")
-kl_loss = nn.KLDivLoss(reduction="batchmean")
+kl_loss = nn.KLDivLoss(reduction="mean")
 l1_loss = nn.L1Loss(reduction="mean")
 smooth_l1_loss = nn.SmoothL1Loss(reduction="mean")
 
 
-class EMALossBalancer:
-    def __init__(
-        self,
-        target_ratio: float = 0.1,
-        momentum: float = 0.99,
-        eps: float = 1e-8,
-        w_min: float = 0.0,
-        w_max: float = 1e4,
-    ) -> None:
-        self.target_ratio = target_ratio
-        self.momentum = momentum
-        self.eps = eps
-        self.w_min = w_min
-        self.w_max = w_max
-        self.ema_pixel: float | None = None
-        self.ema_feature: float | None = None
+def multi_loss_fusion_kl(preds, target, dfs, fs, mode="MSE"):
+    loss0 = 0.0
+    loss = 0.0
 
-    def get_feature_weight(self, pixel_loss: Tensor, feature_loss: Tensor) -> Tensor:
-        pixel_val = float(pixel_loss.detach())
-        feature_val = float(feature_loss.detach())
-
-        feature_val = max(feature_val, self.eps)
-
-        if self.ema_pixel is None or self.ema_feature is None:
-            self.ema_pixel = pixel_val
-            self.ema_feature = feature_val
+    for i in range(len(preds)):
+        if preds[i].shape[2] != target.shape[2] or preds[i].shape[3] != target.shape[3]:
+            tmp_target = F.interpolate(
+                target, size=preds[i].size()[2:], mode="bilinear", align_corners=True
+            )
+            loss = loss + bce_loss(preds[i], tmp_target)
         else:
-            self.ema_pixel = self.momentum * self.ema_pixel + (1 - self.momentum) * pixel_val
-            self.ema_feature = self.momentum * self.ema_feature + (1 - self.momentum) * feature_val
+            loss = loss + bce_loss(preds[i], target)
+        if i == 0:
+            loss0 = loss
 
-        ema_pixel = max(self.ema_pixel, self.eps)
-        ema_feature = max(self.ema_feature, self.eps)
-
-        w = self.target_ratio * ema_pixel / ema_feature
-        w = min(max(w, self.w_min), self.w_max)
-
-        return pixel_loss.new_tensor(w)
-
-
-# Shared EMA balancer instance for isnet_is
-_ema_balancer: EMALossBalancer | None = None
-
-
-def _get_ema_balancer() -> EMALossBalancer:
-    """Get or create the shared EMA balancer instance."""
-    global _ema_balancer
-    if _ema_balancer is None:
-        _ema_balancer = EMALossBalancer(target_ratio=0.1, momentum=0.99)
-    return _ema_balancer
-
-
-def multi_loss_fusion_kl(
-    preds: list[Tensor],
-    target: Tensor,
-    dfs: list[Tensor],
-    fs: list[Tensor],
-    mode: str = "MSE",
-) -> tuple[Tensor, Tensor]:
-    """Compute hybrid loss with feature distillation (KL/MSE).
-
-    Uses EMA-based dynamic balancing to maintain feature loss contribution.
-
-    Args:
-        preds: List of predictions at different scales (logits)
-        target: Ground truth mask
-        dfs: Decoder features from main model
-        fs: Features from GT encoder (distillation targets)
-        mode: Feature loss type ("MSE", "KL", "MAE", "SmoothL1")
-
-    Returns:
-        Tuple of (loss at first scale, total loss including feature loss)
-    """
-    loss0, pixel_loss = multi_loss_fusion(preds, target)
-
-    fea_terms = []
-    for df, fs_i in zip(dfs, fs, strict=True):
+    for i in range(len(dfs)):
+        df = dfs[i]
+        fs_i = fs[i]
         match mode:
             case "MSE":
-                fea_terms.append(fea_loss(df, fs_i))
+                # add the mse loss of features as additional constraints
+                loss = loss + fea_loss(df, fs_i)
             case "KL":
-                fea_terms.append(kl_loss(F.log_softmax(df, dim=1), F.softmax(fs_i, dim=1)))
+                loss = loss + kl_loss(F.log_softmax(df, dim=1), F.softmax(fs_i, dim=1))
             case "MAE":
-                fea_terms.append(l1_loss(df, fs_i))
+                loss = loss + l1_loss(df, fs_i)
             case "SmoothL1":
-                fea_terms.append(smooth_l1_loss(df, fs_i))
+                loss = loss + smooth_l1_loss(df, fs_i)
 
-    feature_loss = torch.stack(fea_terms).mean()
-
-    balancer = _get_ema_balancer()
-    feature_weight = balancer.get_feature_weight(pixel_loss, feature_loss)
-
-    total_loss = pixel_loss + feature_weight * feature_loss
-    return loss0, total_loss
+    return loss0, loss
 
 
 class RebnConv(nn.Module):
