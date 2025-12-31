@@ -13,18 +13,15 @@ from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.trainer.states import TrainerFn
 from torch._dynamo import OptimizedModule
 from torch.optim import Optimizer
-from torchmetrics import MetricCollection
+from torchmetrics import MeanAbsoluteError, MetricCollection
 
 from .data_module import AnimeSegDataModule
 from .metrics import (
-    HCE,
-    BoundaryFMeasure,
-    BoundaryIoU,
+    BIoUMeasure,
     EMeasure,
     FMeasure,
-    MAEMetric,
-    MeanBoundaryAccuracy,
-    SkeletonFMeasure,
+    HCEMeasure,
+    MBAMeasure,
     SMeasure,
     WeightedFMeasure,
 )
@@ -375,13 +372,11 @@ class AnimeSegmentation(
                 "Fm": FMeasure(beta=0.3),
                 "wFm": WeightedFMeasure(beta=1.0),
                 "FwBeta": WeightedFMeasure(beta=1.0),
-                "MAE": MAEMetric(),
-                "HCE": HCE(),
-                "BIoU": BoundaryIoU(mode="mean"),
-                "BIoU_max": BoundaryIoU(mode="max"),
-                "BF": BoundaryFMeasure(tolerance=1),
-                "MBA": MeanBoundaryAccuracy(),
-                "SkelF": SkeletonFMeasure(tolerance=1),
+                "MAE": MeanAbsoluteError(),
+                "HCE": HCEMeasure(),
+                "BIoU": BIoUMeasure(mode="mean"),
+                "BIoU_max": BIoUMeasure(mode="max"),
+                "MBA": MBAMeasure(),
             },
             prefix="val/",
         )

@@ -171,7 +171,7 @@ class AnimeSegDataModule(L.LightningDataModule):
         ]
         for d in required_dirs:
             if not d.exists():
-                raise FileNotFoundError(f"Required data directory not found: {d}")  # noqa: TRY003
+                raise FileNotFoundError(f"Required data directory not found: {d}")
 
     def setup(self, stage: str | None = None) -> None:
         """Create datasets. Called on every process in distributed training."""

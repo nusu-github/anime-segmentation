@@ -6,435 +6,282 @@ for comprehensive segmentation quality evaluation.
 Based on BiRefNet evaluation design.
 """
 
-from functools import partial
+from typing import Any
 
 import cv2
 import numpy as np
 import torch
-from scipy.ndimage import binary_erosion, convolve, maximum_filter
-from scipy.ndimage import distance_transform_edt as bwdist
-from skimage.measure import label
-from skimage.morphology import disk, skeletonize
+from scipy.ndimage import convolve, distance_transform_edt
+from skimage import measure, morphology
 from torch import Tensor
-from torch.func import vmap
 from torchmetrics import Metric
 
-_EPS = 1e-8
+TYPE = np.float64
+EPS = torch.finfo(torch.float64).eps
 
 
-def _prepare_data(pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
-    """Prepare prediction and ground truth for metric computation.
-
-    Args:
-        pred: Predicted mask (0-1 range or 0-255)
-        gt: Ground truth mask (0-1 range or 0-255)
-
-    Returns:
-        Normalized pred (0-1) and binary gt
-
-    Note:
-        Uses torch.where instead of if-else for vmap compatibility.
-    """
-    # Binarize GT at 0.5 threshold
-    gt = (gt > 0.5).float()
-
-    # Normalize pred to 0-1 range
-    pred_min = pred.min()
-    pred_max = pred.max()
-    denom = pred_max - pred_min
-    # Use where to avoid data-dependent control flow
-    pred = torch.where(denom > 0, (pred - pred_min) / (denom + _EPS), pred)
-
+def _ensure_batch(pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
+    if pred.shape != gt.shape:
+        raise ValueError(f"Shape mismatch: pred {pred.shape} vs gt {gt.shape}")
+    if pred.ndim == 2:
+        pred = pred.unsqueeze(0)
+        gt = gt.unsqueeze(0)
     return pred, gt
 
 
-def _get_adaptive_threshold(matrix: Tensor, max_value: float = 1.0) -> Tensor:
-    """Get adaptive threshold as 2 * mean, clamped to max_value."""
-    return torch.clamp(2 * matrix.mean(), max=max_value)
-
-
-def _prepare_data_np(pred: np.ndarray, gt: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    gt = gt > 128
-    pred = pred / 255.0
-    if pred.max() != pred.min():
-        pred = (pred - pred.min()) / (pred.max() - pred.min())
-    return pred, gt
-
-
-def _binary_boundary(mask: np.ndarray) -> np.ndarray:
-    """Extract 1-pixel boundary from a binary mask."""
-    if mask.sum() == 0:
-        return np.zeros_like(mask, dtype=bool)
-    eroded = binary_erosion(mask, structure=np.ones((3, 3), dtype=bool))
-    return np.logical_and(mask, np.logical_not(eroded))
-
-
-def _boundary_match_stats(
-    pred_boundary: np.ndarray, gt_boundary: np.ndarray, tolerance: int
-) -> tuple[float, float]:
-    """Boundary matching precision/recall with distance tolerance."""
-    pred_count = pred_boundary.sum()
-    gt_count = gt_boundary.sum()
-    if pred_count == 0 and gt_count == 0:
-        return 1.0, 1.0
-    if pred_count == 0 or gt_count == 0:
-        return 0.0, 0.0
-
-    dt_gt = bwdist(gt_boundary == 0)
-    dt_pred = bwdist(pred_boundary == 0)
-
-    pred_match = pred_boundary & (dt_gt <= tolerance)
-    gt_match = gt_boundary & (dt_pred <= tolerance)
-
-    precision = pred_match.sum() / max(pred_count, 1)
-    recall = gt_match.sum() / max(gt_count, 1)
-    return float(precision), float(recall)
-
-
-def _skeleton_from_distance(mask: np.ndarray) -> np.ndarray:
-    """Approximate skeleton via distance-transform ridge."""
-    if mask.sum() == 0:
-        return np.zeros_like(mask, dtype=bool)
-    dist = bwdist(mask == 0)
-    if dist.max() <= 0:
-        return np.zeros_like(mask, dtype=bool)
-    local_max = maximum_filter(dist, size=3, mode="constant")
-    return np.logical_and(dist > 0, dist == local_max)
-
-
-class MAEMetric(Metric):
-    """Mean Absolute Error metric."""
-
-    higher_is_better = False
-    full_state_update = False
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.add_state("sum_mae", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, pred: Tensor, gt: Tensor) -> None:
-        pred, gt = _prepare_data(pred, gt)
-        mae = torch.abs(pred - gt).mean()
-        self.sum_mae += mae
-        self.count += 1
-
-    def compute(self) -> Tensor:
-        return self.sum_mae / self.count.clamp(min=1)
-
-
-class SMeasure(Metric):
-    """Structure-measure for segmentation evaluation.
-
-    Combines object-aware and region-aware structural similarity.
-    """
-
-    higher_is_better = True
-    full_state_update = False
-
-    def __init__(self, alpha: float = 0.5, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.alpha = alpha
-        self.add_state("sum_sm", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, pred: Tensor, gt: Tensor) -> None:
-        # Process each sample in batch
-        for i in range(pred.shape[0]):
-            p = pred[i].squeeze()
-            g = gt[i].squeeze()
-            p, g = _prepare_data(p, g)
-            sm = self._cal_sm(p, g)
-            self.sum_sm += sm
-            self.count += 1
-
-    def _cal_sm(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Calculate S-measure for a single image."""
-        y = gt.mean()
-        if y == 0:
-            sm = 1 - pred.mean()
-        elif y == 1:
-            sm = pred.mean()
-        else:
-            sm = self.alpha * self._object(pred, gt) + (1 - self.alpha) * self._region(pred, gt)
-            sm = torch.clamp(sm, min=0)
-        return sm
-
-    def _object(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Object-aware structural similarity."""
-        fg = pred * gt
-        bg = (1 - pred) * (1 - gt)
-        u = gt.mean()
-        return u * self._s_object(fg, gt) + (1 - u) * self._s_object(bg, 1 - gt)
-
-    def _s_object(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Object structural similarity score."""
-        mask = gt > 0.5
-        if mask.sum() == 0:
-            return torch.tensor(0.0, device=pred.device)
-
-        x = pred[mask].mean()
-        sigma_x = pred[mask].std()
-        return 2 * x / (x.pow(2) + 1 + sigma_x + _EPS)
-
-    def _region(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Region-aware structural similarity using SSIM-like measure."""
-        x, y = self._centroid(gt)
-        h, w = gt.shape
-
-        # Divide into 4 quadrants
-        gt_lt = gt[:y, :x]
-        gt_rt = gt[:y, x:]
-        gt_lb = gt[y:, :x]
-        gt_rb = gt[y:, x:]
-
-        pred_lt = pred[:y, :x]
-        pred_rt = pred[:y, x:]
-        pred_lb = pred[y:, :x]
-        pred_rb = pred[y:, x:]
-
-        # Weights based on area
-        area = h * w
-        w1 = x * y / area
-        w2 = (w - x) * y / area
-        w3 = x * (h - y) / area
-        w4 = 1 - w1 - w2 - w3
-
-        return (
-            w1 * self._ssim(pred_lt, gt_lt)
-            + w2 * self._ssim(pred_rt, gt_rt)
-            + w3 * self._ssim(pred_lb, gt_lb)
-            + w4 * self._ssim(pred_rb, gt_rb)
-        )
-
-    def _centroid(self, gt: Tensor) -> tuple[int, int]:
-        """Calculate centroid of ground truth."""
-        h, w = gt.shape
-        if gt.sum() == 0:
-            return w // 2, h // 2
-
-        # Find indices where gt is True
-        indices = torch.nonzero(gt > 0.5, as_tuple=True)
-        if len(indices[0]) == 0:
-            return w // 2, h // 2
-
-        y = int(indices[0].float().mean().round().item()) + 1
-        x = int(indices[1].float().mean().round().item()) + 1
-        return min(x, w - 1), min(y, h - 1)
-
-    def _ssim(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Simple SSIM-like measure for region comparison."""
-        if pred.numel() == 0 or gt.numel() == 0:
-            return torch.tensor(0.0, device=pred.device)
-
-        n = pred.numel()
-        x = pred.mean()
-        y = gt.mean()
-
-        sigma_x = ((pred - x).pow(2).sum()) / max(n - 1, 1)
-        sigma_y = ((gt - y).pow(2).sum()) / max(n - 1, 1)
-        sigma_xy = ((pred - x) * (gt - y)).sum() / max(n - 1, 1)
-
-        alpha = 4 * x * y * sigma_xy
-        beta = (x.pow(2) + y.pow(2)) * (sigma_x + sigma_y)
-
-        if alpha != 0:
-            return alpha / (beta + _EPS)
-        if beta == 0:
-            return torch.tensor(1.0, device=pred.device)
-        return torch.tensor(0.0, device=pred.device)
-
-    def compute(self) -> Tensor:
-        return self.sum_sm / self.count.clamp(min=1)
-
-
-def _cal_em_single(pred: Tensor, gt: Tensor) -> Tensor:
-    """Calculate adaptive E-measure for a single sample (vmap-compatible)."""
-    pred, gt = _prepare_data(pred, gt)
-    adaptive_threshold = _get_adaptive_threshold(pred)
-
-    gt_fg_numel = gt.sum()
-    gt_size = float(gt.numel())
-
-    binarized_pred = (pred >= adaptive_threshold).float()
-    fg_fg_numel = (binarized_pred * gt).sum()
-    fg_bg_numel = (binarized_pred * (1 - gt)).sum()
-
-    fg_numel = fg_fg_numel + fg_bg_numel
-    bg_numel = gt_size - fg_numel
-
-    # Calculate enhanced alignment (general case)
-    bg_fg_numel = gt_fg_numel - fg_fg_numel
-    bg_bg_numel = bg_numel - bg_fg_numel
-
-    mean_pred_value = fg_numel / gt_size
-    mean_gt_value = gt_fg_numel / gt_size
-
-    demeaned_pred_fg = 1 - mean_pred_value
-    demeaned_pred_bg = -mean_pred_value
-    demeaned_gt_fg = 1 - mean_gt_value
-    demeaned_gt_bg = -mean_gt_value
-
-    # Vectorized computation of all 4 parts
-    part_numels = torch.stack([fg_fg_numel, fg_bg_numel, bg_fg_numel, bg_bg_numel])
-    pred_vals = torch.stack(
-        [demeaned_pred_fg, demeaned_pred_fg, demeaned_pred_bg, demeaned_pred_bg]
-    )
-    gt_vals = torch.stack([demeaned_gt_fg, demeaned_gt_bg, demeaned_gt_fg, demeaned_gt_bg])
-
-    align_matrix_values = 2 * pred_vals * gt_vals / (pred_vals**2 + gt_vals**2 + _EPS)
-    enhanced_matrix_values = (align_matrix_values + 1) ** 2 / 4
-    enhanced_matrix_sum_general = (enhanced_matrix_values * part_numels).sum()
-
-    # Use torch.where to handle edge cases without data-dependent control flow
-    enhanced_matrix_sum = torch.where(
-        gt_fg_numel == 0,
-        bg_numel,
-        torch.where(gt_fg_numel == gt_size, fg_numel, enhanced_matrix_sum_general),
-    )
-
-    return enhanced_matrix_sum / (gt_size - 1 + _EPS)
-
-
-class EMeasure(Metric):
-    """Enhanced-alignment measure for segmentation evaluation.
-
-    Optimized with vmap for efficient batched computation.
-    """
-
-    higher_is_better = True
-    full_state_update = False
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.add_state("sum_em", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, pred: Tensor, gt: Tensor) -> None:
-        # Squeeze channel dim and use vmap for batched computation
-        pred_squeezed = pred.squeeze(1) if pred.dim() == 4 else pred
-        gt_squeezed = gt.squeeze(1) if gt.dim() == 4 else gt
-
-        ems = vmap(_cal_em_single)(pred_squeezed, gt_squeezed)
-        self.sum_em += ems.sum()
-        self.count += pred.shape[0]
-
-    def compute(self) -> Tensor:
-        return self.sum_em / self.count.clamp(min=1)
-
-
-def _cal_adaptive_fm_single(pred: Tensor, gt: Tensor, beta: float) -> Tensor:
-    """Calculate adaptive F-measure for a single sample."""
-    pred, gt = _prepare_data(pred, gt)
-    adaptive_threshold = _get_adaptive_threshold(pred)
-    binary_pred = (pred >= adaptive_threshold).float()
-
-    area_intersection = (binary_pred * gt).sum()
-    # Use where instead of if to keep vmap-compatible (no data-dependent control flow)
-    pre = area_intersection / binary_pred.sum().clamp(min=_EPS)
-    rec = area_intersection / gt.sum().clamp(min=_EPS)
-    fm = (1 + beta) * pre * rec / (beta * pre + rec + _EPS)
-    return torch.where(area_intersection == 0, torch.zeros_like(fm), fm)
+def _normalize_torch(pred: Tensor, gt: Tensor, normalize: bool) -> tuple[Tensor, Tensor]:
+    if normalize:
+        gt = gt > 128
+        pred = pred.to(torch.float64) / 255.0
+        if pred.max() != pred.min():
+            pred = (pred - pred.min()) / (pred.max() - pred.min())
+    else:
+        if not pred.is_floating_point():
+            raise TypeError(f"pred must be float when normalize=False, got {pred.dtype}")
+        if pred.min() < 0 or pred.max() > 1:
+            raise ValueError("pred values must be in [0, 1]")
+        if gt.dtype != torch.bool:
+            raise TypeError(f"gt must be bool when normalize=False, got {gt.dtype}")
+        pred = pred.to(torch.float64)
+    return pred, gt.bool()
+
+
+def _normalize_numpy(
+    pred: np.ndarray, gt: np.ndarray, normalize: bool
+) -> tuple[np.ndarray, np.ndarray]:
+    if normalize:
+        gt = gt > 128
+        pred = pred.astype(np.float64) / 255.0
+        if pred.max() != pred.min():
+            pred = (pred - pred.min()) / (pred.max() - pred.min())
+    else:
+        if not np.issubdtype(pred.dtype, np.floating):
+            raise TypeError(f"pred must be float when normalize=False, got {pred.dtype}")
+        if pred.min() < 0 or pred.max() > 1:
+            raise ValueError("pred values must be in [0, 1]")
+        if gt.dtype != bool:
+            raise TypeError(f"gt must be bool when normalize=False, got {gt.dtype}")
+        pred = pred.astype(np.float64)
+    return pred.astype(np.float64), gt.astype(bool)
 
 
 class FMeasure(Metric):
-    """F-measure (F-beta score) for segmentation evaluation.
-
-    Uses adaptive thresholding for binarization.
-    Optimized with vmap for efficient batched computation.
+    """F-measure evaluator for salient object detection (torchmetrics compatible).
+    Computes precision, recall, and F-measure at multiple thresholds,
+    supporting both adaptive and dynamic evaluation modes.
+    Reference:
+        Achanta et al., "Frequency-tuned salient region detection", CVPR 2009
     """
 
+    is_differentiable = False
     higher_is_better = True
     full_state_update = False
+    num_samples: Tensor
 
-    def __init__(self, beta: float = 0.3, **kwargs) -> None:
+    def __init__(
+        self,
+        beta: float = 0.3,
+        normalize: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Args:
+            beta: Weight of precision in F-measure calculation.
+            normalize: If True, normalize pred from [0,255] and gt from uint8.
+                      If False, expect pred in [0,1] float and gt as bool.
+        """
         super().__init__(**kwargs)
         self.beta = beta
-        self.add_state("sum_fm", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.normalize = normalize
+        self.add_state(
+            "adaptive_fm_sum", default=torch.tensor(0.0, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "precision_sum", default=torch.zeros(256, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "recall_sum", default=torch.zeros(256, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "changeable_fm_sum", default=torch.zeros(256, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "num_samples", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum"
+        )
 
     def update(self, pred: Tensor, gt: Tensor) -> None:
-        # Squeeze channel dim and use vmap for batched computation
-        pred_squeezed = pred.squeeze(1) if pred.dim() == 4 else pred
-        gt_squeezed = gt.squeeze(1) if gt.dim() == 4 else gt
+        """Update state with predictions and ground truth.
 
-        fm_fn = partial(_cal_adaptive_fm_single, beta=self.beta)
-        fms = vmap(fm_fn)(pred_squeezed, gt_squeezed)
-        self.sum_fm += fms.sum()
-        self.count += pred.shape[0]
+        Args:
+            pred: Prediction tensor, shape (H, W) or (B, H, W).
+                  If normalize=True: uint8 [0, 255]
+                  If normalize=False: float [0, 1]
+            gt: Ground truth tensor, shape (H, W) or (B, H, W).
+                If normalize=True: uint8 (threshold at 128)
+                If normalize=False: bool
+        """
+        pred, gt = _ensure_batch(pred, gt)
+        batch_size = pred.shape[0]
+        for i in range(batch_size):
+            p, g = pred[i], gt[i]
+            p, g = self._validate_and_normalize(p, g)
+            adaptive_fm = self._cal_adaptive_fm(p, g)
+            self.adaptive_fm_sum += adaptive_fm
+            precisions, recalls, changeable_fms = self._cal_pr(p, g)
+            self.precision_sum += precisions
+            self.recall_sum += recalls
+            self.changeable_fm_sum += changeable_fms
+            self.num_samples += 1
 
-    def compute(self) -> Tensor:
-        return self.sum_fm / self.count.clamp(min=1)
+    def _validate_and_normalize(self, pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
+        """Validate and normalize input tensors."""
+        return _normalize_torch(pred, gt, self.normalize)
+
+    def _cal_adaptive_fm(self, pred: Tensor, gt: Tensor) -> Tensor:
+        """Calculate adaptive F-measure for a single sample."""
+        adaptive_threshold = min(2 * pred.mean().item(), 1.0)
+        binary_pred = pred >= adaptive_threshold
+        area_intersection = binary_pred[gt].sum().to(torch.float64)
+        if area_intersection == 0:
+            return torch.tensor(0.0, dtype=torch.float64, device=pred.device)
+        num_pred_fg = binary_pred.sum().to(torch.float64)
+        num_gt_fg = gt.sum().to(torch.float64)
+        precision = area_intersection / num_pred_fg
+        recall = area_intersection / num_gt_fg
+        return (1 + self.beta) * precision * recall / (self.beta * precision + recall)
+
+    def _cal_pr(self, pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Calculate precision, recall, and F-measure at 256 thresholds."""
+        pred_uint8 = (pred * 255).to(torch.uint8)
+        fg_hist = torch.histc(pred_uint8[gt].float(), bins=256, min=0, max=255)
+        bg_hist = torch.histc(pred_uint8[~gt].float(), bins=256, min=0, max=255)
+        fg_w_thrs = torch.flip(fg_hist, dims=[0]).cumsum(dim=0).to(torch.float64)
+        bg_w_thrs = torch.flip(bg_hist, dims=[0]).cumsum(dim=0).to(torch.float64)
+        TPs = fg_w_thrs
+        Ps = fg_w_thrs + bg_w_thrs
+        Ps = torch.where(Ps == 0, torch.ones_like(Ps), Ps)
+        T = max(gt.sum().item(), 1)
+        precisions = TPs / Ps
+        recalls = TPs / T
+        numerator = (1 + self.beta) * precisions * recalls
+        denominator = torch.where(
+            numerator == 0, torch.ones_like(numerator), self.beta * precisions + recalls
+        )
+        changeable_fms = numerator / denominator
+        return precisions, recalls, changeable_fms
+
+    def compute(self) -> dict[str, dict[str, Tensor]]:
+        """Compute final metrics.
+        Returns:
+            dict: {
+                "fm": {"adp": Tensor (scalar), "curve": Tensor[256]},
+                "pr": {"p": Tensor[256], "r": Tensor[256]}
+            }
+        """
+        n = self.num_samples.to(torch.float64)
+        if n == 0:
+            n = torch.tensor(1.0, dtype=torch.float64)
+        return {
+            "fm": {
+                "adp": self.adaptive_fm_sum / n,
+                "curve": self.changeable_fm_sum / n,
+            },
+            "pr": {
+                "p": self.precision_sum / n,
+                "r": self.recall_sum / n,
+            },
+        }
 
 
 class WeightedFMeasure(Metric):
-    """Weighted F-measure for segmentation evaluation.
-
-    Applies distance-based weighting to penalize errors near boundaries.
+    """Weighted F-measure evaluator for salient object detection (torchmetrics compatible).
+    Considers both pixel dependency and pixel importance when evaluating foreground maps,
+    weighting pixels by their distance from the foreground boundary.
+    Note: Uses CPU-bound distance transform with index return, which has no efficient GPU equivalent.
+    Reference:
+        Margolin et al., "How to eval foreground maps?", CVPR 2014
     """
 
+    is_differentiable = False
     higher_is_better = True
     full_state_update = False
+    num_samples: Tensor
 
-    def __init__(self, beta: float = 1.0, **kwargs) -> None:
+    def __init__(
+        self,
+        beta: float = 1.0,
+        normalize: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Args:
+            beta: Weight for balancing precision and recall. Defaults to 1.0 (F1-score).
+            normalize: If True, normalize pred from [0,255] and gt from uint8.
+                      If False, expect pred in [0,1] float and gt as bool.
+        """
         super().__init__(**kwargs)
         self.beta = beta
-        self.add_state("sum_wfm", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.normalize = normalize
+        self.add_state(
+            "wfm_sum", default=torch.tensor(0.0, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "num_samples", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum"
+        )
 
     def update(self, pred: Tensor, gt: Tensor) -> None:
-        for i in range(pred.shape[0]):
-            p = pred[i].squeeze()
-            g = gt[i].squeeze()
-            p, g = _prepare_data(p, g)
+        """Update state with predictions and ground truth.
+        Args:
+            pred: Prediction tensor, shape (H, W) or (B, H, W).
+            gt: Ground truth tensor, shape (H, W) or (B, H, W).
+        """
+        pred, gt = _ensure_batch(pred, gt)
+        batch_size = pred.shape[0]
+        for i in range(batch_size):
+            p = pred[i].detach().cpu().numpy()
+            g = gt[i].detach().cpu().numpy()
+            p, g = self._validate_and_normalize(p, g)
+            # All background case
+            wfm = self._cal_wfm(p, g) if np.any(g) else 0.0
+            self.wfm_sum += wfm
+            self.num_samples += 1
 
-            wfm = torch.tensor(0.0, device=pred.device) if g.sum() == 0 else self._cal_wfm(p, g)
-            self.sum_wfm += wfm
-            self.count += 1
+    def _validate_and_normalize(
+        self, pred: np.ndarray, gt: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Validate and normalize input arrays."""
+        return _normalize_numpy(pred, gt, self.normalize)
 
-    def _cal_wfm(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Calculate weighted F-measure."""
-        device = pred.device
-
-        # Convert to numpy for distance transform
-        gt_np = (gt > 0.5).cpu().to(torch.float32).numpy()
-        pred_np = pred.cpu().to(torch.float32).numpy()
-
-        # Distance transform
-        dst, idxt = bwdist(gt_np == 0, return_indices=True)
-
+    def _cal_wfm(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        """Calculate weighted F-measure (CPU-bound)."""
+        # Distance transform with nearest foreground indices
+        Dst, Idxt = distance_transform_edt(gt == 0, return_indices=True)
         # Pixel dependency
-        e = abs(pred_np - gt_np)
-        et = e.copy()
-        et[gt_np == 0] = et[idxt[0][gt_np == 0], idxt[1][gt_np == 0]]
-
+        E = np.abs(pred - gt)
+        Et = np.copy(E)
+        # Use error at closest GT edge for background pixels
+        Et[gt == 0] = Et[Idxt[0][gt == 0], Idxt[1][gt == 0]]
         # Gaussian smoothing
-        k = self._matlab_style_gauss2d((7, 7), sigma=5).astype(np.float32)
-        ea = convolve(et.astype(np.float32), weights=k, mode="constant", cval=0)
-
-        # Min of E and EA
-        min_e_ea = e.copy()
-        mask = gt_np.astype(bool) & (ea < e)
-        min_e_ea[mask] = ea[mask]
-
-        # Pixel importance (distance-based weighting)
-
-        b = np.where(gt_np == 0, 2 - np.exp(np.log(0.5) / 5 * dst), np.ones_like(gt_np))
-        ew = min_e_ea * b
-
-        # Weighted metrics
-        tpw = gt_np.sum() - ew[gt_np == 1].sum()
-        fpw = ew[gt_np == 0].sum()
-
-        r = 1 - ew[gt_np == 1].mean() if gt_np.sum() > 0 else 0
-        p = tpw / (tpw + fpw + _EPS)
-
-        q = (1 + self.beta) * r * p / (r + self.beta * p + _EPS)
-        return torch.tensor(q, device=device, dtype=pred.dtype)
+        K = self._matlab_style_gauss2D((7, 7), sigma=5)
+        EA = convolve(Et, weights=K, mode="constant", cval=0)
+        # Take minimum of original and smoothed error in foreground
+        MIN_E_EA = np.where(gt & (EA < E), EA, E)
+        # Pixel importance weighting
+        B = np.where(gt == 0, 2 - np.exp(np.log(0.5) / 5 * Dst), np.ones_like(gt, dtype=np.float64))
+        Ew = MIN_E_EA * B
+        # Weighted TP and FP
+        TPw = np.sum(gt) - np.sum(Ew[gt])
+        FPw = np.sum(Ew[~gt])
+        # Weighted Recall and Precision
+        R = 1 - np.mean(Ew[gt])
+        P = TPw / (TPw + FPw + EPS)
+        # Weighted F-measure
+        Q = (1 + self.beta) * R * P / (R + self.beta * P + EPS)
+        return float(Q)
 
     @staticmethod
-    def _matlab_style_gauss2d(shape: tuple[int, int] = (7, 7), sigma: float = 5) -> np.ndarray:
-        """Create MATLAB-style 2D Gaussian kernel."""
+    def _matlab_style_gauss2D(shape: tuple = (7, 7), sigma: float = 5.0) -> np.ndarray:
+        """Generate 2D Gaussian kernel compatible with MATLAB's fspecial."""
         m, n = [(ss - 1) / 2 for ss in shape]
         y, x = np.ogrid[-m : m + 1, -n : n + 1]
         h = np.exp(-(x * x + y * y) / (2 * sigma * sigma))
@@ -444,189 +291,666 @@ class WeightedFMeasure(Metric):
             h /= sumh
         return h
 
-    def compute(self) -> Tensor:
-        return self.sum_wfm / self.count.clamp(min=1)
+    def compute(self) -> dict[str, Tensor]:
+        """Compute final weighted F-measure.
+        Returns:
+            dict: {"wfm": Tensor (scalar)}
+        """
+        n = self.num_samples.to(torch.float64)
+        if n == 0:
+            n = torch.tensor(1.0, dtype=torch.float64)
+        return {"wfm": self.wfm_sum / n}
 
 
-class HCE(Metric):
-    """Human Correction Effort (boundary distance of errors).
-
-    Computes the mean distance from misclassified pixels to the GT boundary,
-    normalized by max(H, W). Lower is better.
+class SMeasure(Metric):
+    """S-measure evaluator for salient object detection (torchmetrics compatible).
+    Evaluates foreground maps by considering both object-aware and region-aware
+    structural similarity between prediction and ground truth.
+    Reference:
+        Fan et al., "Structure-measure: A new way to eval foreground maps", ICCV 2017
     """
 
-    higher_is_better = False
+    is_differentiable = False
+    higher_is_better = True
     full_state_update = False
+    num_samples: Tensor
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(
+        self,
+        alpha: float = 0.5,
+        normalize: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Args:
+            alpha: Weight for balancing object and region scores.
+                   Higher values give more weight to object-level similarity.
+                   Valid range: [0, 1]. Defaults to 0.5.
+            normalize: If True, normalize pred from [0,255] and gt from uint8.
+                      If False, expect pred in [0,1] float and gt as bool.
+        """
         super().__init__(**kwargs)
-        self.add_state("sum_hce", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.alpha = alpha
+        self.normalize = normalize
+        self.add_state(
+            "sm_sum", default=torch.tensor(0.0, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "num_samples", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum"
+        )
 
     def update(self, pred: Tensor, gt: Tensor) -> None:
-        for i in range(pred.shape[0]):
-            pred_ary = (pred[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
-            gt_ary = (gt[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
-            gt_ske = skeletonize(gt_ary > 128)
-            hce = self._cal_hce(pred_ary, gt_ary, gt_ske)
-            self.sum_hce += torch.tensor(hce, device=pred.device, dtype=pred.dtype)
-            self.count += 1
+        """Update state with predictions and ground truth.
+        Args:
+            pred: Prediction tensor, shape (H, W) or (B, H, W).
+            gt: Ground truth tensor, shape (H, W) or (B, H, W).
+        """
+        pred, gt = _ensure_batch(pred, gt)
+        batch_size = pred.shape[0]
+        for i in range(batch_size):
+            p, g = pred[i], gt[i]
+            p, g = self._validate_and_normalize(p, g)
+            sm = self._cal_sm(p, g)
+            self.sm_sum += sm
+            self.num_samples += 1
 
-    def compute(self) -> Tensor:
-        return self.sum_hce / self.count.clamp(min=1)
+    def _validate_and_normalize(self, pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
+        """Validate and normalize input tensors."""
+        return _normalize_torch(pred, gt, self.normalize)
 
-    @staticmethod
-    def _cal_hce(
-        pred: np.ndarray, gt: np.ndarray, gt_ske: np.ndarray, relax: int = 5, epsilon: float = 2.0
-    ) -> float:
-        if len(gt.shape) > 2:
-            gt = gt[:, :, 0]
-        gt = (gt > 128).astype(np.uint8)
+    def _cal_sm(self, pred: Tensor, gt: Tensor) -> Tensor:
+        """Calculate S-measure score."""
+        y = gt.float().mean()
+        if y == 0:
+            # All background
+            sm = 1 - pred.mean()
+        elif y == 1:
+            # All foreground
+            sm = pred.mean()
+        else:
+            object_score = self._object(pred, gt) * self.alpha
+            region_score = self._region(pred, gt) * (1 - self.alpha)
+            sm = torch.clamp(object_score + region_score, min=0.0)
+        return sm.to(torch.float64)
 
-        if len(pred.shape) > 2:
-            pred = pred[:, :, 0]
-        pred = (pred > 128).astype(np.uint8)
+    def _s_object(self, x: Tensor) -> Tensor:
+        """Calculate object-aware score for a region."""
+        if x.numel() == 0:
+            return torch.tensor(0.0, dtype=torch.float64, device=x.device)
+        mean = x.mean()
+        # ddof=1 equivalent: std with unbiased=True (default)
+        std = (
+            x.std(unbiased=True)
+            if x.numel() > 1
+            else torch.tensor(0.0, dtype=x.dtype, device=x.device)
+        )
+        return 2 * mean / (mean.pow(2) + 1 + std + EPS)
 
+    def _object(self, pred: Tensor, gt: Tensor) -> Tensor:
+        """Calculate object-level structural similarity score."""
+        gt_mean = gt.float().mean()
+        fg_score = self._s_object(pred[gt]) * gt_mean
+        bg_score = self._s_object((1 - pred)[~gt]) * (1 - gt_mean)
+        return fg_score + bg_score
+
+    def _region(self, pred: Tensor, gt: Tensor) -> Tensor:
+        """Calculate region-level structural similarity score."""
+        h, w = gt.shape
+        area = h * w
+        # Calculate centroid of foreground
+        if gt.sum() == 0:
+            cy = round(h / 2)
+            cx = round(w / 2)
+        else:
+            # argwhere returns (N, 2) with [row, col] indices
+            fg_coords = torch.argwhere(gt).float()
+            cy = int(fg_coords[:, 0].mean().round().item())
+            cx = int(fg_coords[:, 1].mean().round().item())
+        # +1 for MATLAB compatibility
+        cy, cx = cy + 1, cx + 1
+        # Divide into four quadrants and compute weighted SSIM
+        w_lt = cx * cy / area
+        w_rt = cy * (w - cx) / area
+        w_lb = (h - cy) * cx / area
+        w_rb = 1 - w_lt - w_rt - w_lb
+        score_lt = self._ssim(pred[0:cy, 0:cx], gt[0:cy, 0:cx]) * w_lt
+        score_rt = self._ssim(pred[0:cy, cx:w], gt[0:cy, cx:w]) * w_rt
+        score_lb = self._ssim(pred[cy:h, 0:cx], gt[cy:h, 0:cx]) * w_lb
+        score_rb = self._ssim(pred[cy:h, cx:w], gt[cy:h, cx:w]) * w_rb
+        return score_lt + score_rt + score_lb + score_rb
+
+    def _ssim(self, pred: Tensor, gt: Tensor) -> Tensor:
+        """Calculate SSIM (Structural Similarity Index) score."""
+        if pred.numel() == 0:
+            return torch.tensor(0.0, dtype=torch.float64, device=pred.device)
+        h, w = pred.shape
+        N = h * w
+        x = pred.mean()
+        y = gt.float().mean()
+        sigma_x = (
+            ((pred - x) ** 2).sum() / (N - 1)
+            if N > 1
+            else torch.tensor(0.0, dtype=pred.dtype, device=pred.device)
+        )
+        sigma_y = (
+            ((gt.float() - y) ** 2).sum() / (N - 1)
+            if N > 1
+            else torch.tensor(0.0, dtype=pred.dtype, device=pred.device)
+        )
+        sigma_xy = (
+            ((pred - x) * (gt.float() - y)).sum() / (N - 1)
+            if N > 1
+            else torch.tensor(0.0, dtype=pred.dtype, device=pred.device)
+        )
+        alpha = 4 * x * y * sigma_xy
+        beta = (x**2 + y**2) * (sigma_x + sigma_y)
+        if alpha != 0:
+            return alpha / (beta + EPS)
+        if beta == 0:
+            return torch.tensor(1.0, dtype=torch.float64, device=pred.device)
+        return torch.tensor(0.0, dtype=torch.float64, device=pred.device)
+
+    def compute(self) -> dict[str, Tensor]:
+        """Compute final S-measure.
+        Returns:
+            dict: {"sm": Tensor (scalar)}
+        """
+        n = self.num_samples.to(torch.float64)
+        if n == 0:
+            n = torch.tensor(1.0, dtype=torch.float64)
+        return {"sm": self.sm_sum / n}
+
+
+class EMeasure(Metric):
+    """E-measure evaluator for salient object detection (torchmetrics compatible).
+    Assesses binary foreground map quality by measuring the alignment between
+    prediction and ground truth using an enhanced alignment matrix.
+    Reference:
+        Fan et al., "Enhanced-alignment Measure for Binary Foreground Map Evaluation", IJCAI 2018
+    """
+
+    is_differentiable = False
+    higher_is_better = True
+    full_state_update = False
+    num_samples: Tensor
+
+    def __init__(
+        self,
+        normalize: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Args:
+            normalize: If True, normalize pred from [0,255] and gt from uint8.
+                      If False, expect pred in [0,1] float and gt as bool.
+        """
+        super().__init__(**kwargs)
+        self.normalize = normalize
+        self.add_state(
+            "adaptive_em_sum", default=torch.tensor(0.0, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "changeable_em_sum", default=torch.zeros(256, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "num_samples", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum"
+        )
+
+    def update(self, pred: Tensor, gt: Tensor) -> None:
+        """Update state with predictions and ground truth.
+        Args:
+            pred: Prediction tensor, shape (H, W) or (B, H, W).
+            gt: Ground truth tensor, shape (H, W) or (B, H, W).
+        """
+        pred, gt = _ensure_batch(pred, gt)
+        batch_size = pred.shape[0]
+        for i in range(batch_size):
+            p, g = pred[i], gt[i]
+            p, g = self._validate_and_normalize(p, g)
+            # Cache for current sample
+            gt_fg_numel = g.sum().item()
+            gt_size = g.shape[0] * g.shape[1]
+            adaptive_em = self._cal_adaptive_em(p, g, gt_fg_numel, gt_size)
+            self.adaptive_em_sum += adaptive_em
+            changeable_ems = self._cal_changeable_em(p, g, gt_fg_numel, gt_size)
+            self.changeable_em_sum += changeable_ems
+            self.num_samples += 1
+
+    def _validate_and_normalize(self, pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
+        """Validate and normalize input tensors."""
+        return _normalize_torch(pred, gt, self.normalize)
+
+    def _cal_adaptive_em(self, pred: Tensor, gt: Tensor, gt_fg_numel: int, gt_size: int) -> Tensor:
+        """Calculate adaptive E-measure using adaptive threshold."""
+        adaptive_threshold = min(2 * pred.mean().item(), 1.0)
+        return self._cal_em_with_threshold(pred, gt, adaptive_threshold, gt_fg_numel, gt_size)
+
+    def _cal_changeable_em(
+        self, pred: Tensor, gt: Tensor, gt_fg_numel: int, gt_size: int
+    ) -> Tensor:
+        """Calculate E-measure scores across 256 thresholds."""
+        return self._cal_em_with_cumsumhistogram(pred, gt, gt_fg_numel, gt_size)
+
+    def _cal_em_with_threshold(
+        self, pred: Tensor, gt: Tensor, threshold: float, gt_fg_numel: int, gt_size: int
+    ) -> Tensor:
+        """Calculate E-measure for a specific threshold."""
+        device = pred.device
+        binarized_pred = pred >= threshold
+        fg_fg_numel = (binarized_pred & gt).sum().item()
+        fg_bg_numel = (binarized_pred & ~gt).sum().item()
+        fg___numel = fg_fg_numel + fg_bg_numel
+        bg___numel = gt_size - fg___numel
+        if gt_fg_numel == 0:
+            enhanced_matrix_sum = bg___numel
+        elif gt_fg_numel == gt_size:
+            enhanced_matrix_sum = fg___numel
+        else:
+            parts_numel, combinations = self._generate_parts_numel_combinations(
+                fg_fg_numel=fg_fg_numel,
+                fg_bg_numel=fg_bg_numel,
+                pred_fg_numel=fg___numel,
+                pred_bg_numel=bg___numel,
+                gt_fg_numel=gt_fg_numel,
+                gt_size=gt_size,
+            )
+            enhanced_matrix_sum = 0.0
+            for part_numel, (comb_pred, comb_gt) in zip(parts_numel, combinations, strict=False):
+                align_matrix_value = 2 * comb_pred * comb_gt / (comb_pred**2 + comb_gt**2 + EPS)
+                enhanced_matrix_value = (align_matrix_value + 1) ** 2 / 4
+                enhanced_matrix_sum += enhanced_matrix_value * part_numel
+        return torch.tensor(
+            enhanced_matrix_sum / (gt_size - 1 + EPS), dtype=torch.float64, device=device
+        )
+
+    def _cal_em_with_cumsumhistogram(
+        self, pred: Tensor, gt: Tensor, gt_fg_numel: int, gt_size: int
+    ) -> Tensor:
+        """Calculate E-measure for 256 thresholds using cumulative histogram."""
+        device = pred.device
+        pred_uint8 = (pred * 255).to(torch.uint8)
+        fg_fg_hist = torch.histc(pred_uint8[gt].float(), bins=256, min=0, max=255)
+        fg_bg_hist = torch.histc(pred_uint8[~gt].float(), bins=256, min=0, max=255)
+        fg_fg_numel_w_thrs = torch.flip(fg_fg_hist, dims=[0]).cumsum(dim=0)
+        fg_bg_numel_w_thrs = torch.flip(fg_bg_hist, dims=[0]).cumsum(dim=0)
+        fg___numel_w_thrs = fg_fg_numel_w_thrs + fg_bg_numel_w_thrs
+        bg___numel_w_thrs = gt_size - fg___numel_w_thrs
+        if gt_fg_numel == 0:
+            enhanced_matrix_sum = bg___numel_w_thrs
+        elif gt_fg_numel == gt_size:
+            enhanced_matrix_sum = fg___numel_w_thrs
+        else:
+            parts_numel_w_thrs, combinations = self._generate_parts_numel_combinations(
+                fg_fg_numel=fg_fg_numel_w_thrs,
+                fg_bg_numel=fg_bg_numel_w_thrs,
+                pred_fg_numel=fg___numel_w_thrs,
+                pred_bg_numel=bg___numel_w_thrs,
+                gt_fg_numel=gt_fg_numel,
+                gt_size=gt_size,
+            )
+            results_parts = torch.zeros(4, 256, dtype=torch.float64, device=device)
+            for i, (part_numel, (comb_pred, comb_gt)) in enumerate(
+                zip(parts_numel_w_thrs, combinations, strict=False)
+            ):
+                align_matrix_value = 2 * comb_pred * comb_gt / (comb_pred**2 + comb_gt**2 + EPS)
+                enhanced_matrix_value = (align_matrix_value + 1) ** 2 / 4
+                results_parts[i] = enhanced_matrix_value * part_numel
+            enhanced_matrix_sum = results_parts.sum(dim=0)
+        return (enhanced_matrix_sum / (gt_size - 1 + EPS)).to(torch.float64)
+
+    def _generate_parts_numel_combinations(
+        self,
+        fg_fg_numel,
+        fg_bg_numel,
+        pred_fg_numel,
+        pred_bg_numel,
+        gt_fg_numel: int,
+        gt_size: int,
+    ):
+        """Generate element counts and demeaned value combinations for four regions."""
+        bg_fg_numel = gt_fg_numel - fg_fg_numel
+        bg_bg_numel = pred_bg_numel - bg_fg_numel
+        parts_numel = [fg_fg_numel, fg_bg_numel, bg_fg_numel, bg_bg_numel]
+        mean_pred_value = pred_fg_numel / gt_size
+        mean_gt_value = gt_fg_numel / gt_size
+        demeaned_pred_fg_value = 1 - mean_pred_value
+        demeaned_pred_bg_value = 0 - mean_pred_value
+        demeaned_gt_fg_value = 1 - mean_gt_value
+        demeaned_gt_bg_value = 0 - mean_gt_value
+        combinations = [
+            (demeaned_pred_fg_value, demeaned_gt_fg_value),
+            (demeaned_pred_fg_value, demeaned_gt_bg_value),
+            (demeaned_pred_bg_value, demeaned_gt_fg_value),
+            (demeaned_pred_bg_value, demeaned_gt_bg_value),
+        ]
+        return parts_numel, combinations
+
+    def compute(self) -> dict[str, dict[str, Tensor]]:
+        """Compute final E-measure metrics.
+        Returns:
+            dict: {"em": {"adp": Tensor (scalar), "curve": Tensor[256]}}
+        """
+        n = self.num_samples.to(torch.float64)
+        if n == 0:
+            n = torch.tensor(1.0, dtype=torch.float64)
+        return {
+            "em": {
+                "adp": self.adaptive_em_sum / n,
+                "curve": self.changeable_em_sum / n,
+            }
+        }
+
+
+class HCEMeasure(Metric):
+    """Human Correction Effort Measure for Dichotomous Image Segmentation (torchmetrics compatible).
+    Note: This metric requires CPU processing due to skimage/OpenCV dependencies.
+    Reference:
+        Qin et al., "Highly Accurate Dichotomous Image Segmentation", ECCV 2022
+    """
+
+    is_differentiable = False
+    higher_is_better = False  # Lower HCE is better
+    full_state_update = False
+    num_samples: Tensor
+
+    def __init__(
+        self,
+        relax: int = 5,
+        epsilon: float = 2.0,
+        normalize: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Args:
+            relax: Number of morphological relaxation iterations. Defaults to 5.
+            epsilon: RDP approximation tolerance for polygon simplification. Defaults to 2.0.
+            normalize: If True, normalize pred from [0,255] and gt from uint8.
+                      If False, expect pred in [0,1] float and gt as bool.
+        """
+        super().__init__(**kwargs)
+        self.relax = relax
+        self.epsilon = epsilon
+        self.normalize = normalize
+        self.morphology_kernel = morphology.disk(1)
+        self.add_state(
+            "hce_sum", default=torch.tensor(0.0, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "num_samples", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum"
+        )
+
+    def update(self, pred: Tensor, gt: Tensor) -> None:
+        """Update state with predictions and ground truth.
+        Args:
+            pred: Prediction tensor, shape (H, W) or (B, H, W).
+            gt: Ground truth tensor, shape (H, W) or (B, H, W).
+        """
+        pred, gt = _ensure_batch(pred, gt)
+        batch_size = pred.shape[0]
+        for i in range(batch_size):
+            p, g = pred[i], gt[i]
+            p_np, g_np = self._validate_and_normalize(p, g)
+            hce = self._cal_hce(p_np, g_np)
+            self.hce_sum += hce
+            self.num_samples += 1
+
+    def _validate_and_normalize(self, pred: Tensor, gt: Tensor) -> tuple[np.ndarray, np.ndarray]:
+        """Validate, normalize, and convert to NumPy."""
+        pred_np = pred.detach().cpu().numpy()
+        gt_np = gt.detach().cpu().numpy()
+        return _normalize_numpy(pred_np, gt_np, self.normalize)
+
+    def _cal_hce(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        """Calculate Human Correction Effort."""
+        gt_skeleton = morphology.skeletonize(gt).astype(bool)
+        pred = pred > 0.5
         union = np.logical_or(gt, pred)
-        tp = np.logical_and(gt, pred)
-        fp = pred - tp
-        fn = gt - tp
-
-        union_erode = cv2.erode(union.astype(np.uint8), disk(1), iterations=relax)
-
-        fp_relaxed = np.logical_and(fp, union_erode)
-        for _ in range(relax):
-            fp_relaxed = cv2.dilate(fp_relaxed.astype(np.uint8), disk(1))
-            fp_relaxed = np.logical_and(fp_relaxed, 1 - np.logical_or(tp, fn))
-        fp_relaxed = np.logical_and(fp, fp_relaxed)
-
-        fn_relaxed = np.logical_and(fn, union_erode)
-        for _ in range(relax):
-            fn_relaxed = cv2.dilate(fn_relaxed.astype(np.uint8), disk(1))
-            fn_relaxed = np.logical_and(fn_relaxed, 1 - np.logical_or(tp, fp))
-        fn_relaxed = np.logical_and(fn, fn_relaxed)
-        fn_relaxed = np.logical_or(fn_relaxed, np.logical_xor(gt_ske, np.logical_and(tp, gt_ske)))
-
-        ctrs_fp = cv2.findContours(
-            fp_relaxed.astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
+        TP = np.logical_and(gt, pred)
+        FP = np.logical_xor(pred, TP)
+        FN = np.logical_xor(gt, TP)
+        # Relax the union
+        eroded_union = cv2.erode(
+            union.astype(np.uint8), self.morphology_kernel, iterations=self.relax
         )
-        ctrs_fp = ctrs_fp[0] if len(ctrs_fp) == 2 else ctrs_fp[1]
-        bdies_fp, indep_cnt_fp = HCE._filter_bdy_cond(
-            ctrs_fp, fp_relaxed, np.logical_or(tp, fn_relaxed)
+        # Relaxed FP regions
+        FP_ = np.logical_and(FP, eroded_union)
+        for _ in range(self.relax):
+            FP_ = cv2.dilate(FP_.astype(np.uint8), self.morphology_kernel)
+            FP_ = np.logical_and(FP_.astype(bool), ~gt)
+        FP_ = np.logical_and(FP, FP_)
+        # Relaxed FN regions
+        FN_ = np.logical_and(FN, eroded_union)
+        for _ in range(self.relax):
+            FN_ = cv2.dilate(FN_.astype(np.uint8), self.morphology_kernel)
+            FN_ = np.logical_and(FN_, ~pred)
+        FN_ = np.logical_and(FN, FN_)
+        FN_ = np.logical_or(FN_, np.logical_xor(gt_skeleton, np.logical_and(TP, gt_skeleton)))
+        # Find contours and control points
+        contours_FP, _ = cv2.findContours(
+            FP_.astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
         )
-
-        ctrs_fn = cv2.findContours(
-            fn_relaxed.astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
+        condition_FP = np.logical_or(TP, FN_)
+        bdies_FP, indep_cnt_FP = self._filter_conditional_boundary(contours_FP, FP_, condition_FP)
+        contours_FN, _ = cv2.findContours(
+            FN_.astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
         )
-        ctrs_fn = ctrs_fn[0] if len(ctrs_fn) == 2 else ctrs_fn[1]
-        bdies_fn, indep_cnt_fn = HCE._filter_bdy_cond(
-            ctrs_fn,
-            fn_relaxed,
-            1 - np.logical_or(np.logical_or(tp, fp_relaxed), fn_relaxed),
-        )
+        condition_FN = 1 - np.logical_or(np.logical_or(TP, FP_), FN_)
+        bdies_FN, indep_cnt_FN = self._filter_conditional_boundary(contours_FN, FN_, condition_FN)
+        poly_FP_point_cnt = self._count_polygon_control_points(bdies_FP, epsilon=self.epsilon)
+        poly_FN_point_cnt = self._count_polygon_control_points(bdies_FN, epsilon=self.epsilon)
+        return poly_FP_point_cnt + indep_cnt_FP + poly_FN_point_cnt + indep_cnt_FN
 
-        _, _, poly_fp_point_cnt = HCE._approximate_rdp(bdies_fp, epsilon=epsilon)
-        _, _, poly_fn_point_cnt = HCE._approximate_rdp(bdies_fn, epsilon=epsilon)
-
-        return float(poly_fp_point_cnt + indep_cnt_fp + poly_fn_point_cnt + indep_cnt_fn)
-
-    @staticmethod
-    def _filter_bdy_cond(
-        bdy: list[np.ndarray], mask: np.ndarray, cond: np.ndarray
-    ) -> tuple[list[np.ndarray], float]:
-        cond = cv2.dilate(cond.astype(np.uint8), disk(1))
-        labels = label(mask)
-        lbls = np.unique(labels)
-        indep = np.ones(lbls.shape[0])
-        indep[0] = 0
-
-        boundaries: list[np.ndarray] = []
-        h, w = cond.shape[:2]
-        ind_map = np.zeros((h, w))
-
-        for item in bdy:
-            tmp_bdies = []
-            tmp_bdy = []
-            for j in range(item.shape[0]):
-                r, c = item[j, 0, 1], item[j, 0, 0]
-
-                if (np.sum(cond[r, c]) == 0) or (ind_map[r, c] != 0):
-                    if len(tmp_bdy) > 0:
-                        tmp_bdies.append(tmp_bdy)
-                        tmp_bdy = []
+    def _filter_conditional_boundary(
+        self, contours: list, mask: np.ndarray, condition: np.ndarray
+    ) -> tuple[list, int]:
+        """Filter boundary segments based on condition mask."""
+        condition = cv2.dilate(condition.astype(np.uint8), self.morphology_kernel)
+        labels = measure.label(mask)
+        independent_flags = np.ones(labels.max() + 1, dtype=int)
+        independent_flags[0] = 0
+        boundaries = []
+        visited_map = np.zeros(condition.shape[:2], dtype=int)
+        for item in contours:
+            temp_boundaries = []
+            temp_boundary = []
+            for pt in item:
+                row, col = pt[0, 1], pt[0, 0]
+                if condition[row, col].sum() == 0 or visited_map[row, col] != 0:
+                    if temp_boundary:
+                        temp_boundaries.append(temp_boundary)
+                        temp_boundary = []
                     continue
-                tmp_bdy.append([c, r])
-                ind_map[r, c] = ind_map[r, c] + 1
-                indep[labels[r, c]] = 0
-            if len(tmp_bdy) > 0:
-                tmp_bdies.append(tmp_bdy)
-
-            if len(tmp_bdies) > 1:
-                first_x, first_y = tmp_bdies[0][0]
-                last_x, last_y = tmp_bdies[-1][-1]
+                temp_boundary.append([col, row])
+                visited_map[row, col] += 1
+                independent_flags[labels[row, col]] = 0
+            if temp_boundary:
+                temp_boundaries.append(temp_boundary)
+            # Check if first and last boundaries are connected
+            if len(temp_boundaries) > 1:
+                first_x, first_y = temp_boundaries[0][0]
+                last_x, last_y = temp_boundaries[-1][-1]
                 if (
                     (abs(first_x - last_x) == 1 and first_y == last_y)
                     or (first_x == last_x and abs(first_y - last_y) == 1)
                     or (abs(first_x - last_x) == 1 and abs(first_y - last_y) == 1)
                 ):
-                    tmp_bdies[-1].extend(tmp_bdies[0][::-1])
-                    del tmp_bdies[0]
+                    temp_boundaries[-1].extend(temp_boundaries[0][::-1])
+                    del temp_boundaries[0]
+            for k in range(len(temp_boundaries)):
+                temp_boundaries[k] = np.array(temp_boundaries[k])[:, np.newaxis, :]
+            if temp_boundaries:
+                boundaries.extend(temp_boundaries)
+        return boundaries, independent_flags.sum()
 
-            for k in range(len(tmp_bdies)):
-                tmp_bdies[k] = np.array(tmp_bdies[k])[:, np.newaxis, :]
-            if tmp_bdies:
-                boundaries.extend(tmp_bdies)
+    def _count_polygon_control_points(self, boundaries: list, epsilon: float = 1.0) -> int:
+        """Count control points using RDP algorithm."""
+        num_points = 0
+        for boundary in boundaries:
+            approx_poly = cv2.approxPolyDP(boundary, epsilon, False)
+            num_points += len(approx_poly)
+        return num_points
 
-        return boundaries, float(np.sum(indep))
-
-    @staticmethod
-    def _approximate_rdp(
-        boundaries: list[np.ndarray], epsilon: float = 1.0
-    ) -> tuple[list[np.ndarray], list[int], int]:
-        boundaries_len_ = []
-        pixel_cnt = 0
-
-        boundaries_ = [cv2.approxPolyDP(item, epsilon, False) for item in boundaries]
-        for item_ in boundaries_:
-            boundaries_len_.append(len(item_))
-            pixel_cnt = pixel_cnt + len(item_)
-
-        return boundaries_, boundaries_len_, pixel_cnt
+    def compute(self) -> dict[str, Tensor]:
+        """Compute final HCE.
+        Returns:
+            dict: {"hce": Tensor (scalar)}
+        """
+        n = self.num_samples.to(torch.float64)
+        if n == 0:
+            n = torch.tensor(1.0, dtype=torch.float64)
+        return {"hce": self.hce_sum / n}
 
 
-class BoundaryIoU(Metric):
-    """Boundary IoU with dilation-based tolerance."""
+class MBAMeasure(Metric):
+    """Mean Boundary Accuracy Measure (torchmetrics compatible).
+    Note: This metric requires CPU processing due to OpenCV dependencies.
+    """
 
+    is_differentiable = False
     higher_is_better = True
     full_state_update = False
+    num_samples: Tensor
 
-    def __init__(self, dilation_ratio: float = 0.02, mode: str = "mean", **kwargs) -> None:
+    def __init__(
+        self,
+        normalize: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Args:
+            normalize: If True, normalize pred from [0,255] and gt from uint8.
+                      If False, expect pred in [0,1] float and gt as bool.
+        """
         super().__init__(**kwargs)
-        if mode not in {"mean", "max"}:
-            raise ValueError("BoundaryIoU mode must be 'mean' or 'max'.")
-        self.dilation_ratio = dilation_ratio
-        self.mode = mode
-        self.add_state("sum_biou", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.normalize = normalize
+        self.add_state(
+            "ba_sum", default=torch.tensor(0.0, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "num_samples", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum"
+        )
 
     def update(self, pred: Tensor, gt: Tensor) -> None:
-        for i in range(pred.shape[0]):
-            pred_ary = (pred[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
-            gt_ary = (gt[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
-            pred_norm, gt_mask = _prepare_data_np(pred_ary, gt_ary)
-            ious = self._cal_biou(pred_norm, gt_mask)
-            biou = float(ious.max()) if self.mode == "max" else float(ious.mean())
-            self.sum_biou += torch.tensor(biou, device=pred.device, dtype=pred.dtype)
-            self.count += 1
+        """Update state with predictions and ground truth."""
+        pred, gt = _ensure_batch(pred, gt)
+        batch_size = pred.shape[0]
+        for i in range(batch_size):
+            p, g = pred[i], gt[i]
+            p_np, g_np = self._to_numpy(p, g)
+            ba = self._cal_ba(p_np, g_np)
+            self.ba_sum += ba
+            self.num_samples += 1
 
-    def compute(self) -> Tensor:
-        return self.sum_biou / self.count.clamp(min=1)
+    def _to_numpy(self, pred: Tensor, gt: Tensor) -> tuple[np.ndarray, np.ndarray]:
+        """Convert to NumPy and apply threshold."""
+        pred_np = pred.detach().cpu().numpy()
+        gt_np = gt.detach().cpu().numpy()
+        if self.normalize:
+            # [0, 255] → bool (threshold at 128)
+            pred_np = pred_np > 128
+            gt_np = gt_np > 128
+        else:
+            # [0, 1] → bool (threshold at 0.5)
+            pred_np = pred_np > 0.5
+            if gt_np.dtype != bool:
+                gt_np = gt_np.astype(bool)
+        return pred_np, gt_np
+
+    def _get_disk_kernel(self, radius: int) -> np.ndarray:
+        """Get elliptical structuring element."""
+        return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+
+    def _cal_ba(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        """Calculate boundary accuracy."""
+        gt = gt.astype(np.uint8)
+        pred = pred.astype(np.uint8)
+        h, w = gt.shape
+        min_radius = 1
+        max_radius = (w + h) / 300
+        num_steps = 5
+        pred_acc = []
+        for i in range(num_steps):
+            curr_radius = min_radius + int((max_radius - min_radius) / num_steps * i)
+            kernel = self._get_disk_kernel(curr_radius)
+            boundary_region = cv2.morphologyEx(gt, cv2.MORPH_GRADIENT, kernel) > 0
+            num_edge_pixels = boundary_region.sum()
+            if num_edge_pixels == 0:
+                pred_acc.append(1.0)
+                continue
+            gt_in_bound = gt[boundary_region]
+            pred_in_bound = pred[boundary_region]
+            num_pred_gd_pix = (
+                gt_in_bound * pred_in_bound + (1 - gt_in_bound) * (1 - pred_in_bound)
+            ).sum()
+            pred_acc.append(num_pred_gd_pix / num_edge_pixels)
+        return sum(pred_acc) / num_steps
+
+    def compute(self) -> dict[str, Tensor]:
+        """Compute final MBA.
+        Returns:
+            dict: {"mba": Tensor (scalar)}
+        """
+        n = self.num_samples.to(torch.float64)
+        if n == 0:
+            n = torch.tensor(1.0, dtype=torch.float64)
+        return {"mba": self.ba_sum / n}
+
+
+class BIoUMeasure(Metric):
+    """Boundary IoU Measure (torchmetrics compatible).
+    Note: This metric requires CPU processing due to OpenCV dependencies.
+    """
+
+    is_differentiable = False
+    higher_is_better = True
+    full_state_update = False
+    num_samples: Tensor
+
+    def __init__(
+        self,
+        dilation_ratio: float = 0.02,
+        normalize: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Args:
+            dilation_ratio: Ratio of image diagonal for boundary dilation. Defaults to 0.02.
+            normalize: If True, normalize pred from [0,255] and gt from uint8.
+                      If False, expect pred in [0,1] float and gt as bool.
+        """
+        super().__init__(**kwargs)
+        self.dilation_ratio = dilation_ratio
+        self.normalize = normalize
+        self.add_state(
+            "biou_sum", default=torch.zeros(256, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "num_samples", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum"
+        )
+
+    def update(self, pred: Tensor, gt: Tensor) -> None:
+        """Update state with predictions and ground truth."""
+        pred, gt = _ensure_batch(pred, gt)
+        batch_size = pred.shape[0]
+        for i in range(batch_size):
+            p, g = pred[i], gt[i]
+            p_np, g_np = self._validate_and_normalize(p, g)
+            biou = self._cal_biou(p_np, g_np)
+            self.biou_sum += torch.from_numpy(biou)
+            self.num_samples += 1
+
+    def _validate_and_normalize(self, pred: Tensor, gt: Tensor) -> tuple[np.ndarray, np.ndarray]:
+        """Validate, normalize, and convert to NumPy."""
+        pred_np = pred.detach().cpu().numpy()
+        gt_np = gt.detach().cpu().numpy()
+        return _normalize_numpy(pred_np, gt_np, self.normalize)
 
     def _mask_to_boundary(self, mask: np.ndarray) -> np.ndarray:
+        """Convert mask to boundary region."""
         h, w = mask.shape
         img_diag = np.sqrt(h**2 + w**2)
-        dilation = round(self.dilation_ratio * img_diag)
-        dilation = max(dilation, 1)
+        dilation = max(round(self.dilation_ratio * img_diag), 1)
+        # Pad to handle border-truncated boundaries
         new_mask = cv2.copyMakeBorder(mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
         kernel = np.ones((3, 3), dtype=np.uint8)
         new_mask_erode = cv2.erode(new_mask, kernel, iterations=dilation)
@@ -634,147 +958,30 @@ class BoundaryIoU(Metric):
         return mask - mask_erode
 
     def _cal_biou(self, pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
-        pred = (pred * 255).astype(np.uint8)
-        pred = self._mask_to_boundary(pred)
-        gt = (gt * 255).astype(np.uint8)
-        gt = self._mask_to_boundary(gt)
-        gt = gt > 128
-
+        """Calculate Boundary IoU curve."""
+        # Convert to boundary
+        pred_boundary = (pred * 255).astype(np.uint8)
+        pred_boundary = self._mask_to_boundary(pred_boundary)
+        gt_boundary = (gt.astype(np.float64) * 255).astype(np.uint8)
+        gt_boundary = self._mask_to_boundary(gt_boundary)
+        gt_boundary = gt_boundary > 128
+        # Histogram-based threshold sweep
         bins = np.linspace(0, 256, 257)
-        fg_hist, _ = np.histogram(pred[gt], bins=bins)
-        bg_hist, _ = np.histogram(pred[~gt], bins=bins)
+        fg_hist, _ = np.histogram(pred_boundary[gt_boundary], bins=bins)
+        bg_hist, _ = np.histogram(pred_boundary[~gt_boundary], bins=bins)
         fg_w_thrs = np.cumsum(np.flip(fg_hist), axis=0)
         bg_w_thrs = np.cumsum(np.flip(bg_hist), axis=0)
-        tps = fg_w_thrs
-        ps = fg_w_thrs + bg_w_thrs
-        ps[ps == 0] = 1
-        t = max(np.count_nonzero(gt), 1)
+        TPs = fg_w_thrs
+        T = max(np.count_nonzero(gt_boundary), 1)
+        # IoU = TP / (T + FP) where FP = bg_w_thrs
+        return (TPs / (T + bg_w_thrs)).astype(np.float64)
 
-        return tps / (t + bg_w_thrs)
-
-
-class BoundaryFMeasure(Metric):
-    """Boundary F-measure with distance tolerance."""
-
-    higher_is_better = True
-    full_state_update = False
-
-    def __init__(self, tolerance: int = 1, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.tolerance = tolerance
-        self.add_state("sum_bf", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, pred: Tensor, gt: Tensor) -> None:
-        for i in range(pred.shape[0]):
-            p = pred[i].squeeze()
-            g = gt[i].squeeze()
-            p, g = _prepare_data(p, g)
-            adaptive_threshold = _get_adaptive_threshold(p)
-            p_bin = (p >= adaptive_threshold).cpu().numpy().astype(bool)
-            g_bin = (g > 0.5).cpu().numpy().astype(bool)
-
-            p_b = _binary_boundary(p_bin)
-            g_b = _binary_boundary(g_bin)
-
-            precision, recall = _boundary_match_stats(p_b, g_b, self.tolerance)
-            denom = precision + recall
-            bf = 0.0 if denom == 0 else 2 * precision * recall / denom
-            self.sum_bf += torch.tensor(bf, device=pred.device, dtype=pred.dtype)
-            self.count += 1
-
-    def compute(self) -> Tensor:
-        return self.sum_bf / self.count.clamp(min=1)
-
-
-class MeanBoundaryAccuracy(Metric):
-    """Mean Boundary Accuracy (average of boundary precision and recall)."""
-
-    higher_is_better = True
-    full_state_update = False
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.add_state("sum_mba", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, pred: Tensor, gt: Tensor) -> None:
-        for i in range(pred.shape[0]):
-            pred_ary = (pred[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
-            gt_ary = (gt[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
-            mba = self._cal_mba(pred_ary, gt_ary)
-            self.sum_mba += torch.tensor(mba, device=pred.device, dtype=pred.dtype)
-            self.count += 1
-
-    def compute(self) -> Tensor:
-        return self.sum_mba / self.count.clamp(min=1)
-
-    @staticmethod
-    def _get_disk_kernel(radius: int) -> np.ndarray:
-        return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
-
-    @classmethod
-    def _cal_ba(cls, pred: np.ndarray, gt: np.ndarray) -> float:
-        gt = gt.astype(np.uint8)
-        pred = pred.astype(np.uint8)
-
-        h, w = gt.shape
-        min_radius = 1
-        max_radius = (w + h) / 300
-        num_steps = 5
-
-        pred_acc: list[float] = []
-        for i in range(num_steps):
-            curr_radius = min_radius + int((max_radius - min_radius) / num_steps * i)
-            kernel = cls._get_disk_kernel(curr_radius)
-            boundary_region = cv2.morphologyEx(gt, cv2.MORPH_GRADIENT, kernel) > 0
-
-            gt_in_bound = gt[boundary_region]
-            pred_in_bound = pred[boundary_region]
-
-            num_edge_pixels = boundary_region.sum()
-            num_pred_gd_pix = (
-                (gt_in_bound) * (pred_in_bound) + (1 - gt_in_bound) * (1 - pred_in_bound)
-            ).sum()
-            pred_acc.append(num_pred_gd_pix / num_edge_pixels)
-
-        return float(sum(pred_acc) / num_steps)
-
-    @classmethod
-    def _cal_mba(cls, pred: np.ndarray, gt: np.ndarray) -> float:
-        pred_bin = pred > 128
-        gt_bin = gt > 128
-        return cls._cal_ba(pred_bin, gt_bin)
-
-
-class SkeletonFMeasure(Metric):
-    """Skeleton F-measure using distance-transform ridge skeletons."""
-
-    higher_is_better = True
-    full_state_update = False
-
-    def __init__(self, tolerance: int = 1, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.tolerance = tolerance
-        self.add_state("sum_skel_f", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, pred: Tensor, gt: Tensor) -> None:
-        for i in range(pred.shape[0]):
-            p = pred[i].squeeze()
-            g = gt[i].squeeze()
-            p, g = _prepare_data(p, g)
-            adaptive_threshold = _get_adaptive_threshold(p)
-            p_bin = (p >= adaptive_threshold).cpu().numpy().astype(bool)
-            g_bin = (g > 0.5).cpu().numpy().astype(bool)
-
-            p_skel = _skeleton_from_distance(p_bin)
-            g_skel = _skeleton_from_distance(g_bin)
-            precision, recall = _boundary_match_stats(p_skel, g_skel, self.tolerance)
-            denom = precision + recall
-            skel_f = 0.0 if denom == 0 else 2 * precision * recall / denom
-            self.sum_skel_f += torch.tensor(skel_f, device=pred.device, dtype=pred.dtype)
-            self.count += 1
-
-    def compute(self) -> Tensor:
-        return self.sum_skel_f / self.count.clamp(min=1)
+    def compute(self) -> dict[str, dict[str, Tensor]]:
+        """Compute final Boundary IoU.
+        Returns:
+            dict: {"biou": {"curve": Tensor[256]}}
+        """
+        n = self.num_samples.to(torch.float64)
+        if n == 0:
+            n = torch.tensor(1.0, dtype=torch.float64)
+        return {"biou": {"curve": self.biou_sum / n}}

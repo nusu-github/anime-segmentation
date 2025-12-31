@@ -73,20 +73,21 @@ docstring-code-format = true
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "T20",
-    "D",
     "ANN",
-    "CPY",
-    "COM812",
-    "ERA001",
-    "S101",
-    "N812",
-    "N802",
-    "PLR2004",
-    "EM",
-    "S311",
-    "PLR0913",
     "C901",
+    "COM812",
+    "CPY",
+    "D",
+    "EM",
+    "ERA001",
+    "N802",
+    "N812",
+    "PLR0913",
+    "PLR2004",
+    "S101",
+    "S311",
+    "T20",
+    "TRY003",
 ]
 
 [tool.pytest.ini_options]
