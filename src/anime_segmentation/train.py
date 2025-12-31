@@ -190,6 +190,12 @@ class AnimeSegmentation(
 
         self.net = get_net(net_name, img_size)
 
+        # Apply loss weights to IBISNet config
+        if isinstance(self.net, IBISNet):
+            self.net.config.lambda_bce = loss_bce
+            self.net.config.lambda_iou = loss_iou
+            self.net.config.lambda_ssim = loss_ssim
+
         # Apply torch.compile to the network if enabled
         if compile:
             self.net = torch.compile(self.net, mode=compile_mode)
@@ -288,7 +294,16 @@ class AnimeSegmentation(
             case _:
                 raise NotImplementedError
 
-        loss0, loss = self._net_unwrapped.compute_loss(loss_args)
+        loss_result = self._net_unwrapped.compute_loss(loss_args)
+
+        # Handle IBISNet's extended return value (includes loss_dict)
+        if len(loss_result) == 3:
+            loss0, loss, loss_dict = loss_result
+            for name, val in loss_dict.items():
+                self.log(f"train/loss_{name}", val)
+        else:
+            loss0, loss = loss_result
+
         self.log("train/loss", loss, prog_bar=True)
         self.log("train/loss_tar", loss0)
         return loss

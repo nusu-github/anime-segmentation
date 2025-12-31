@@ -515,7 +515,7 @@ class IBISNet(nn.Module):
             "local_logits": local_logits,
         }
 
-    def compute_loss(self, args) -> tuple[Tensor, Tensor]:
+    def compute_loss(self, args) -> tuple[Tensor, Tensor, dict[str, float]]:
         if len(args) == 2:
             outputs, labels = args
             fs = None
@@ -525,12 +525,17 @@ class IBISNet(nn.Module):
         ds = outputs["ds"]
         dfs_raw = outputs["dfs_raw"]
 
+        # Initialize loss dict for logging
+        loss_dict: dict[str, float] = {}
+
         bce_loss0, bce_loss_total = self._bce_multi_scale(ds, labels)
         total_loss = self.config.lambda_bce * bce_loss_total
+        loss_dict["bce"] = bce_loss_total.detach().item()
 
         if fs is not None:
             fs_loss = self._feature_sync_loss(dfs_raw, fs)
             total_loss = total_loss + self.config.lambda_fs * fs_loss
+            loss_dict["fs"] = fs_loss.detach().item()
 
         if any(
             pred is not None and label is not None
@@ -538,7 +543,9 @@ class IBISNet(nn.Module):
         ):
             grad_loss = self.grad_loss_fn(outputs["grad_preds"], outputs["grad_labels"])
             total_loss = total_loss + self.config.lambda_grad * grad_loss
+            loss_dict["grad"] = grad_loss.detach().item()
 
+        iou_loss_avg: Tensor | None = None
         if self.config.lambda_iou > 0 and self.config.iou_stages:
             iou_losses = []
             for stage in self.config.iou_stages:
@@ -553,8 +560,11 @@ class IBISNet(nn.Module):
                 )
                 iou_losses.append(self.iou_loss_fn(pred, target))
             if iou_losses:
-                total_loss = total_loss + self.config.lambda_iou * sum(iou_losses) / len(iou_losses)
+                iou_loss_avg = sum(iou_losses) / len(iou_losses)  # type: ignore[assignment]
+                total_loss = total_loss + self.config.lambda_iou * iou_loss_avg
+                loss_dict["iou"] = iou_loss_avg.detach().item()
 
+        ssim_loss_avg: Tensor | None = None
         if self.config.lambda_ssim > 0 and self.config.ssim_stages:
             ssim_losses = []
             for stage in self.config.ssim_stages:
@@ -569,8 +579,8 @@ class IBISNet(nn.Module):
                 )
                 ssim_losses.append(self.ssim_loss_fn(pred, target))
             if ssim_losses:
-                total_loss = total_loss + self.config.lambda_ssim * sum(ssim_losses) / len(
-                    ssim_losses
-                )
+                ssim_loss_avg = sum(ssim_losses) / len(ssim_losses)  # type: ignore[assignment]
+                total_loss = total_loss + self.config.lambda_ssim * ssim_loss_avg
+                loss_dict["ssim"] = ssim_loss_avg.detach().item()
 
-        return self.config.lambda_bce * bce_loss0, total_loss
+        return self.config.lambda_bce * bce_loss0, total_loss, loss_dict
