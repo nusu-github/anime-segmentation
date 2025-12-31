@@ -208,17 +208,56 @@ class AnimeSegmentation(
         )
 
     @classmethod
-    def try_load(cls, net_name, ckpt_path, map_location: str | None = None, img_size=None):
-        state_dict = torch.load(ckpt_path, map_location=map_location, weights_only=False)
-        if "epoch" in state_dict:
+    def try_load(
+        cls,
+        net_name: str,
+        ckpt_path: str,
+        map_location: str | None = None,
+        img_size: int | None = None,
+        *,
+        weights_only: bool = False,
+    ):
+        """Load model from checkpoint.
+
+        Args:
+            net_name: Network name (e.g., 'isnet_is', 'ibisnet_is')
+            ckpt_path: Path to checkpoint file
+            map_location: Device to map tensors to
+            img_size: Image size (required for some models)
+            weights_only: If True, only load network weights without restoring
+                full Lightning state (compile, optimizer, etc.)
+        """
+        checkpoint = torch.load(ckpt_path, map_location=map_location, weights_only=False)
+        is_lightning_ckpt = "epoch" in checkpoint
+
+        # Use load_from_checkpoint for full Lightning state restoration
+        if is_lightning_ckpt and not weights_only:
             return cls.load_from_checkpoint(
                 ckpt_path, net_name=net_name, img_size=img_size, map_location=map_location
             )
+
+        # Extract state_dict from Lightning checkpoint
+        state_dict = checkpoint["state_dict"] if is_lightning_ckpt else checkpoint
+
         model = cls(net_name, img_size)
+
+        # Handle different key prefixes
         if any(k.startswith("net.") for k in state_dict):
-            model.load_state_dict(state_dict)
-        else:
-            model.net.load_state_dict(state_dict)
+            # Remove "net." prefix for legacy checkpoints (from forked repo)
+            state_dict = {k.removeprefix("net."): v for k, v in state_dict.items()}
+        if any(k.startswith("_net_unwrapped.") for k in state_dict):
+            # Lightning checkpoint with _net_unwrapped prefix
+            state_dict = {k.removeprefix("_net_unwrapped."): v for k, v in state_dict.items()}
+
+        # Filter out non-network keys
+        exclude_prefixes = ("gt_encoder.", "net._orig_mod.", "loss", "ssim", "grad_label")
+        state_dict = {
+            k: v
+            for k, v in state_dict.items()
+            if not any(k.startswith(p) for p in exclude_prefixes)
+        }
+
+        model.net.load_state_dict(state_dict, strict=False)
         return model
 
     def configure_optimizers(self) -> Optimizer:
@@ -281,7 +320,7 @@ class AnimeSegmentation(
         self.log("train/loss_tar", loss0)
 
         if isinstance(self._net_unwrapped, IBISNet) and self._net_unwrapped.use_outref:
-            with torch.no_grad():
+            with torch.inference_mode():
                 grad_gt_gen = self._net_unwrapped.grad_label_generator
                 if grad_gt_gen is not None:
                     grad_gt_fullres = grad_gt_gen(images)

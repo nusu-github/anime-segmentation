@@ -20,7 +20,7 @@ def get_mask(model: AnimeSegmentation, input_img, use_amp=True, img_size=640):
     img_input = np.transpose(img_input, (2, 0, 1))
     img_input = img_input[np.newaxis, :]
     tmp_img = torch.from_numpy(img_input).float().to(model.device)
-    with torch.no_grad():
+    with torch.inference_mode():
         with autocast(device_type=model.device.type, enabled=use_amp):
             pred = model(tmp_img)
             pred = pred.to(dtype=torch.float32)
@@ -61,7 +61,9 @@ if __name__ == "__main__":
 
     device = torch.device(opt.device)
 
-    model = AnimeSegmentation.try_load(opt.net, opt.ckpt, opt.device, img_size=opt.img_size)
+    model = AnimeSegmentation.try_load(
+        opt.net, opt.ckpt, opt.device, img_size=opt.img_size, weights_only=True
+    )
     model.eval()
     model.to(device)
 
