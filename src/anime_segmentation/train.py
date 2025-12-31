@@ -1,5 +1,5 @@
 from argparse import Namespace
-from typing import Any
+from typing import Any, cast
 
 import lightning.pytorch as pl
 import torch
@@ -166,7 +166,7 @@ class AnimeSegmentation(
 
         if self.hparams["net_name"] in {"isnet_is", "ibisnet_is"}:
             self.gt_encoder = get_net("isnet_gt", img_size)
-            self.gt_encoder.requires_grad_(requires_grad=False)
+            self.freeze_gt_encoder()
         else:
             self.gt_encoder = None
 
@@ -207,6 +207,12 @@ class AnimeSegmentation(
         lr: float = self.hparams["lr"]
         return self.optimizer_factory(self.parameters(), lr=lr)
 
+    def freeze_gt_encoder(self) -> None:
+        if self.gt_encoder is None:
+            return
+        self.gt_encoder.eval()
+        self.gt_encoder.requires_grad_(requires_grad=False)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         match self._net_unwrapped:
             case IBISNet():
@@ -218,22 +224,27 @@ class AnimeSegmentation(
                 msg = f"Unsupported network type: {type(self._net_unwrapped)}"
                 raise TypeError(msg)
 
-    def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         images, labels = batch["image"], batch["label"]
+
+        # Get GT encoder features with inference_mode for performance
+        # (teacher model is frozen, no gradients needed)
+        gt_features = None
+        if self.gt_encoder is not None:
+            with torch.inference_mode():
+                gt_features = self.gt_encoder(labels)[1]
 
         match self._net_unwrapped:
             case IBISNet():
                 outputs = self.net(images)
                 loss_args = [outputs, labels]
-                if self.gt_encoder is not None:
-                    fs = self.gt_encoder(labels)[1]
-                    loss_args.append(fs)
+                if gt_features is not None:
+                    loss_args.append(gt_features)
             case ISNetDIS():
                 ds, dfs = self.net(images)
                 loss_args = [ds, dfs, labels]
-                if self.gt_encoder is not None:
-                    fs = self.gt_encoder(labels)[1]
-                    loss_args.append(fs)
+                if gt_features is not None:
+                    loss_args.append(gt_features)
             case ISNetGTEncoder():
                 ds = self.net(labels)[0]
                 loss_args = [ds, labels]
@@ -273,9 +284,7 @@ class AnimeSegmentation(
         # Log metrics (torchmetrics handles sync automatically)
         self.log_dict(self.val_metrics, prog_bar=True)
 
-    def predict_step(
-        self, batch: dict[str, torch.Tensor] | torch.Tensor, batch_idx: int
-    ) -> torch.Tensor:
+    def predict_step(self, batch: dict[str, torch.Tensor] | torch.Tensor) -> torch.Tensor:
         images = batch["image"] if isinstance(batch, dict) else batch
         return self(images)
 
@@ -329,7 +338,7 @@ def get_gt_encoder(
     gt_epoch: int,
     compile: bool = False,
     compile_mode: str | None = None,
-) -> torch.nn.Module:
+) -> ISNetGTEncoder:
     """Train ground truth encoder for ISNet with intermediate supervision."""
     print("---start train ground truth encoder---")
     gt_encoder = AnimeSegmentation("isnet_gt", compile=compile, compile_mode=compile_mode)
@@ -363,7 +372,7 @@ def get_gt_encoder(
     net = gt_encoder.net
     if isinstance(net, OptimizedModule):
         net = net._orig_mod
-    return net
+    return cast("ISNetGTEncoder", net)
 
 
 class AnimeSegmentationCLI(LightningCLI):

@@ -3,68 +3,73 @@
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
-
-bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
+from torch import nn
 
 
-def multi_loss_fusion(preds, target):
-    loss0 = 0.0
-    loss = 0.0
+def _resize_target_like(target: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
+    if pred.shape[2:] == target.shape[2:]:
+        return target
+    return F.interpolate(target, size=pred.shape[2:], mode="bilinear", align_corners=True)
 
-    for i in range(len(preds)):
-        if preds[i].shape[2] != target.shape[2] or preds[i].shape[3] != target.shape[3]:
-            tmp_target = F.interpolate(
-                target, size=preds[i].size()[2:], mode="bilinear", align_corners=True
-            )
-            loss = loss + bce_loss(preds[i], tmp_target)
-        else:
-            loss = loss + bce_loss(preds[i], target)
+
+def _bce_with_logits(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    return F.binary_cross_entropy_with_logits(pred, target, reduction="mean")
+
+
+def _feature_loss(pred: torch.Tensor, target: torch.Tensor, mode: str) -> torch.Tensor:
+    if mode == "MSE":
+        return F.mse_loss(pred, target, reduction="mean")
+    if mode == "KL":
+        return F.kl_div(
+            F.log_softmax(pred, dim=1),
+            F.softmax(target, dim=1),
+            reduction="mean",
+        )
+    if mode == "MAE":
+        return F.l1_loss(pred, target, reduction="mean")
+    if mode == "SmoothL1":
+        return F.smooth_l1_loss(pred, target, reduction="mean")
+    raise ValueError(f"Unsupported feature loss mode: {mode}")
+
+
+def multi_loss_fusion(
+    preds: list[torch.Tensor], target: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    loss0 = torch.zeros(1, dtype=target.dtype, device=target.device)
+    loss = torch.zeros(1, dtype=target.dtype, device=target.device)
+
+    for i, pred in enumerate(preds):
+        resized_target = _resize_target_like(target, pred)
+        loss = loss + _bce_with_logits(pred, resized_target)
         if i == 0:
             loss0 = loss
     return loss0, loss
 
 
-fea_loss = nn.MSELoss(reduction="mean")
-kl_loss = nn.KLDivLoss(reduction="mean")
-l1_loss = nn.L1Loss(reduction="mean")
-smooth_l1_loss = nn.SmoothL1Loss(reduction="mean")
+def multi_loss_fusion_kl(
+    preds: list[torch.Tensor],
+    target: torch.Tensor,
+    dfs: list[torch.Tensor],
+    fs: list[torch.Tensor],
+    mode: str = "MSE",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    loss0 = torch.zeros(1, dtype=target.dtype, device=target.device)
+    loss = torch.zeros(1, dtype=target.dtype, device=target.device)
 
-
-def multi_loss_fusion_kl(preds, target, dfs, fs, mode="MSE"):
-    loss0 = 0.0
-    loss = 0.0
-
-    for i in range(len(preds)):
-        if preds[i].shape[2] != target.shape[2] or preds[i].shape[3] != target.shape[3]:
-            tmp_target = F.interpolate(
-                target, size=preds[i].size()[2:], mode="bilinear", align_corners=True
-            )
-            loss = loss + bce_loss(preds[i], tmp_target)
-        else:
-            loss = loss + bce_loss(preds[i], target)
+    for i, pred in enumerate(preds):
+        resized_target = _resize_target_like(target, pred)
+        loss = loss + _bce_with_logits(pred, resized_target)
         if i == 0:
             loss0 = loss
 
-    for i in range(len(dfs)):
-        df = dfs[i]
-        fs_i = fs[i]
-        match mode:
-            case "MSE":
-                # add the mse loss of features as additional constraints
-                loss = loss + fea_loss(df, fs_i)
-            case "KL":
-                loss = loss + kl_loss(F.log_softmax(df, dim=1), F.softmax(fs_i, dim=1))
-            case "MAE":
-                loss = loss + l1_loss(df, fs_i)
-            case "SmoothL1":
-                loss = loss + smooth_l1_loss(df, fs_i)
+    for df, fs_i in zip(dfs, fs, strict=True):
+        loss = loss + _feature_loss(df, fs_i, mode)
 
     return loss0, loss
 
 
 class RebnConv(nn.Module):
-    def __init__(self, in_ch: int = 3, out_ch: int = 3, dirate: int = 1, stride: int = 1) -> None:
+    def __init__(self, in_ch: int = 3, out_ch: int = 3, dirate: int = 1, stride: int = 1):
         super().__init__()
 
         self.conv_s1 = nn.Conv2d(
@@ -73,28 +78,25 @@ class RebnConv(nn.Module):
         self.bn_s1 = nn.BatchNorm2d(out_ch)
         self.relu_s1 = nn.ReLU(inplace=True)
 
-    def forward(self, x):
-        hx = x
-        return self.relu_s1(self.bn_s1(self.conv_s1(hx)))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.relu_s1(self.bn_s1(self.conv_s1(x)))
 
 
-# upsample tensor 'src' to have the same spatial size with tensor 'tar'
-def _upsample_like(src, tar) -> Tensor:
+## upsample tensor 'src' to have the same spatial size with tensor 'tar'
+def _upsample_like(src: torch.Tensor, tar: torch.Tensor) -> torch.Tensor:
     return F.interpolate(src, size=tar.shape[2:], mode="bilinear", align_corners=False)
 
 
-# RSU-7
+### RSU-7 ###
 class RSU7(nn.Module):
-    def __init__(
-        self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3, img_size: int = 512
-    ) -> None:
+    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3, img_size: int = 512):
         super().__init__()
 
         self.in_ch = in_ch
         self.mid_ch = mid_ch
         self.out_ch = out_ch
 
-        self.rebnconvin = RebnConv(in_ch, out_ch, dirate=1)  # 1 -> 1/2
+        self.rebnconvin = RebnConv(in_ch, out_ch, dirate=1)  ## 1 -> 1/2
 
         self.rebnconv1 = RebnConv(out_ch, mid_ch, dirate=1)
         self.pool1 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
@@ -122,11 +124,8 @@ class RSU7(nn.Module):
         self.rebnconv2d = RebnConv(mid_ch * 2, mid_ch, dirate=1)
         self.rebnconv1d = RebnConv(mid_ch * 2, out_ch, dirate=1)
 
-    def forward(self, x):
-        _b, _c, _h, _w = x.shape
-
-        hx = x
-        hxin = self.rebnconvin(hx)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hxin = self.rebnconvin(x)
 
         hx1 = self.rebnconv1(hxin)
         hx = self.pool1(hx1)
@@ -167,9 +166,9 @@ class RSU7(nn.Module):
         return hx1d + hxin
 
 
-# RSU-6
+### RSU-6 ###
 class RSU6(nn.Module):
-    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
+    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3):
         super().__init__()
 
         self.rebnconvin = RebnConv(in_ch, out_ch, dirate=1)
@@ -196,10 +195,8 @@ class RSU6(nn.Module):
         self.rebnconv2d = RebnConv(mid_ch * 2, mid_ch, dirate=1)
         self.rebnconv1d = RebnConv(mid_ch * 2, out_ch, dirate=1)
 
-    def forward(self, x):
-        hx = x
-
-        hxin = self.rebnconvin(hx)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hxin = self.rebnconvin(x)
 
         hx1 = self.rebnconv1(hxin)
         hx = self.pool1(hx1)
@@ -234,9 +231,9 @@ class RSU6(nn.Module):
         return hx1d + hxin
 
 
-# RSU-5
+### RSU-5 ###
 class RSU5(nn.Module):
-    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
+    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3):
         super().__init__()
 
         self.rebnconvin = RebnConv(in_ch, out_ch, dirate=1)
@@ -259,10 +256,8 @@ class RSU5(nn.Module):
         self.rebnconv2d = RebnConv(mid_ch * 2, mid_ch, dirate=1)
         self.rebnconv1d = RebnConv(mid_ch * 2, out_ch, dirate=1)
 
-    def forward(self, x):
-        hx = x
-
-        hxin = self.rebnconvin(hx)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hxin = self.rebnconvin(x)
 
         hx1 = self.rebnconv1(hxin)
         hx = self.pool1(hx1)
@@ -291,9 +286,9 @@ class RSU5(nn.Module):
         return hx1d + hxin
 
 
-# RSU-4
+### RSU-4 ###
 class RSU4(nn.Module):
-    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
+    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3):
         super().__init__()
 
         self.rebnconvin = RebnConv(in_ch, out_ch, dirate=1)
@@ -312,10 +307,8 @@ class RSU4(nn.Module):
         self.rebnconv2d = RebnConv(mid_ch * 2, mid_ch, dirate=1)
         self.rebnconv1d = RebnConv(mid_ch * 2, out_ch, dirate=1)
 
-    def forward(self, x):
-        hx = x
-
-        hxin = self.rebnconvin(hx)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hxin = self.rebnconvin(x)
 
         hx1 = self.rebnconv1(hxin)
         hx = self.pool1(hx1)
@@ -338,9 +331,9 @@ class RSU4(nn.Module):
         return hx1d + hxin
 
 
-# RSU-4F
+### RSU-4F ###
 class RSU4F(nn.Module):
-    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3) -> None:
+    def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3):
         super().__init__()
 
         self.rebnconvin = RebnConv(in_ch, out_ch, dirate=1)
@@ -355,10 +348,8 @@ class RSU4F(nn.Module):
         self.rebnconv2d = RebnConv(mid_ch * 2, mid_ch, dirate=2)
         self.rebnconv1d = RebnConv(mid_ch * 2, out_ch, dirate=1)
 
-    def forward(self, x):
-        hx = x
-
-        hxin = self.rebnconvin(hx)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hxin = self.rebnconvin(x)
 
         hx1 = self.rebnconv1(hxin)
         hx2 = self.rebnconv2(hx1)
@@ -383,7 +374,7 @@ class MyRebnConv(nn.Module):
         padding: int = 1,
         dilation: int = 1,
         groups: int = 1,
-    ) -> None:
+    ):
         super().__init__()
 
         self.conv = nn.Conv2d(
@@ -398,16 +389,21 @@ class MyRebnConv(nn.Module):
         self.bn = nn.BatchNorm2d(out_ch)
         self.rl = nn.ReLU(inplace=True)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.rl(self.bn(self.conv(x)))
 
 
 class ISNetGTEncoder(nn.Module):
-    def __init__(self, in_ch: int = 1, out_ch: int = 1) -> None:
+    def __init__(
+        self,
+        in_ch: int = 1,
+        out_ch: int = 1,
+    ):
         super().__init__()
 
-        # nn.Conv2d(in_ch, 64, 3, stride=2, padding=1)
-        self.conv_in = MyRebnConv(in_ch, 16, 3, stride=2, padding=1)
+        self.conv_in = MyRebnConv(
+            in_ch, 16, 3, stride=2, padding=1
+        )  # nn.Conv2d(in_ch,64,3,stride=2,padding=1)
 
         self.stage1 = RSU7(16, 16, 64)
         self.pool12 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
@@ -434,15 +430,14 @@ class ISNetGTEncoder(nn.Module):
         self.side6 = nn.Conv2d(512, out_ch, 3, padding=1)
 
     @staticmethod
-    def compute_loss(args):
+    def compute_loss(
+        args: tuple[list[torch.Tensor], torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         preds, targets = args
         return multi_loss_fusion(preds, targets)
 
-    def forward(self, x):
-        hx = x
-
-        hxin = self.conv_in(hx)
-        # hx = self.pool_in(hxin)
+    def forward(self, x: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        hxin = self.conv_in(x)
 
         # stage 1
         hx1 = self.stage1(hxin)
@@ -486,14 +481,15 @@ class ISNetGTEncoder(nn.Module):
         d6 = self.side6(hx6)
         d6 = _upsample_like(d6, x)
 
-        # d0 = self.outconv(torch.cat((d1,d2,d3,d4,d5,d6),1))
-
-        # return [torch.sigmoid(d1), torch.sigmoid(d2), torch.sigmoid(d3), torch.sigmoid(d4), torch.sigmoid(d5), torch.sigmoid(d6)], [hx1, hx2, hx3, hx4, hx5, hx6]
         return [d1, d2, d3, d4, d5, d6], [hx1, hx2, hx3, hx4, hx5, hx6]
 
 
 class ISNetDIS(nn.Module):
-    def __init__(self, in_ch: int = 3, out_ch: int = 1) -> None:
+    def __init__(
+        self,
+        in_ch: int = 3,
+        out_ch: int = 1,
+    ):
         super().__init__()
 
         self.conv_in = nn.Conv2d(in_ch, 64, 3, stride=2, padding=1)
@@ -530,24 +526,26 @@ class ISNetDIS(nn.Module):
         self.side5 = nn.Conv2d(512, out_ch, 3, padding=1)
         self.side6 = nn.Conv2d(512, out_ch, 3, padding=1)
 
-        # self.outconv = nn.Conv2d(6*out_ch,out_ch,1)
-
     @staticmethod
-    def compute_loss_kl(preds, targets, dfs, fs, mode: str = "MSE"):
+    def compute_loss_kl(
+        preds: list[torch.Tensor],
+        targets: torch.Tensor,
+        dfs: list[torch.Tensor],
+        fs: list[torch.Tensor],
+        mode: str = "MSE",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return multi_loss_fusion_kl(preds, targets, dfs, fs, mode=mode)
 
     @staticmethod
-    def compute_loss(args):
+    def compute_loss(args: tuple) -> tuple[torch.Tensor, torch.Tensor]:
         if len(args) == 3:
-            ds, dfs, labels = args
+            ds, _dfs, labels = args
             return multi_loss_fusion(ds, labels)
         ds, dfs, labels, fs = args
         return multi_loss_fusion_kl(ds, labels, dfs, fs, mode="MSE")
 
-    def forward(self, x):
-        hx = x
-
-        hxin = self.conv_in(hx)
+    def forward(self, x: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        hxin = self.conv_in(x)
         hx = self.pool_in(hxin)
 
         # stage 1
@@ -608,7 +606,4 @@ class ISNetDIS(nn.Module):
         d6 = self.side6(hx6)
         d6 = _upsample_like(d6, x)
 
-        # d0 = self.outconv(torch.cat((d1,d2,d3,d4,d5,d6),1))
-
-        # return [torch.sigmoid(d1), torch.sigmoid(d2), torch.sigmoid(d3), torch.sigmoid(d4), torch.sigmoid(d5), torch.sigmoid(d6)], [hx1d, hx2d, hx3d, hx4d, hx5d, hx6]
         return [d1, d2, d3, d4, d5, d6], [hx1d, hx2d, hx3d, hx4d, hx5d, hx6]

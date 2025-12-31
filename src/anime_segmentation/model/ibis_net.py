@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 
 import torch
@@ -525,13 +523,9 @@ class IBISNet(nn.Module):
         ds = outputs["ds"]
         dfs_raw = outputs["dfs_raw"]
 
-        # Initialize loss dict for logging
-        loss_dict: dict[str, float] = {}
-
         bce_loss0, bce_loss_total = self._bce_multi_scale(ds, labels)
         total_loss = self.config.lambda_bce * bce_loss_total
-        loss_dict["bce"] = bce_loss_total.detach().item()
-
+        loss_dict: dict[str, float] = {"bce": bce_loss_total.detach().item()}
         if fs is not None:
             fs_loss = self._feature_sync_loss(dfs_raw, fs)
             total_loss = total_loss + self.config.lambda_fs * fs_loss

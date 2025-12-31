@@ -158,7 +158,7 @@ def test_ibisnet_loss_fullgraph():
     opt_loss = torch.compile(loss_wrapper, backend="eager", fullgraph=True)
 
     try:
-        loss0, loss, loss_dict = opt_loss(outputs, labels)
+        _loss0, loss, _loss_dict = opt_loss(outputs, labels)
         assert isinstance(loss, torch.Tensor)
         assert loss.item() > 0
         print("[PASS] IBISNet loss compilation (fullgraph=True) works")
