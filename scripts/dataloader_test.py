@@ -11,8 +11,6 @@ def benchmark_dataloader(
     img_size: int = 640,
     num_batches: int = 100,
     warmup_batches: int = 10,
-    *,
-    with_trimap: bool = True,
 ) -> None:
     """Benchmark the dataloader throughput."""
     data_module = AnimeSegDataModule(
@@ -29,7 +27,6 @@ def benchmark_dataloader(
         img_size=img_size,
         batch_size_train=batch_size,
         num_workers_train=num_workers,
-        with_trimap=with_trimap,
     )
     data_module.setup(stage="fit")
     train_dataloader = data_module.train_dataloader()
@@ -38,7 +35,6 @@ def benchmark_dataloader(
     print(f"Batch size: {batch_size}")
     print(f"Num workers: {num_workers}")
     print(f"Image size: {img_size}")
-    print(f"With trimap: {with_trimap}")
     print("-" * 50)
 
     # Warmup
@@ -93,7 +89,6 @@ if __name__ == "__main__":
     parser.add_argument("--img-size", type=int, default=640)
     parser.add_argument("--num-batches", type=int, default=100)
     parser.add_argument("--warmup-batches", type=int, default=10)
-    parser.add_argument("--with-trimap", action="store_true")
     args = parser.parse_args()
 
     benchmark_dataloader(
@@ -103,5 +98,4 @@ if __name__ == "__main__":
         img_size=args.img_size,
         num_batches=args.num_batches,
         warmup_batches=args.warmup_batches,
-        with_trimap=args.with_trimap,
     )

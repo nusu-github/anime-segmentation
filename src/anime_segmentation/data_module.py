@@ -31,7 +31,6 @@ from .transforms import (
     SharpBackground,
     SimulateLight,
     SketchConvert,
-    WithTrimap,
 )
 
 
@@ -42,18 +41,11 @@ def segmentation_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Tensor]:
         batch: List of dicts with 'image' and 'mask' tensors.
 
     Returns:
-        Dict with batched 'image', 'label', and optionally 'trimap' tensors.
+        Dict with batched 'image' and 'label' tensors.
     """
     images = torch.stack([b["image"] for b in batch])
     labels = torch.stack([b["mask"] for b in batch])
-
-    result: dict[str, Tensor] = {"image": images, "label": labels}
-
-    if "trimap" in batch[0]:
-        trimaps = torch.stack([b["trimap"] for b in batch])
-        result["trimap"] = trimaps
-
-    return result
+    return {"image": images, "label": labels}
 
 
 class AnimeSegDataModule(L.LightningDataModule):
@@ -83,7 +75,6 @@ class AnimeSegDataModule(L.LightningDataModule):
         num_workers_val: int = 4,
         characters_range: tuple[int, int] = (0, 3),
         *,
-        with_trimap: bool = False,
         streaming: bool = False,
         # Augmentation probabilities for synthetic images (set to 0.0 to disable)
         aug_sharp_background_p: float = 0.0,
@@ -127,7 +118,6 @@ class AnimeSegDataModule(L.LightningDataModule):
             num_workers_train: Number of training data loader workers.
             num_workers_val: Number of validation data loader workers.
             characters_range: Range for number of characters per synthetic sample.
-            with_trimap: Whether to generate trimap for MODNet.
             streaming: Whether to use streaming mode (Hub only).
             aug_sharp_background_p: Probability for sharp background augmentation.
             aug_sketch_p: Probability for sketch conversion.
@@ -154,7 +144,6 @@ class AnimeSegDataModule(L.LightningDataModule):
 
         self.train_dataset: Dataset | IterableDataset | None = None
         self.val_dataset: Dataset | IterableDataset | None = None
-        self._with_trimap_transform: WithTrimap | None = WithTrimap() if with_trimap else None
         self._use_iterable = streaming
 
         # Store image paths for synthetic compositing (lazy loading)
@@ -523,30 +512,10 @@ class AnimeSegDataModule(L.LightningDataModule):
             ]
         )
 
-    def _apply_trimap_if_needed(
-        self,
-        batch: list[dict[str, Tensor]],
-    ) -> list[dict[str, Tensor]]:
-        """Apply trimap transform if enabled."""
-        if self._with_trimap_transform is None:
-            return batch
-
-        result = []
-        for item in batch:
-            img_tv = tv_tensors.Image(item["image"])
-            mask_tv = tv_tensors.Mask(item["mask"])
-            img, mask, trimap = self._with_trimap_transform((img_tv, mask_tv))
-            result.append({"image": img, "mask": mask, "trimap": trimap})
-        return result
-
     def train_dataloader(self) -> DataLoader:
         if self.train_dataset is None:
             msg = "setup() must be called before train_dataloader()"
             raise RuntimeError(msg)
-
-        def collate_with_trimap(batch):
-            batch = self._apply_trimap_if_needed(batch)
-            return segmentation_collate_fn(batch)
 
         # IterableDataset doesn't support shuffle in DataLoader
         # (shuffling is handled by the dataset itself via shuffle buffer)
@@ -560,17 +529,13 @@ class AnimeSegDataModule(L.LightningDataModule):
             persistent_workers=self.hparams["num_workers_train"] > 0,
             num_workers=self.hparams["num_workers_train"],
             pin_memory=True,
-            collate_fn=collate_with_trimap,
+            collate_fn=segmentation_collate_fn,
         )
 
     def val_dataloader(self) -> DataLoader:
         if self.val_dataset is None:
             msg = "setup() must be called before val_dataloader()"
             raise RuntimeError(msg)
-
-        def collate_with_trimap(batch):
-            batch = self._apply_trimap_if_needed(batch)
-            return segmentation_collate_fn(batch)
 
         return DataLoader(
             self.val_dataset,  # type: ignore[arg-type]
@@ -579,7 +544,7 @@ class AnimeSegDataModule(L.LightningDataModule):
             persistent_workers=self.hparams["num_workers_val"] > 0,
             num_workers=self.hparams["num_workers_val"],
             pin_memory=True,
-            collate_fn=collate_with_trimap,
+            collate_fn=segmentation_collate_fn,
         )
 
     def state_dict(self) -> dict:

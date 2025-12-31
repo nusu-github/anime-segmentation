@@ -1,21 +1,14 @@
-"""Test torch.compile and torch.jit.script compatibility for all models."""
+"""Test torch.compile and torch.jit.script compatibility for IS-Net/IBIS-Net models."""
 
 import pytest
 import torch
 from torch import nn
 
-# Test configurations for different models
+# Test configurations for IS-Net/IBIS-Net models
 MODEL_CONFIGS = {
     "IBISNet": {"img_size": 256},
     "ISNetDIS": {"in_ch": 3, "out_ch": 1},
     "ISNetGTEncoder": {"in_ch": 1, "out_ch": 1},
-    "U2NetFull": {},
-    "U2NetFull2": {},
-    "U2NetLite": {},
-    "U2NetLite2": {},
-    "MODNet": {"in_channels": 3, "hr_channels": 32},
-    "InSPyReNet_Res2Net50": {"depth": 64, "pretrained": False, "base_size": 384},
-    "InSPyReNet_SwinB": {"depth": 64, "pretrained": False, "base_size": 384},
 }
 
 # Input size configurations
@@ -23,42 +16,17 @@ INPUT_SIZES = {
     "IBISNet": (1, 3, 256, 256),
     "ISNetDIS": (1, 3, 256, 256),
     "ISNetGTEncoder": (1, 1, 256, 256),
-    "U2NetFull": (1, 3, 256, 256),
-    "U2NetFull2": (1, 3, 256, 256),
-    "U2NetLite": (1, 3, 256, 256),
-    "U2NetLite2": (1, 3, 256, 256),
-    "MODNet": (1, 3, 256, 256),
-    "InSPyReNet_Res2Net50": (1, 3, 384, 384),
-    "InSPyReNet_SwinB": (1, 3, 384, 384),
 }
 
 
 def get_model(model_name: str) -> nn.Module:
     """Create model instance by name."""
-    from anime_segmentation.model import (
-        IBISNet,
-        InSPyReNet_Res2Net50,
-        InSPyReNet_SwinB,
-        ISNetDIS,
-        ISNetGTEncoder,
-        MODNet,
-        U2NetFull,
-        U2NetFull2,
-        U2NetLite,
-        U2NetLite2,
-    )
+    from anime_segmentation.model import IBISNet, ISNetDIS, ISNetGTEncoder
 
     model_classes = {
         "IBISNet": IBISNet,
         "ISNetDIS": ISNetDIS,
         "ISNetGTEncoder": ISNetGTEncoder,
-        "U2NetFull": U2NetFull,
-        "U2NetFull2": U2NetFull2,
-        "U2NetLite": U2NetLite,
-        "U2NetLite2": U2NetLite2,
-        "MODNet": MODNet,
-        "InSPyReNet_Res2Net50": InSPyReNet_Res2Net50,
-        "InSPyReNet_SwinB": InSPyReNet_SwinB,
     }
 
     config = MODEL_CONFIGS[model_name]
@@ -69,9 +37,6 @@ def get_forward_args(model_name: str, device: str = "cpu"):
     """Get forward arguments for a model."""
     input_size = INPUT_SIZES[model_name]
     x = torch.randn(*input_size, device=device)
-
-    if model_name == "MODNet":
-        return (x, False)  # (input, inference_mode)
     return (x,)
 
 
@@ -93,7 +58,7 @@ def test_torch_compile(model_name: str):
 
         # Verify output is valid
         if isinstance(output, dict):
-            assert "pred" in output or len(output) > 0
+            assert "ds" in output or len(output) > 0
         elif isinstance(output, (list, tuple)):
             assert len(output) > 0
         else:
@@ -108,12 +73,6 @@ def test_torch_compile(model_name: str):
 @pytest.mark.parametrize("model_name", list(MODEL_CONFIGS.keys()))
 def test_torch_compile_fullgraph(model_name: str):
     """Test that models can be compiled with fullgraph=True (no graph breaks)."""
-    # Some models might naturally have graph breaks (e.g. data dependent flow).
-    # We primarily want to ensure ISNet models are graph-break free after optimization.
-
-    if model_name not in ["ISNetDIS", "ISNetGTEncoder"]:
-        pytest.skip(f"Skipping fullgraph check for {model_name} (focusing on ISNet)")
-
     model = get_model(model_name)
     model.eval()
 
@@ -134,7 +93,7 @@ def test_torch_compile_fullgraph(model_name: str):
 def test_isnet_loss_fullgraph():
     """Test that ISNet loss computation is compile-friendly (no graph breaks).
 
-    This verifies that EMALossBalancer and other loss logic do not trigger graph breaks.
+    This verifies that loss logic does not trigger graph breaks.
     """
     from anime_segmentation.model.isnet import ISNetDIS
 
@@ -150,7 +109,6 @@ def test_isnet_loss_fullgraph():
 
     # Feature shapes vary, but for loss computation structure verification,
     # we just need matching shapes between dfs and fs.
-    # ISNet features: 64, 128, 256, 512, 512, 512 (approx, simplified here)
     feat_channels = [16, 32, 64, 128, 256, 256]
     dfs = [
         torch.randn(B, c, H // (2**i), W // (2**i), device=device)
@@ -177,6 +135,37 @@ def test_isnet_loss_fullgraph():
         pytest.fail(f"[FAIL] ISNetDIS loss compilation (fullgraph=True) failed - {e}")
 
 
+def test_ibisnet_loss_fullgraph():
+    """Test that IBISNet loss computation is compile-friendly (no graph breaks)."""
+    from anime_segmentation.model.ibis_net import IBISNet
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    model = IBISNet(img_size=256).to(device)
+    model.eval()
+
+    B, H, W = 1, 256, 256
+    x = torch.randn(B, 3, H, W, device=device)
+    labels = torch.rand(B, 1, H, W, device=device)
+
+    with torch.no_grad():
+        outputs = model(x)
+
+    def loss_wrapper(out, lab):
+        return model.compute_loss([out, lab])
+
+    # Compile with fullgraph=True to catch graph breaks
+    opt_loss = torch.compile(loss_wrapper, backend="eager", fullgraph=True)
+
+    try:
+        loss0, loss, loss_dict = opt_loss(outputs, labels)
+        assert isinstance(loss, torch.Tensor)
+        assert loss.item() > 0
+        print("[PASS] IBISNet loss compilation (fullgraph=True) works")
+    except Exception as e:
+        pytest.fail(f"[FAIL] IBISNet loss compilation (fullgraph=True) failed - {e}")
+
+
 @pytest.mark.parametrize("model_name", list(MODEL_CONFIGS.keys()))
 def test_torch_compile_inductor(model_name: str):
     """Test that models can be compiled with torch.compile using inductor backend."""
@@ -194,7 +183,7 @@ def test_torch_compile_inductor(model_name: str):
             output = compiled_model(*args)
 
         if isinstance(output, dict):
-            assert "pred" in output or len(output) > 0
+            assert "ds" in output or len(output) > 0
         elif isinstance(output, (list, tuple)):
             assert len(output) > 0
         else:

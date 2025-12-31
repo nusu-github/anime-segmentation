@@ -11,7 +11,6 @@ from .augmentation import (
 )
 from .color import RandomColor
 from .geometric import RescalePad
-from .trimap import WithTrimap
 
 __all__ = [
     "JPEGCompression",
@@ -23,5 +22,4 @@ __all__ = [
     "SharpBackground",
     "SimulateLight",
     "SketchConvert",
-    "WithTrimap",
 ]

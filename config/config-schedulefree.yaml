@@ -57,12 +57,10 @@ model:
       betas: [0.9, 0.999]
       eps: 1e-08
       weight_decay: 0
-  # Hybrid loss weights (BiRefNet-style: pixel/region/boundary)
-  loss_bce: 30.0 # Pixel-level BCE
-  loss_iou: 0.5 # Region-level IoU
-  loss_ssim: 10.0 # Structure similarity
-  loss_structure: 0.0 # Disabled (overlaps with BCE+IoU)
-  loss_contour: 0.0 # Disabled
+  # Loss weights for IS-Net/IBIS-Net
+  loss_bce: 1.0
+  loss_iou: 0.5
+  loss_ssim: 0.5
 
 data:
   # dataset_name: "your-username/your-dataset"
@@ -81,7 +79,6 @@ data:
   batch_size_val: 2
   num_workers_train: 4
   num_workers_val: 4
-  with_trimap: false
   # Augmentation probabilities for synthetic images (set to 0.0 to disable)
   aug_sharp_background_p: 0.0
   aug_sketch_p: 0.0

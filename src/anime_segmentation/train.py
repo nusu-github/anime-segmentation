@@ -14,20 +14,8 @@ from torch.optim import Optimizer
 from torchmetrics import MetricCollection
 
 from .data_module import AnimeSegDataModule
-from .loss import configure_loss_weights
 from .metrics import EMeasure, FMeasure, MAEMetric, SMeasure, WeightedFMeasure
-from .model import (
-    IBISNet,
-    InSPyReNet,
-    InSPyReNet_Res2Net50,
-    InSPyReNet_SwinB,
-    ISNetDIS,
-    ISNetGTEncoder,
-    MODNet,
-    U2Net,
-    U2NetFull2,
-    U2NetLite2,
-)
+from .model import IBISNet, ISNetDIS, ISNetGTEncoder
 
 NET_NAMES = [
     "ibisnet_is",
@@ -35,17 +23,12 @@ NET_NAMES = [
     "isnet_is",
     "isnet",
     "isnet_gt",
-    "u2net",
-    "u2netl",
-    "modnet",
-    "inspyrnet_res",
-    "inspyrnet_swin",
 ]
 
 
 def get_net(
     net_name: str, img_size: int | tuple[int, int] | None
-) -> ISNetDIS | ISNetGTEncoder | InSPyReNet | MODNet | U2Net | IBISNet:
+) -> ISNetDIS | ISNetGTEncoder | IBISNet:
     match net_name:
         case "ibisnet" | "ibisnet_is":
             ibis_img_size = img_size[0] if isinstance(img_size, tuple) else img_size
@@ -54,18 +37,9 @@ def get_net(
             return ISNetDIS()
         case "isnet_gt":
             return ISNetGTEncoder()
-        case "u2net":
-            return U2NetFull2()
-        case "u2netl":
-            return U2NetLite2()
-        case "modnet":
-            return MODNet()
-        case "inspyrnet_res":
-            return InSPyReNet_Res2Net50(base_size=img_size)
-        case "inspyrnet_swin":
-            return InSPyReNet_SwinB(base_size=img_size)
         case _:
-            raise NotImplementedError
+            msg = f"Unknown net_name: {net_name}"
+            raise ValueError(msg)
 
 
 class ScheduleFreeCallback(Callback):
@@ -86,7 +60,7 @@ class ScheduleFreeCallback(Callback):
         return result
 
     def _get_train_mode(self, opt) -> bool:
-        """Retrieve the current mode (the location differs between the Standard and Wrapper versions)"""
+        """Retrieve the current mode (differs between Standard and Wrapper versions)."""
         # Wrapper version: optimizer.train_mode
         if hasattr(opt, "train_mode"):
             return opt.train_mode
@@ -166,27 +140,17 @@ class AnimeSegmentation(
         img_size: int | None = None,
         lr: float = 1e-3,
         optimizer: OptimizerCallable = torch.optim.Adam,
-        loss_bce: float = 30.0,
+        loss_bce: float = 1.0,
         loss_iou: float = 0.5,
-        loss_ssim: float = 10.0,
-        loss_structure: float = 5.0,
-        loss_contour: float = 5.0,
+        loss_ssim: float = 0.5,
         compile: bool = False,
         compile_mode: str | None = None,
     ) -> None:
         super().__init__()
-        assert net_name in NET_NAMES
+        if net_name not in NET_NAMES:
+            msg = f"net_name must be one of {NET_NAMES}, got {net_name}"
+            raise ValueError(msg)
         self.save_hyperparameters()
-
-        # Configure loss weights before model initialization
-        loss_weights = {
-            "bce": loss_bce,
-            "iou": loss_iou,
-            "ssim": loss_ssim,
-            "structure": loss_structure,
-            "contour": loss_contour,
-        }
-        configure_loss_weights(loss_weights)
 
         self.net = get_net(net_name, img_size)
 
@@ -233,19 +197,15 @@ class AnimeSegmentation(
                 ckpt_path, net_name=net_name, img_size=img_size, map_location=map_location
             )
         model = cls(net_name, img_size)
-        if any(k.startswith("net.") for k, v in state_dict.items()):
+        if any(k.startswith("net.") for k in state_dict):
             model.load_state_dict(state_dict)
         else:
             model.net.load_state_dict(state_dict)
         return model
 
     def configure_optimizers(self) -> Optimizer:
-        # If optimizer is passed as class path in CLI, it becomes a partial/callable
-        # We invoke it with parameters. `lr` is passed if not already fixed in the callable.
-        # But usually we want to respect the `lr` argument of __init__ if provided.
-        # If the callable already has 'lr' bound (from config), this might override or duplicate.
-        # Typically, config `init_args` are bound. We pass `lr` as override or addition.
-        return self.optimizer_factory(self.parameters(), lr=self.hparams["lr"])
+        lr: float = self.hparams["lr"]
+        return self.optimizer_factory(self.parameters(), lr=lr)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         match self._net_unwrapped:
@@ -254,18 +214,13 @@ class AnimeSegmentation(
                 return outputs["ds"][0].sigmoid()
             case ISNetDIS() | ISNetGTEncoder():
                 return self.net(x)[0][0].sigmoid()
-            case U2Net():
-                return self.net(x)[0].sigmoid()
-            case MODNet():
-                return self.net(x, True)[2]
-            case InSPyReNet():
-                return self.net.forward_inference(x)["pred"]  # pyright: ignore[reportReturnType, reportCallIssue, reportFunctionMemberAccess]
             case _:
-                raise NotImplementedError
+                msg = f"Unsupported network type: {type(self._net_unwrapped)}"
+                raise TypeError(msg)
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         images, labels = batch["image"], batch["label"]
-        # Use _net_unwrapped for pattern matching (handles compiled models)
+
         match self._net_unwrapped:
             case IBISNet():
                 outputs = self.net(images)
@@ -282,17 +237,9 @@ class AnimeSegmentation(
             case ISNetGTEncoder():
                 ds = self.net(labels)[0]
                 loss_args = [ds, labels]
-            case U2Net():
-                ds = self.net(images)
-                loss_args = [ds, labels]
-            case MODNet():
-                trimaps = batch["trimap"]
-                pred_semantic, pred_detail, pred_matte = self.net(images, False)
-                loss_args = [pred_semantic, pred_detail, pred_matte, images, trimaps, labels]
-            case InSPyReNet():
-                loss_args = self.net.forward_train(images, labels)  # pyright: ignore[reportFunctionMemberAccess, reportCallIssue]
             case _:
-                raise NotImplementedError
+                msg = f"Unsupported network type: {type(self._net_unwrapped)}"
+                raise TypeError(msg)
 
         loss_result = self._net_unwrapped.compute_loss(loss_args)
 
@@ -310,7 +257,7 @@ class AnimeSegmentation(
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
         images, labels = batch["image"], batch["label"]
-        # Use _net_unwrapped for pattern matching (handles compiled models)
+
         match self._net_unwrapped:
             case ISNetGTEncoder():
                 preds = self.forward(labels)
@@ -336,7 +283,6 @@ class AnimeSegmentation(
         """Generate model card with training configuration and metrics."""
         card = super().generate_model_card(*args, **kwargs)
 
-        # Add model architecture info to card text
         net_name = self.hparams.get("net_name", "unknown")
         img_size = self.hparams.get("img_size", "unknown")
 
@@ -389,7 +335,6 @@ def get_gt_encoder(
     gt_encoder = AnimeSegmentation("isnet_gt", compile=compile, compile_mode=compile_mode)
 
     # Extract relevant trainer args from config
-    # We use a simple DDP or auto strategy for this aux task to avoid complex config issues
     devices = trainer_config.get("devices", 1)
     strategy = "auto"
     if isinstance(devices, int) and devices > 1:
@@ -410,8 +355,8 @@ def get_gt_encoder(
         check_val_every_n_epoch=trainer_config.get("check_val_every_n_epoch", 1),
         log_every_n_steps=trainer_config.get("log_every_n_steps", 50),
         strategy=strategy,
-        enable_checkpointing=False,  # Don't save checkpoints for this aux task
-        logger=False,  # Don't log this aux task to main logger to avoid confusion
+        enable_checkpointing=False,
+        logger=False,
     )
     trainer.fit(gt_encoder, datamodule=datamodule)
     # Unwrap compiled module to get clean state_dict without _orig_mod prefix
@@ -427,13 +372,10 @@ class AnimeSegmentationCLI(LightningCLI):
             "--gt_epoch",
             type=int,
             default=4,
-            help="Epochs for training ground truth encoder (isnet_is only)",
+            help="Epochs for training ground truth encoder (isnet_is/ibisnet_is only)",
         )
 
     def before_fit(self):
-        # Handle isnet_is pretraining
-        # We need to access the parsed config. In before_fit, self.config is available.
-        # It is a Namespace or Dict depending on setup. LightningCLI usually provides Namespace.
         config = self.config["fit"]
         model_config = config.get("model", {})
         trainer_config = config.get("trainer", {})
@@ -443,26 +385,18 @@ class AnimeSegmentationCLI(LightningCLI):
 
         # Check if we need to train GT encoder
         if net_name in {"isnet_is", "ibisnet_is"} and not ckpt_path:
-            # We assume self.model and self.datamodule are already instantiated by CLI
-            # but we need to pass the datamodule to the aux trainer.
-            # self.datamodule might be None if datamodule_class wasn't used or something else.
-            # But we passed it to CLI, so it should be in self.datamodule.
             if self.datamodule is None:
                 raise RuntimeError("DataModule is not instantiated. Cannot train GT encoder.")
 
             assert self.model.gt_encoder is not None
 
-            # Extract GT epochs from config (added in add_arguments_to_parser)
             gt_epoch = config.get("gt_epoch", 4)
 
-            # We need to convert Namespace to dict if needed, or get attributes
-            # trainer_config might be a Namespace or Dict.
             if isinstance(trainer_config, Namespace):
                 t_cfg = vars(trainer_config)
             else:
                 t_cfg = trainer_config
 
-            # Pass compile settings to gt_encoder training
             compile_enabled = model_config.get("compile", False)
             compile_mode = model_config.get("compile_mode", None)
 
