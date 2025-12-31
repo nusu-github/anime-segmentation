@@ -215,12 +215,13 @@ class SyntheticCompositor:
     Handles foreground/background compositing with random augmentations.
     Designed to be used with HuggingFace Datasets set_transform.
     Uses lazy loading to avoid OOM with large datasets.
+    Supports both local (path-based) and Hub (embedded) datasets.
     """
 
     def __init__(
         self,
-        foreground_paths: list[str],
-        background_paths: list[str],
+        foreground_dataset: Dataset,
+        background_dataset: Dataset,
         output_size: tuple[int, int],
         seed: int | None = None,
         edge_blur_p: float = 0.2,
@@ -229,15 +230,15 @@ class SyntheticCompositor:
         """Initialize compositor.
 
         Args:
-            foreground_paths: List of paths to RGBA foreground images.
-            background_paths: List of paths to RGB background images.
+            foreground_dataset: Dataset with 'image' column (RGBA foreground images).
+            background_dataset: Dataset with 'image' column (RGB background images).
             output_size: Output image size (height, width).
             seed: Optional random seed for reproducibility.
             edge_blur_p: Probability of applying edge blur during blending.
             edge_blur_kernel_size: Kernel size for edge blur.
         """
-        self.foreground_paths = foreground_paths
-        self.background_paths = background_paths
+        self.fg_dataset = foreground_dataset
+        self.bg_dataset = background_dataset
         self.output_size = output_size
         self.rng = random.Random(seed)
         self.edge_blur_p = edge_blur_p
@@ -273,20 +274,27 @@ class SyntheticCompositor:
         """
         h, w = self.output_size
 
-        # Select and prepare random background (load on demand)
-        bg_path = self.rng.choice(self.background_paths)
-        bg_pil = PILImage.open(bg_path).convert("RGB")
+        # Select and prepare random background (load on demand from dataset)
+        bg_idx = self.rng.randrange(len(self.bg_dataset))
+        bg_pil = self.bg_dataset[bg_idx]["image"]
+        if not isinstance(bg_pil, PILImage.Image):
+            bg_pil = PILImage.open(bg_pil).convert("RGB")
+        else:
+            bg_pil = bg_pil.convert("RGB")
         bg = self._prepare_background(bg_pil, (h, w))
 
         # Initialize output
         image = bg.clone()
         label = torch.zeros(1, h, w, dtype=torch.float32)
 
-        # Composite each foreground (load on demand)
+        # Composite each foreground (load on demand from dataset)
         for fg_idx in fg_indices:
-            if fg_idx < len(self.foreground_paths):
-                fg_path = self.foreground_paths[fg_idx]
-                fg_pil = PILImage.open(fg_path).convert("RGBA")
+            if fg_idx < len(self.fg_dataset):
+                fg_pil = self.fg_dataset[fg_idx]["image"]
+                if not isinstance(fg_pil, PILImage.Image):
+                    fg_pil = PILImage.open(fg_pil).convert("RGBA")
+                else:
+                    fg_pil = fg_pil.convert("RGBA")
                 fg = self._prepare_foreground(fg_pil, (h, w))
                 image, label = self._blend(image, label, fg)
 

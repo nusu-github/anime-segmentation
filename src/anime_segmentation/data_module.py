@@ -18,7 +18,6 @@ from .hf_dataset import (
     SyntheticCompositor,
     create_interleaved_dataset,
     create_synthetic_index_dataset,
-    get_image_paths_from_column,
     load_anime_seg_dataset,
 )
 from .transforms import (
@@ -146,11 +145,11 @@ class AnimeSegDataModule(L.LightningDataModule):
         self.val_dataset: Dataset | IterableDataset | None = None
         self._use_iterable = streaming
 
-        # Store image paths for synthetic compositing (lazy loading)
-        self._train_fg_paths: list[str] | None = None
-        self._train_bg_paths: list[str] | None = None
-        self._val_fg_paths: list[str] | None = None
-        self._val_bg_paths: list[str] | None = None
+        # Store FG/BG datasets for synthetic compositing (lazy loading)
+        self._train_fg_dataset: Dataset | None = None
+        self._train_bg_dataset: Dataset | None = None
+        self._val_fg_dataset: Dataset | None = None
+        self._val_bg_dataset: Dataset | None = None
 
     def prepare_data(self) -> None:
         """Verify data directories exist. Called only on rank 0 in distributed training."""
@@ -227,20 +226,20 @@ class AnimeSegDataModule(L.LightningDataModule):
         print(f"val backgrounds: {len(val_bg_raw)}")
         print("---")
 
-        # Get FG/BG image paths for lazy loading (avoid OOM)
-        self._train_fg_paths = get_image_paths_from_column(train_fg_raw, "image")
-        self._train_bg_paths = get_image_paths_from_column(train_bg_raw, "image")
-        self._val_fg_paths = get_image_paths_from_column(val_fg_raw, "image")
-        self._val_bg_paths = get_image_paths_from_column(val_bg_raw, "image")
+        # Store FG/BG datasets for lazy loading in compositor (avoid OOM)
+        self._train_fg_dataset = train_fg_raw
+        self._train_bg_dataset = train_bg_raw
+        self._val_fg_dataset = val_fg_raw
+        self._val_bg_dataset = val_bg_raw
 
         # Create synthetic index datasets
         train_synthetic_idx = create_synthetic_index_dataset(
-            num_foregrounds=len(self._train_fg_paths),
+            num_foregrounds=len(self._train_fg_dataset),
             characters_range=self.hparams["characters_range"],
             seed=42,
         )
         val_synthetic_idx = create_synthetic_index_dataset(
-            num_foregrounds=len(self._val_fg_paths),
+            num_foregrounds=len(self._val_fg_dataset),
             characters_range=self.hparams["characters_range"],
             seed=43,
         )
@@ -252,15 +251,15 @@ class AnimeSegDataModule(L.LightningDataModule):
 
         # Create compositors for synthetic data
         train_compositor = SyntheticCompositor(
-            foreground_paths=self._train_fg_paths,
-            background_paths=self._train_bg_paths,
+            foreground_dataset=self._train_fg_dataset,
+            background_dataset=self._train_bg_dataset,
             output_size=(img_size, img_size),
             edge_blur_p=self.hparams["aug_edge_blur_p"],
             edge_blur_kernel_size=self.hparams["aug_edge_blur_kernel_size"],
         )
         val_compositor = SyntheticCompositor(
-            foreground_paths=self._val_fg_paths,
-            background_paths=self._val_bg_paths,
+            foreground_dataset=self._val_fg_dataset,
+            background_dataset=self._val_bg_dataset,
             output_size=(img_size, img_size),
             seed=43,
             edge_blur_p=0.0,  # No augmentation for validation
