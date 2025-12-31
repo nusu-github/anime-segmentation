@@ -6,12 +6,12 @@
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/skytnt/anime-remove-background)
 
-High-precision background removal tool specifically designed for anime characters. This project supports multiple state-of-the-art architectures including **ISNet**, **U2Net**, **MODNet**, and **InSPyReNet**, providing a complete pipeline for training, inference, and deployment.
+High-precision background removal tool specifically designed for anime characters. This project focuses on **IS-Net** and **IBIS-Net** (Intermediate Bilateral Integration for Segmentation Network), providing a complete pipeline for training, inference, and deployment.
 
 ## Features
 
-- **Multiple Architectures**: Support for ISNet (default), U2Net, MODNet, and InSPyReNet.
-- **High Resolution**: optimized for handling high-resolution anime artwork.
+- **IS-Net / IBIS-Net**: Focused on IS-Net with intermediate supervision and IBIS-Net (enhanced version for anime).
+- **High Resolution**: Optimized for handling high-resolution anime artwork (1024x1024).
 - **Web UI**: Integrated Gradio app for easy interactive usage.
 - **Training Pipeline**: Full training support with PyTorch Lightning, including distributed training and mixed precision.
 - **ONNX Export**: Tools to export models for efficient deployment.
@@ -66,7 +66,7 @@ python scripts/inference.py \
 
 **Options:**
 
-- `--net`: Model architecture (`isnet_is`, `u2net`, `modnet`, `inspyrnet_res`, etc.)
+- `--net`: Model architecture (`isnet_is`, `isnet`, `ibisnet_is`, `ibisnet`)
 - `--ckpt`: Path to the model checkpoint.
 - `--data`: Input directory or image path.
 - `--out`: Output directory.
@@ -96,15 +96,15 @@ Or you can use the [Hugging Face Dataset](https://huggingface.co/datasets/skytnt
 Train using the default configuration:
 
 ```bash
-python -m anime_segmentation.train --config config/config.yaml
+python -m anime_segmentation.train fit --config config/config.yaml
 ```
 
 Override parameters from CLI:
 
 ```bash
-python -m anime_segmentation.train \
+python -m anime_segmentation.train fit \
     --config config/config.yaml \
-    --model.net_name u2net \
+    --model.net_name ibisnet_is \
     --data.batch_size_train 4
 ```
 
@@ -112,7 +112,7 @@ python -m anime_segmentation.train \
 
 Check `config/config.yaml` to modify:
 
-- **Model**: Architecture, learning rate, optimizer.
+- **Model**: Architecture, learning rate, optimizer, loss weights.
 - **Data**: Batch size, image size, augmentation parameters.
 - **Trainer**: Epochs, GPUs, precision, callbacks.
 
@@ -130,15 +130,13 @@ python scripts/export.py \
 
 ## Supported Models
 
-| Model Code       | Description                                       | Recommended Size |
-| ---------------- | ------------------------------------------------- | ---------------- |
-| `isnet_is`       | ISNet with intermediate supervision (Recommended) | 1024             |
-| `isnet`          | Standard ISNet                                    | 1024             |
-| `u2net`          | U2Net (Full)                                      | 640              |
-| `u2netl`         | U2Net (Lite)                                      | 640              |
-| `modnet`         | MODNet (Matting)                                  | 512              |
-| `inspyrnet_res`  | InSPyReNet (Res2Net50)                            | 384/1024         |
-| `inspyrnet_swin` | InSPyReNet (Swin-B)                               | 384/1024         |
+| Model Code   | Description                                       | Recommended Size |
+| ------------ | ------------------------------------------------- | ---------------- |
+| `ibisnet_is` | IBIS-Net with intermediate supervision            | 1024             |
+| `ibisnet`    | IBIS-Net without intermediate supervision         | 1024             |
+| `isnet_is`   | IS-Net with intermediate supervision              | 1024             |
+| `isnet`      | Standard IS-Net                                   | 1024             |
+| `isnet_gt`   | IS-Net Ground Truth Encoder (for training only)  | 1024             |
 
 ## Dataset
 
@@ -173,15 +171,12 @@ This fork introduces significant engineering improvements and modernization over
 - **Optimization**: Added support for **TorchCompile** (`torch.compile`) and **Schedule-Free Optimizers** (`schedulefree`).
 - **Metrics**: Implemented BiRefNet-style robust evaluation metrics (S-measure, E-measure, Weighted F-measure) via `torchmetrics`.
 
-### Model Improvements
+### Model Focus
 
-- **Refactoring**: Cleaned up model implementations for better TorchScript/ONNX export compatibility.
-- **Loss Functions**: Consolidated loss logic into a flexible `HybridLoss` module supporting pixel, region, and boundary constraints.
+- **IS-Net / IBIS-Net**: Concentrated development on IS-Net and IBIS-Net (Intermediate Bilateral Integration for Segmentation Network) for anime-specific segmentation.
+- **IBIS-Net**: Enhanced IS-Net variant with OutRef (gradient-aware output refinement) and InRef (input reference fusion) modules.
 
 ## Acknowledgements
 
-- [ISNet](https://github.com/xuebinqin/DIS)
-- [U2Net](https://github.com/xuebinqin/U-2-Net)
-- [MODNet](https://github.com/ZHKKKe/MODNet)
-- [InSPyReNet](https://github.com/plemeri/InSPyReNet)
+- [ISNet (DIS)](https://github.com/xuebinqin/DIS)
 - [BiRefNet](https://github.com/ZhengPeng7/BiRefNet) (for loss and metric implementations)
