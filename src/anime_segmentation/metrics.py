@@ -536,6 +536,7 @@ class HCE(Metric):
     ) -> tuple[list[np.ndarray], float]:
         cond = cv2.dilate(cond.astype(np.uint8), disk(1))
         labels = label(mask)
+        lbls = np.unique(labels)
         indep = np.ones(lbls.shape[0])
         indep[0] = 0
 
