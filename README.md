@@ -130,13 +130,13 @@ python scripts/export.py \
 
 ## Supported Models
 
-| Model Code   | Description                                       | Recommended Size |
-| ------------ | ------------------------------------------------- | ---------------- |
-| `ibisnet_is` | IBIS-Net with intermediate supervision            | 1024             |
-| `ibisnet`    | IBIS-Net without intermediate supervision         | 1024             |
-| `isnet_is`   | IS-Net with intermediate supervision              | 1024             |
-| `isnet`      | Standard IS-Net                                   | 1024             |
-| `isnet_gt`   | IS-Net Ground Truth Encoder (for training only)  | 1024             |
+| Model Code   | Description                                     | Recommended Size |
+| ------------ | ----------------------------------------------- | ---------------- |
+| `ibisnet_is` | IBIS-Net with intermediate supervision          | 1024             |
+| `ibisnet`    | IBIS-Net without intermediate supervision       | 1024             |
+| `isnet_is`   | IS-Net with intermediate supervision            | 1024             |
+| `isnet`      | Standard IS-Net                                 | 1024             |
+| `isnet_gt`   | IS-Net Ground Truth Encoder (for training only) | 1024             |
 
 ## Dataset
 

@@ -50,9 +50,9 @@ model:
   img_size: 1024
   compile: true
   compile_mode: max-autotune  # or reduce-overhead, max-autotune
-  lr: 0.001
+  lr: 0.0001
   optimizer:
-    class_path: schedulefree.RAdamScheduleFree
+    class_path: torch.optim.Adam
     init_args:
       betas: [0.9, 0.999]
       eps: 1e-08
