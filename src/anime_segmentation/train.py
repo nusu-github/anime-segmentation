@@ -267,9 +267,7 @@ class HubUploadCallback(Callback):
                     run_as_future=True,
                 )
 
-    def on_validation_end(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
-    ) -> None:
+    def on_validation_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         """Upload on validation metric improvement."""
         if not self.upload_best:
             return
@@ -293,9 +291,7 @@ class HubUploadCallback(Callback):
             # Type assertion: callback is designed for AnimeSegmentation
             self._upload_model(trainer, pl_module, commit_msg)  # type: ignore[arg-type]
 
-    def on_train_epoch_end(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
-    ) -> None:
+    def on_train_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         """Upload every N epochs if configured."""
         if self.upload_every_n_epochs is None:
             return
@@ -618,12 +614,26 @@ def get_gt_encoder(
     datamodule: AnimeSegDataModule,
     trainer_config: dict[str, Any],
     gt_epoch: int,
+    lr: float = 1e-3,
+    optimizer: OptimizerCallable = torch.optim.Adam,
     compile: bool = False,
     compile_mode: str | None = None,
 ) -> ISNetGTEncoder:
-    """Train ground truth encoder for ISNet with intermediate supervision."""
+    """Train ground truth encoder for ISNet with intermediate supervision.
+
+    Args:
+        datamodule: Data module for training.
+        trainer_config: Trainer configuration dict.
+        gt_epoch: Number of epochs to train GT encoder.
+        lr: Learning rate. Inherited from main model by default.
+        optimizer: Optimizer factory. Inherited from main model by default.
+        compile: Whether to use torch.compile.
+        compile_mode: torch.compile mode.
+    """
     print("---start train ground truth encoder---")
-    gt_encoder = AnimeSegmentation("isnet_gt", compile=compile, compile_mode=compile_mode)
+    gt_encoder = AnimeSegmentation(
+        "isnet_gt", lr=lr, optimizer=optimizer, compile=compile, compile_mode=compile_mode
+    )
 
     # Extract relevant trainer args from config
     devices = trainer_config.get("devices", 1)
@@ -665,6 +675,12 @@ class AnimeSegmentationCLI(LightningCLI):
             default=4,
             help="Epochs for training ground truth encoder (isnet_is/ibisnet_is only)",
         )
+        parser.add_argument(
+            "--gt_lr",
+            type=float,
+            default=None,
+            help="Learning rate for GT encoder. If None, inherits from model.lr",
+        )
 
     def before_fit(self):
         config = self.config["fit"]
@@ -691,8 +707,19 @@ class AnimeSegmentationCLI(LightningCLI):
             compile_enabled = model_config.get("compile", False)
             compile_mode = model_config.get("compile_mode", None)
 
+            # Inherit lr and optimizer from main model, with optional override
+            gt_lr = config.get("gt_lr")
+            if gt_lr is None:
+                gt_lr = self.model.hparams.get("lr", 1e-3)
+
             trained_net = get_gt_encoder(
-                self.datamodule, t_cfg, gt_epoch, compile_enabled, compile_mode
+                self.datamodule,
+                t_cfg,
+                gt_epoch,
+                lr=gt_lr,
+                optimizer=self.model.optimizer_factory,
+                compile=compile_enabled,
+                compile_mode=compile_mode,
             )
             self.model.gt_encoder.load_state_dict(trained_net.state_dict())
 

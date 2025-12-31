@@ -1,5 +1,11 @@
-# lightning_config.yaml
+# lightning_config.yaml (Schedule-Free optimizer version)
 seed_everything: true
+
+# GT encoder training settings (for isnet_is/ibisnet_is only)
+# These inherit from model settings by default
+gt_epoch: 4        # Epochs for GT encoder training
+# gt_lr: null      # Learning rate (null = inherit from model.lr)
+
 trainer:
   accelerator: gpu
   devices: 1
