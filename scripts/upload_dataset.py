@@ -45,6 +45,26 @@ tags:
   - matting
   - background-removal
 pretty_name: Anime Segmentation Dataset
+configs:
+  - config_name: real
+    data_files:
+      - split: train
+        path: "real/train-*"
+      - split: validation
+        path: "real/validation-*"
+  - config_name: foreground
+    data_files:
+      - split: train
+        path: "foreground/train-*"
+      - split: validation
+        path: "foreground/validation-*"
+  - config_name: background
+    data_files:
+      - split: train
+        path: "background/train-*"
+      - split: validation
+        path: "background/validation-*"
+default_config_name: real
 ---
 
 # Anime Segmentation Dataset
