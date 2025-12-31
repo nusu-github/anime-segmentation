@@ -1,9 +1,11 @@
 from argparse import Namespace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, cast
 
 import lightning.pytorch as pl
 import torch
-from huggingface_hub import ModelCard, PyTorchModelHubMixin
+from huggingface_hub import HfApi, ModelCard, PyTorchModelHubMixin
 from lightning import Trainer
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.cli import ArgsType, LightningCLI, OptimizerCallable
@@ -134,6 +136,187 @@ class ScheduleFreeCallback(Callback):
             else:
                 new_states.append(checkpoint["optimizer_states"][i])
         checkpoint["optimizer_states"] = new_states
+
+
+class HubUploadCallback(Callback):
+    """Upload model checkpoints to Hugging Face Hub during training.
+
+    This callback uploads model weights to the Hub at configurable intervals:
+    - On validation metric improvement (best model)
+    - Every N epochs
+    - At the end of training
+
+    The model must inherit from PyTorchModelHubMixin (like AnimeSegmentation).
+
+    Example config:
+        callbacks:
+          - class_path: anime_segmentation.train.HubUploadCallback
+            init_args:
+              repo_id: "username/anime-segmentation-model"
+              upload_best: true
+              upload_every_n_epochs: 5
+              monitor: "val/Sm"
+              mode: "max"
+    """
+
+    def __init__(
+        self,
+        repo_id: str,
+        *,
+        upload_best: bool = True,
+        upload_last: bool = True,
+        upload_every_n_epochs: int | None = None,
+        monitor: str = "val/Sm",
+        mode: str = "max",
+        private: bool = False,
+        branch: str | None = None,
+        token: str | None = None,
+        blocking: bool = False,
+    ) -> None:
+        """Initialize the Hub upload callback.
+
+        Args:
+            repo_id: Hugging Face Hub repository ID (e.g., "username/model-name").
+            upload_best: Upload when monitored metric improves.
+            upload_last: Upload at the end of training.
+            upload_every_n_epochs: Upload every N epochs. None to disable.
+            monitor: Metric to monitor for best model uploads.
+            mode: "min" or "max" - whether lower or higher metric is better.
+            private: Whether to create a private repository.
+            branch: Git branch to upload to. None for main branch.
+            token: HuggingFace token. None to use cached token.
+            blocking: If False, uploads run in background without blocking training.
+        """
+        super().__init__()
+        self.repo_id = repo_id
+        self.upload_best = upload_best
+        self.upload_last = upload_last
+        self.upload_every_n_epochs = upload_every_n_epochs
+        self.monitor = monitor
+        self.mode = mode
+        self.private = private
+        self.branch = branch
+        self.token = token
+        self.blocking = blocking
+
+        self.best_score: float | None = None
+        self.api = HfApi(token=token)
+        self._repo_created = False
+
+    def _is_improvement(self, current: float) -> bool:
+        """Check if current score is an improvement over best."""
+        if self.best_score is None:
+            return True
+        if self.mode == "min":
+            return current < self.best_score
+        return current > self.best_score
+
+    def _ensure_repo_exists(self) -> None:
+        """Create the repository if it doesn't exist."""
+        if self._repo_created:
+            return
+        self.api.create_repo(
+            repo_id=self.repo_id,
+            repo_type="model",
+            private=self.private,
+            exist_ok=True,
+        )
+        self._repo_created = True
+
+    def _upload_model(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "AnimeSegmentation",
+        commit_message: str,
+    ) -> None:
+        """Upload model to Hub."""
+        # Only upload from rank 0 in distributed training
+        if trainer.global_rank != 0:
+            return
+
+        self._ensure_repo_exists()
+
+        # Save model to temporary directory and upload
+        with TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir)
+
+            # Use PyTorchModelHubMixin's save_pretrained
+            pl_module.save_pretrained(
+                save_path,
+                config={
+                    "net_name": pl_module.hparams.get("net_name"),
+                    "img_size": pl_module.hparams.get("img_size"),
+                },
+            )
+
+            # Upload folder to Hub
+            if self.blocking:
+                self.api.upload_folder(
+                    repo_id=self.repo_id,
+                    folder_path=str(save_path),
+                    commit_message=commit_message,
+                    revision=self.branch,
+                )
+            else:
+                # Non-blocking upload
+                self.api.upload_folder(
+                    repo_id=self.repo_id,
+                    folder_path=str(save_path),
+                    commit_message=commit_message,
+                    revision=self.branch,
+                    run_as_future=True,
+                )
+
+    def on_validation_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
+        """Upload on validation metric improvement."""
+        if not self.upload_best:
+            return
+
+        # Skip during sanity check
+        if trainer.sanity_checking:
+            return
+
+        # Get current metric value
+        current = trainer.callback_metrics.get(self.monitor)
+        if current is None:
+            return
+
+        current_value = float(current)
+
+        if self._is_improvement(current_value):
+            self.best_score = current_value
+            epoch = trainer.current_epoch
+            commit_msg = f"Best model (epoch {epoch}, {self.monitor}={current_value:.4f})"
+            print(f"[HubUploadCallback] Uploading best model: {commit_msg}")
+            # Type assertion: callback is designed for AnimeSegmentation
+            self._upload_model(trainer, pl_module, commit_msg)  # type: ignore[arg-type]
+
+    def on_train_epoch_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
+        """Upload every N epochs if configured."""
+        if self.upload_every_n_epochs is None:
+            return
+
+        epoch = trainer.current_epoch + 1  # 0-indexed to 1-indexed
+        if epoch % self.upload_every_n_epochs == 0:
+            commit_msg = f"Checkpoint at epoch {epoch}"
+            print(f"[HubUploadCallback] Uploading periodic checkpoint: {commit_msg}")
+            # Type assertion: callback is designed for AnimeSegmentation
+            self._upload_model(trainer, pl_module, commit_msg)  # type: ignore[arg-type]
+
+    def on_fit_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+        """Upload at the end of training."""
+        if not self.upload_last:
+            return
+
+        epoch = trainer.current_epoch
+        commit_msg = f"Final model after {epoch + 1} epochs"
+        print(f"[HubUploadCallback] Uploading final model: {commit_msg}")
+        # Type assertion: callback is designed for AnimeSegmentation
+        self._upload_model(trainer, pl_module, commit_msg)  # type: ignore[arg-type]
 
 
 class AnimeSegmentation(

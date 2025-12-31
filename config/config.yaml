@@ -35,6 +35,17 @@ trainer:
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: epoch
+    # Uncomment to enable Hub uploads during training
+    # - class_path: anime_segmentation.train.HubUploadCallback
+    #   init_args:
+    #     repo_id: "your-username/anime-segmentation-model"
+    #     upload_best: true        # Upload when val/Sm improves
+    #     upload_last: true        # Upload final model
+    #     upload_every_n_epochs: 5 # Upload every 5 epochs (null to disable)
+    #     monitor: "val/Sm"        # Metric to monitor for best model
+    #     mode: "max"              # "max" or "min"
+    #     private: false           # Create private repo
+    #     blocking: false          # Non-blocking uploads (recommended)
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
