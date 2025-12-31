@@ -132,7 +132,7 @@ class GradientOutRefBlock(nn.Module):
         image: Tensor,
         grad_gt_fullres: Tensor | None = None,
         training: bool = True,
-    ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
+    ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None, Tensor]:
         _, _c, height, width = features.shape
 
         local_logit = self.local_logit_conv(features)
@@ -158,9 +158,9 @@ class GradientOutRefBlock(nn.Module):
             mask_dilated = self.dilate_mask(mask_sigmoid)
             grad_label = grad_gt * mask_dilated
 
-            return features_attn, local_logit, grad_pred, grad_label
+            return features_attn, local_logit, grad_pred, grad_label, grad_attn
 
-        return features_attn, local_logit, None, None
+        return features_attn, local_logit, None, None, grad_attn
 
 
 class InRefFusion(nn.Module):
@@ -457,34 +457,38 @@ class IBISNet(nn.Module):
 
         grad_preds = [None, None, None]
         grad_labels = [None, None, None]
+        grad_attns = [None, None, None]
         local_logits = [None, None, None]
 
         hx3d_attn = hx3d
         if self.outref3 is not None:
-            hx3d_attn, local_logit, grad_pred, grad_label = self.outref3(
+            hx3d_attn, local_logit, grad_pred, grad_label, grad_attn = self.outref3(
                 hx3d, x, grad_gt_fullres=grad_gt_fullres, training=self.training
             )
             local_logits[2] = local_logit
             grad_preds[2] = grad_pred
             grad_labels[2] = grad_label
+            grad_attns[2] = grad_attn
 
         hx2d_attn = hx2d
         if self.outref2 is not None:
-            hx2d_attn, local_logit, grad_pred, grad_label = self.outref2(
+            hx2d_attn, local_logit, grad_pred, grad_label, grad_attn = self.outref2(
                 hx2d, x, grad_gt_fullres=grad_gt_fullres, training=self.training
             )
             local_logits[1] = local_logit
             grad_preds[1] = grad_pred
             grad_labels[1] = grad_label
+            grad_attns[1] = grad_attn
 
         hx1d_attn = hx1d
         if self.outref1 is not None:
-            hx1d_attn, local_logit, grad_pred, grad_label = self.outref1(
+            hx1d_attn, local_logit, grad_pred, grad_label, grad_attn = self.outref1(
                 hx1d, x, grad_gt_fullres=grad_gt_fullres, training=self.training
             )
             local_logits[0] = local_logit
             grad_preds[0] = grad_pred
             grad_labels[0] = grad_label
+            grad_attns[0] = grad_attn
 
         d1 = self.side1(hx1d_attn)
         d1 = _upsample_like(d1, x)
@@ -510,6 +514,7 @@ class IBISNet(nn.Module):
             "dfs_attn": [hx1d_attn, hx2d_attn, hx3d_attn, hx4d, hx5d, hx6],
             "grad_preds": grad_preds,
             "grad_labels": grad_labels,
+            "grad_attns": grad_attns,
             "local_logits": local_logits,
         }
 
@@ -525,11 +530,16 @@ class IBISNet(nn.Module):
 
         bce_loss0, bce_loss_total = self._bce_multi_scale(ds, labels)
         total_loss = self.config.lambda_bce * bce_loss_total
-        loss_dict: dict[str, float] = {"bce": bce_loss_total.detach().item()}
+        loss_dict: dict[str, float] = {
+            "loss_pix_raw": bce_loss_total.detach().item(),
+            "loss_pix_w": (self.config.lambda_bce * bce_loss_total).detach().item(),
+            "loss_pix_main_raw": bce_loss0.detach().item(),
+        }
         if fs is not None:
             fs_loss = self._feature_sync_loss(dfs_raw, fs)
             total_loss = total_loss + self.config.lambda_fs * fs_loss
-            loss_dict["fs"] = fs_loss.detach().item()
+            loss_dict["loss_fs_raw"] = fs_loss.detach().item()
+            loss_dict["loss_fs_w"] = (self.config.lambda_fs * fs_loss).detach().item()
 
         if any(
             pred is not None and label is not None
@@ -537,7 +547,8 @@ class IBISNet(nn.Module):
         ):
             grad_loss = self.grad_loss_fn(outputs["grad_preds"], outputs["grad_labels"])
             total_loss = total_loss + self.config.lambda_grad * grad_loss
-            loss_dict["grad"] = grad_loss.detach().item()
+            loss_dict["loss_grad_raw"] = grad_loss.detach().item()
+            loss_dict["loss_grad_w"] = (self.config.lambda_grad * grad_loss).detach().item()
 
         iou_loss_avg: Tensor | None = None
         if self.config.lambda_iou > 0 and self.config.iou_stages:
@@ -556,7 +567,8 @@ class IBISNet(nn.Module):
             if iou_losses:
                 iou_loss_avg = sum(iou_losses) / len(iou_losses)  # type: ignore[assignment]
                 total_loss = total_loss + self.config.lambda_iou * iou_loss_avg
-                loss_dict["iou"] = iou_loss_avg.detach().item()
+                loss_dict["loss_region_raw"] = iou_loss_avg.detach().item()
+                loss_dict["loss_region_w"] = (self.config.lambda_iou * iou_loss_avg).detach().item()
 
         ssim_loss_avg: Tensor | None = None
         if self.config.lambda_ssim > 0 and self.config.ssim_stages:
@@ -575,6 +587,10 @@ class IBISNet(nn.Module):
             if ssim_losses:
                 ssim_loss_avg = sum(ssim_losses) / len(ssim_losses)  # type: ignore[assignment]
                 total_loss = total_loss + self.config.lambda_ssim * ssim_loss_avg
-                loss_dict["ssim"] = ssim_loss_avg.detach().item()
+                loss_dict["loss_boundary_raw"] = ssim_loss_avg.detach().item()
+                loss_dict["loss_boundary_w"] = (
+                    (self.config.lambda_ssim * ssim_loss_avg).detach().item()
+                )
 
+        loss_dict["loss_total"] = total_loss.detach().item()
         return self.config.lambda_bce * bce_loss0, total_loss, loss_dict

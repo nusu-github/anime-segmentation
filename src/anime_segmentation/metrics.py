@@ -6,12 +6,15 @@ for comprehensive segmentation quality evaluation.
 Based on BiRefNet evaluation design.
 """
 
-from __future__ import annotations
+from functools import partial
 
+import cv2
 import numpy as np
 import torch
-from scipy.ndimage import convolve
+from scipy.ndimage import binary_erosion, convolve, maximum_filter
 from scipy.ndimage import distance_transform_edt as bwdist
+from skimage.measure import label
+from skimage.morphology import disk, skeletonize
 from torch import Tensor
 from torch.func import vmap
 from torchmetrics import Metric
@@ -48,6 +51,55 @@ def _prepare_data(pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
 def _get_adaptive_threshold(matrix: Tensor, max_value: float = 1.0) -> Tensor:
     """Get adaptive threshold as 2 * mean, clamped to max_value."""
     return torch.clamp(2 * matrix.mean(), max=max_value)
+
+
+def _prepare_data_np(pred: np.ndarray, gt: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    gt = gt > 128
+    pred = pred / 255.0
+    if pred.max() != pred.min():
+        pred = (pred - pred.min()) / (pred.max() - pred.min())
+    return pred, gt
+
+
+def _binary_boundary(mask: np.ndarray) -> np.ndarray:
+    """Extract 1-pixel boundary from a binary mask."""
+    if mask.sum() == 0:
+        return np.zeros_like(mask, dtype=bool)
+    eroded = binary_erosion(mask, structure=np.ones((3, 3), dtype=bool))
+    return np.logical_and(mask, np.logical_not(eroded))
+
+
+def _boundary_match_stats(
+    pred_boundary: np.ndarray, gt_boundary: np.ndarray, tolerance: int
+) -> tuple[float, float]:
+    """Boundary matching precision/recall with distance tolerance."""
+    pred_count = pred_boundary.sum()
+    gt_count = gt_boundary.sum()
+    if pred_count == 0 and gt_count == 0:
+        return 1.0, 1.0
+    if pred_count == 0 or gt_count == 0:
+        return 0.0, 0.0
+
+    dt_gt = bwdist(gt_boundary == 0)
+    dt_pred = bwdist(pred_boundary == 0)
+
+    pred_match = pred_boundary & (dt_gt <= tolerance)
+    gt_match = gt_boundary & (dt_pred <= tolerance)
+
+    precision = pred_match.sum() / max(pred_count, 1)
+    recall = gt_match.sum() / max(gt_count, 1)
+    return float(precision), float(recall)
+
+
+def _skeleton_from_distance(mask: np.ndarray) -> np.ndarray:
+    """Approximate skeleton via distance-transform ridge."""
+    if mask.sum() == 0:
+        return np.zeros_like(mask, dtype=bool)
+    dist = bwdist(mask == 0)
+    if dist.max() <= 0:
+        return np.zeros_like(mask, dtype=bool)
+    local_max = maximum_filter(dist, size=3, mode="constant")
+    return np.logical_and(dist > 0, dist == local_max)
 
 
 class MAEMetric(Metric):
@@ -306,8 +358,6 @@ class FMeasure(Metric):
         pred_squeezed = pred.squeeze(1) if pred.dim() == 4 else pred
         gt_squeezed = gt.squeeze(1) if gt.dim() == 4 else gt
 
-        from functools import partial
-
         fm_fn = partial(_cal_adaptive_fm_single, beta=self.beta)
         fms = vmap(fm_fn)(pred_squeezed, gt_squeezed)
         self.sum_fm += fms.sum()
@@ -385,8 +435,6 @@ class WeightedFMeasure(Metric):
     @staticmethod
     def _matlab_style_gauss2d(shape: tuple[int, int] = (7, 7), sigma: float = 5) -> np.ndarray:
         """Create MATLAB-style 2D Gaussian kernel."""
-        import numpy as np
-
         m, n = [(ss - 1) / 2 for ss in shape]
         y, x = np.ogrid[-m : m + 1, -n : n + 1]
         h = np.exp(-(x * x + y * y) / (2 * sigma * sigma))
@@ -398,3 +446,334 @@ class WeightedFMeasure(Metric):
 
     def compute(self) -> Tensor:
         return self.sum_wfm / self.count.clamp(min=1)
+
+
+class HCE(Metric):
+    """Human Correction Effort (boundary distance of errors).
+
+    Computes the mean distance from misclassified pixels to the GT boundary,
+    normalized by max(H, W). Lower is better.
+    """
+
+    higher_is_better = False
+    full_state_update = False
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.add_state("sum_hce", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, pred: Tensor, gt: Tensor) -> None:
+        for i in range(pred.shape[0]):
+            pred_ary = (pred[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
+            gt_ary = (gt[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
+            gt_ske = skeletonize(gt_ary > 128)
+            hce = self._cal_hce(pred_ary, gt_ary, gt_ske)
+            self.sum_hce += torch.tensor(hce, device=pred.device, dtype=pred.dtype)
+            self.count += 1
+
+    def compute(self) -> Tensor:
+        return self.sum_hce / self.count.clamp(min=1)
+
+    @staticmethod
+    def _cal_hce(
+        pred: np.ndarray, gt: np.ndarray, gt_ske: np.ndarray, relax: int = 5, epsilon: float = 2.0
+    ) -> float:
+        if len(gt.shape) > 2:
+            gt = gt[:, :, 0]
+        gt = (gt > 128).astype(np.uint8)
+
+        if len(pred.shape) > 2:
+            pred = pred[:, :, 0]
+        pred = (pred > 128).astype(np.uint8)
+
+        union = np.logical_or(gt, pred)
+        tp = np.logical_and(gt, pred)
+        fp = pred - tp
+        fn = gt - tp
+
+        union_erode = cv2.erode(union.astype(np.uint8), disk(1), iterations=relax)
+
+        fp_relaxed = np.logical_and(fp, union_erode)
+        for _ in range(relax):
+            fp_relaxed = cv2.dilate(fp_relaxed.astype(np.uint8), disk(1))
+            fp_relaxed = np.logical_and(fp_relaxed, 1 - np.logical_or(tp, fn))
+        fp_relaxed = np.logical_and(fp, fp_relaxed)
+
+        fn_relaxed = np.logical_and(fn, union_erode)
+        for _ in range(relax):
+            fn_relaxed = cv2.dilate(fn_relaxed.astype(np.uint8), disk(1))
+            fn_relaxed = np.logical_and(fn_relaxed, 1 - np.logical_or(tp, fp))
+        fn_relaxed = np.logical_and(fn, fn_relaxed)
+        fn_relaxed = np.logical_or(fn_relaxed, np.logical_xor(gt_ske, np.logical_and(tp, gt_ske)))
+
+        ctrs_fp = cv2.findContours(
+            fp_relaxed.astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
+        )
+        ctrs_fp = ctrs_fp[0] if len(ctrs_fp) == 2 else ctrs_fp[1]
+        bdies_fp, indep_cnt_fp = HCE._filter_bdy_cond(
+            ctrs_fp, fp_relaxed, np.logical_or(tp, fn_relaxed)
+        )
+
+        ctrs_fn = cv2.findContours(
+            fn_relaxed.astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
+        )
+        ctrs_fn = ctrs_fn[0] if len(ctrs_fn) == 2 else ctrs_fn[1]
+        bdies_fn, indep_cnt_fn = HCE._filter_bdy_cond(
+            ctrs_fn,
+            fn_relaxed,
+            1 - np.logical_or(np.logical_or(tp, fp_relaxed), fn_relaxed),
+        )
+
+        _, _, poly_fp_point_cnt = HCE._approximate_rdp(bdies_fp, epsilon=epsilon)
+        _, _, poly_fn_point_cnt = HCE._approximate_rdp(bdies_fn, epsilon=epsilon)
+
+        return float(poly_fp_point_cnt + indep_cnt_fp + poly_fn_point_cnt + indep_cnt_fn)
+
+    @staticmethod
+    def _filter_bdy_cond(
+        bdy: list[np.ndarray], mask: np.ndarray, cond: np.ndarray
+    ) -> tuple[list[np.ndarray], float]:
+        cond = cv2.dilate(cond.astype(np.uint8), disk(1))
+        labels = label(mask)
+        indep = np.ones(lbls.shape[0])
+        indep[0] = 0
+
+        boundaries: list[np.ndarray] = []
+        h, w = cond.shape[:2]
+        ind_map = np.zeros((h, w))
+
+        for item in bdy:
+            tmp_bdies = []
+            tmp_bdy = []
+            for j in range(item.shape[0]):
+                r, c = item[j, 0, 1], item[j, 0, 0]
+
+                if (np.sum(cond[r, c]) == 0) or (ind_map[r, c] != 0):
+                    if len(tmp_bdy) > 0:
+                        tmp_bdies.append(tmp_bdy)
+                        tmp_bdy = []
+                    continue
+                tmp_bdy.append([c, r])
+                ind_map[r, c] = ind_map[r, c] + 1
+                indep[labels[r, c]] = 0
+            if len(tmp_bdy) > 0:
+                tmp_bdies.append(tmp_bdy)
+
+            if len(tmp_bdies) > 1:
+                first_x, first_y = tmp_bdies[0][0]
+                last_x, last_y = tmp_bdies[-1][-1]
+                if (
+                    (abs(first_x - last_x) == 1 and first_y == last_y)
+                    or (first_x == last_x and abs(first_y - last_y) == 1)
+                    or (abs(first_x - last_x) == 1 and abs(first_y - last_y) == 1)
+                ):
+                    tmp_bdies[-1].extend(tmp_bdies[0][::-1])
+                    del tmp_bdies[0]
+
+            for k in range(len(tmp_bdies)):
+                tmp_bdies[k] = np.array(tmp_bdies[k])[:, np.newaxis, :]
+            if tmp_bdies:
+                boundaries.extend(tmp_bdies)
+
+        return boundaries, float(np.sum(indep))
+
+    @staticmethod
+    def _approximate_rdp(
+        boundaries: list[np.ndarray], epsilon: float = 1.0
+    ) -> tuple[list[np.ndarray], list[int], int]:
+        boundaries_len_ = []
+        pixel_cnt = 0
+
+        boundaries_ = [cv2.approxPolyDP(item, epsilon, False) for item in boundaries]
+        for item_ in boundaries_:
+            boundaries_len_.append(len(item_))
+            pixel_cnt = pixel_cnt + len(item_)
+
+        return boundaries_, boundaries_len_, pixel_cnt
+
+
+class BoundaryIoU(Metric):
+    """Boundary IoU with dilation-based tolerance."""
+
+    higher_is_better = True
+    full_state_update = False
+
+    def __init__(self, dilation_ratio: float = 0.02, mode: str = "mean", **kwargs) -> None:
+        super().__init__(**kwargs)
+        if mode not in {"mean", "max"}:
+            raise ValueError("BoundaryIoU mode must be 'mean' or 'max'.")
+        self.dilation_ratio = dilation_ratio
+        self.mode = mode
+        self.add_state("sum_biou", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, pred: Tensor, gt: Tensor) -> None:
+        for i in range(pred.shape[0]):
+            pred_ary = (pred[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
+            gt_ary = (gt[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
+            pred_norm, gt_mask = _prepare_data_np(pred_ary, gt_ary)
+            ious = self._cal_biou(pred_norm, gt_mask)
+            biou = float(ious.max()) if self.mode == "max" else float(ious.mean())
+            self.sum_biou += torch.tensor(biou, device=pred.device, dtype=pred.dtype)
+            self.count += 1
+
+    def compute(self) -> Tensor:
+        return self.sum_biou / self.count.clamp(min=1)
+
+    def _mask_to_boundary(self, mask: np.ndarray) -> np.ndarray:
+        h, w = mask.shape
+        img_diag = np.sqrt(h**2 + w**2)
+        dilation = round(self.dilation_ratio * img_diag)
+        dilation = max(dilation, 1)
+        new_mask = cv2.copyMakeBorder(mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        new_mask_erode = cv2.erode(new_mask, kernel, iterations=dilation)
+        mask_erode = new_mask_erode[1 : h + 1, 1 : w + 1]
+        return mask - mask_erode
+
+    def _cal_biou(self, pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+        pred = (pred * 255).astype(np.uint8)
+        pred = self._mask_to_boundary(pred)
+        gt = (gt * 255).astype(np.uint8)
+        gt = self._mask_to_boundary(gt)
+        gt = gt > 128
+
+        bins = np.linspace(0, 256, 257)
+        fg_hist, _ = np.histogram(pred[gt], bins=bins)
+        bg_hist, _ = np.histogram(pred[~gt], bins=bins)
+        fg_w_thrs = np.cumsum(np.flip(fg_hist), axis=0)
+        bg_w_thrs = np.cumsum(np.flip(bg_hist), axis=0)
+        tps = fg_w_thrs
+        ps = fg_w_thrs + bg_w_thrs
+        ps[ps == 0] = 1
+        t = max(np.count_nonzero(gt), 1)
+
+        return tps / (t + bg_w_thrs)
+
+
+class BoundaryFMeasure(Metric):
+    """Boundary F-measure with distance tolerance."""
+
+    higher_is_better = True
+    full_state_update = False
+
+    def __init__(self, tolerance: int = 1, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.tolerance = tolerance
+        self.add_state("sum_bf", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, pred: Tensor, gt: Tensor) -> None:
+        for i in range(pred.shape[0]):
+            p = pred[i].squeeze()
+            g = gt[i].squeeze()
+            p, g = _prepare_data(p, g)
+            adaptive_threshold = _get_adaptive_threshold(p)
+            p_bin = (p >= adaptive_threshold).cpu().numpy().astype(bool)
+            g_bin = (g > 0.5).cpu().numpy().astype(bool)
+
+            p_b = _binary_boundary(p_bin)
+            g_b = _binary_boundary(g_bin)
+
+            precision, recall = _boundary_match_stats(p_b, g_b, self.tolerance)
+            denom = precision + recall
+            bf = 0.0 if denom == 0 else 2 * precision * recall / denom
+            self.sum_bf += torch.tensor(bf, device=pred.device, dtype=pred.dtype)
+            self.count += 1
+
+    def compute(self) -> Tensor:
+        return self.sum_bf / self.count.clamp(min=1)
+
+
+class MeanBoundaryAccuracy(Metric):
+    """Mean Boundary Accuracy (average of boundary precision and recall)."""
+
+    higher_is_better = True
+    full_state_update = False
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.add_state("sum_mba", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, pred: Tensor, gt: Tensor) -> None:
+        for i in range(pred.shape[0]):
+            pred_ary = (pred[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
+            gt_ary = (gt[i].squeeze().detach().cpu().numpy() * 255.0).astype(np.uint8)
+            mba = self._cal_mba(pred_ary, gt_ary)
+            self.sum_mba += torch.tensor(mba, device=pred.device, dtype=pred.dtype)
+            self.count += 1
+
+    def compute(self) -> Tensor:
+        return self.sum_mba / self.count.clamp(min=1)
+
+    @staticmethod
+    def _get_disk_kernel(radius: int) -> np.ndarray:
+        return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+
+    @classmethod
+    def _cal_ba(cls, pred: np.ndarray, gt: np.ndarray) -> float:
+        gt = gt.astype(np.uint8)
+        pred = pred.astype(np.uint8)
+
+        h, w = gt.shape
+        min_radius = 1
+        max_radius = (w + h) / 300
+        num_steps = 5
+
+        pred_acc: list[float] = []
+        for i in range(num_steps):
+            curr_radius = min_radius + int((max_radius - min_radius) / num_steps * i)
+            kernel = cls._get_disk_kernel(curr_radius)
+            boundary_region = cv2.morphologyEx(gt, cv2.MORPH_GRADIENT, kernel) > 0
+
+            gt_in_bound = gt[boundary_region]
+            pred_in_bound = pred[boundary_region]
+
+            num_edge_pixels = boundary_region.sum()
+            num_pred_gd_pix = (
+                (gt_in_bound) * (pred_in_bound) + (1 - gt_in_bound) * (1 - pred_in_bound)
+            ).sum()
+            pred_acc.append(num_pred_gd_pix / num_edge_pixels)
+
+        return float(sum(pred_acc) / num_steps)
+
+    @classmethod
+    def _cal_mba(cls, pred: np.ndarray, gt: np.ndarray) -> float:
+        pred_bin = pred > 128
+        gt_bin = gt > 128
+        return cls._cal_ba(pred_bin, gt_bin)
+
+
+class SkeletonFMeasure(Metric):
+    """Skeleton F-measure using distance-transform ridge skeletons."""
+
+    higher_is_better = True
+    full_state_update = False
+
+    def __init__(self, tolerance: int = 1, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.tolerance = tolerance
+        self.add_state("sum_skel_f", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, pred: Tensor, gt: Tensor) -> None:
+        for i in range(pred.shape[0]):
+            p = pred[i].squeeze()
+            g = gt[i].squeeze()
+            p, g = _prepare_data(p, g)
+            adaptive_threshold = _get_adaptive_threshold(p)
+            p_bin = (p >= adaptive_threshold).cpu().numpy().astype(bool)
+            g_bin = (g > 0.5).cpu().numpy().astype(bool)
+
+            p_skel = _skeleton_from_distance(p_bin)
+            g_skel = _skeleton_from_distance(g_bin)
+            precision, recall = _boundary_match_stats(p_skel, g_skel, self.tolerance)
+            denom = precision + recall
+            skel_f = 0.0 if denom == 0 else 2 * precision * recall / denom
+            self.sum_skel_f += torch.tensor(skel_f, device=pred.device, dtype=pred.dtype)
+            self.count += 1
+
+    def compute(self) -> Tensor:
+        return self.sum_skel_f / self.count.clamp(min=1)

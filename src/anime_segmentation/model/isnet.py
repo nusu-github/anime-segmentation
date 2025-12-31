@@ -34,16 +34,25 @@ def _feature_loss(pred: torch.Tensor, target: torch.Tensor, mode: str) -> torch.
 
 def multi_loss_fusion(
     preds: list[torch.Tensor], target: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     loss0 = torch.zeros(1, dtype=target.dtype, device=target.device)
     loss = torch.zeros(1, dtype=target.dtype, device=target.device)
+    bce_total = torch.zeros(1, dtype=target.dtype, device=target.device)
 
     for i, pred in enumerate(preds):
         resized_target = _resize_target_like(target, pred)
-        loss = loss + _bce_with_logits(pred, resized_target)
+        bce = _bce_with_logits(pred, resized_target)
+        bce_total = bce_total + bce
+        loss = loss + bce
         if i == 0:
             loss0 = loss
-    return loss0, loss
+    loss_dict = {
+        "loss_pix_raw": bce_total.detach().item(),
+        "loss_pix_w": bce_total.detach().item(),
+        "loss_pix_main_raw": loss0.detach().item(),
+        "loss_total": loss.detach().item(),
+    }
+    return loss0, loss, loss_dict
 
 
 def multi_loss_fusion_kl(
@@ -52,20 +61,34 @@ def multi_loss_fusion_kl(
     dfs: list[torch.Tensor],
     fs: list[torch.Tensor],
     mode: str = "MSE",
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     loss0 = torch.zeros(1, dtype=target.dtype, device=target.device)
     loss = torch.zeros(1, dtype=target.dtype, device=target.device)
+    bce_total = torch.zeros(1, dtype=target.dtype, device=target.device)
 
     for i, pred in enumerate(preds):
         resized_target = _resize_target_like(target, pred)
-        loss = loss + _bce_with_logits(pred, resized_target)
+        bce = _bce_with_logits(pred, resized_target)
+        bce_total = bce_total + bce
+        loss = loss + bce
         if i == 0:
             loss0 = loss
 
+    fea_total = torch.zeros(1, dtype=target.dtype, device=target.device)
     for df, fs_i in zip(dfs, fs, strict=True):
-        loss = loss + _feature_loss(df, fs_i, mode)
+        fea = _feature_loss(df, fs_i, mode)
+        fea_total = fea_total + fea
+        loss = loss + fea
 
-    return loss0, loss
+    loss_dict = {
+        "loss_pix_raw": bce_total.detach().item(),
+        "loss_pix_w": bce_total.detach().item(),
+        "loss_pix_main_raw": loss0.detach().item(),
+        "loss_fs_raw": fea_total.detach().item(),
+        "loss_fs_w": fea_total.detach().item(),
+        "loss_total": loss.detach().item(),
+    }
+    return loss0, loss, loss_dict
 
 
 class RebnConv(nn.Module):
@@ -432,7 +455,7 @@ class ISNetGTEncoder(nn.Module):
     @staticmethod
     def compute_loss(
         args: tuple[list[torch.Tensor], torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
         preds, targets = args
         return multi_loss_fusion(preds, targets)
 
@@ -533,11 +556,11 @@ class ISNetDIS(nn.Module):
         dfs: list[torch.Tensor],
         fs: list[torch.Tensor],
         mode: str = "MSE",
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
         return multi_loss_fusion_kl(preds, targets, dfs, fs, mode=mode)
 
     @staticmethod
-    def compute_loss(args: tuple) -> tuple[torch.Tensor, torch.Tensor]:
+    def compute_loss(args: tuple) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
         if len(args) == 3:
             ds, _dfs, labels = args
             return multi_loss_fusion(ds, labels)

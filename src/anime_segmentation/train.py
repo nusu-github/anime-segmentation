@@ -14,7 +14,18 @@ from torch.optim import Optimizer
 from torchmetrics import MetricCollection
 
 from .data_module import AnimeSegDataModule
-from .metrics import EMeasure, FMeasure, MAEMetric, SMeasure, WeightedFMeasure
+from .metrics import (
+    HCE,
+    BoundaryFMeasure,
+    BoundaryIoU,
+    EMeasure,
+    FMeasure,
+    MAEMetric,
+    MeanBoundaryAccuracy,
+    SkeletonFMeasure,
+    SMeasure,
+    WeightedFMeasure,
+)
 from .model import IBISNet, ISNetDIS, ISNetGTEncoder
 
 NET_NAMES = [
@@ -184,7 +195,14 @@ class AnimeSegmentation(
                 "Em": EMeasure(),
                 "Fm": FMeasure(beta=0.3),
                 "wFm": WeightedFMeasure(beta=1.0),
+                "FwBeta": WeightedFMeasure(beta=1.0),
                 "MAE": MAEMetric(),
+                "HCE": HCE(),
+                "BIoU": BoundaryIoU(mode="mean"),
+                "BIoU_max": BoundaryIoU(mode="max"),
+                "BF": BoundaryFMeasure(tolerance=1),
+                "MBA": MeanBoundaryAccuracy(),
+                "SkelF": SkeletonFMeasure(tolerance=1),
             },
             prefix="val/",
         )
@@ -254,19 +272,61 @@ class AnimeSegmentation(
 
         loss_result = self._net_unwrapped.compute_loss(loss_args)
 
-        # Handle IBISNet's extended return value (includes loss_dict)
-        if len(loss_result) == 3:
-            loss0, loss, loss_dict = loss_result
-            for name, val in loss_dict.items():
-                self.log(f"train/loss_{name}", val)
-        else:
-            loss0, loss = loss_result
+        loss0, loss, loss_dict = loss_result
+        for name, val in loss_dict.items():
+            log_name = name if name.startswith("loss_") else f"loss_{name}"
+            self.log(f"train/{log_name}", val)
 
         self.log("train/loss", loss, prog_bar=True)
         self.log("train/loss_tar", loss0)
+
+        if isinstance(self._net_unwrapped, IBISNet) and self._net_unwrapped.use_outref:
+            with torch.no_grad():
+                grad_gt_gen = self._net_unwrapped.grad_label_generator
+                if grad_gt_gen is not None:
+                    grad_gt_fullres = grad_gt_gen(images)
+                    self.log("train/grad_gt_mean", grad_gt_fullres.mean())
+                    self.log("train/grad_gt_max", grad_gt_fullres.max())
+
+                if grad_labels := [
+                    grad_label
+                    for grad_label in loss_args[0]["grad_labels"]
+                    if grad_label is not None
+                ]:
+                    grad_label_mean = torch.stack([g.mean() for g in grad_labels]).mean()
+                    self.log("train/grad_label_mean", grad_label_mean)
+
+                if grad_preds := [
+                    grad_pred for grad_pred in loss_args[0]["grad_preds"] if grad_pred is not None
+                ]:
+                    grad_pred_mean = torch.stack([g.sigmoid().mean() for g in grad_preds]).mean()
+                    self.log("train/grad_pred_mean", grad_pred_mean)
+
+                if grad_attns := [
+                    grad_attn for grad_attn in loss_args[0]["grad_attns"] if grad_attn is not None
+                ]:
+                    attn_mean = torch.stack([g.mean() for g in grad_attns]).mean()
+                    attn_std = torch.stack([g.std() for g in grad_attns]).mean()
+                    self.log("train/outref_attn_mean", attn_mean)
+                    self.log("train/outref_attn_std", attn_std)
+
+                local_logits = loss_args[0]["local_logits"]
+                blocks = [
+                    self._net_unwrapped.outref1,
+                    self._net_unwrapped.outref2,
+                    self._net_unwrapped.outref3,
+                ]
+                mask_means = []
+                for logit, block in zip(local_logits, blocks, strict=False):
+                    if logit is None or block is None:
+                        continue
+                    mask_dilated = block.dilate_mask(logit.sigmoid().detach())
+                    mask_means.append(mask_dilated.mean())
+                if mask_means:
+                    self.log("train/mask_area_mean", torch.stack(mask_means).mean())
         return loss
 
-    def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
+    def validation_step(self, batch: dict[str, torch.Tensor]) -> None:
         images, labels = batch["image"], batch["label"]
 
         match self._net_unwrapped:
@@ -371,7 +431,7 @@ def get_gt_encoder(
     # Unwrap compiled module to get clean state_dict without _orig_mod prefix
     net = gt_encoder.net
     if isinstance(net, OptimizedModule):
-        net = net._orig_mod
+        net = net._orig_mod  # noqa: SLF001
     return cast("ISNetGTEncoder", net)
 
 
@@ -421,7 +481,7 @@ def cli_main(args: ArgsType = None):
         datamodule_class=AnimeSegDataModule,
         save_config_kwargs={"overwrite": True},
         trainer_defaults={
-            "callbacks": [ScheduleFreeCallback(debug=True)],
+            "callbacks": [ScheduleFreeCallback()],
         },
         args=args,
     )

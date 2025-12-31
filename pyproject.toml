@@ -12,6 +12,7 @@ dependencies = [
     "numpy",
     "opencv-python",
     "pillow",
+    "scikit-image",
     "scipy",
     "torch>=2.9.1",
     "torchmetrics>=1.8.2",
