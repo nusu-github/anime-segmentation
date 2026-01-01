@@ -9,8 +9,10 @@ Based on BiRefNet evaluation design.
 from typing import Any, Literal
 
 import cv2
+import kornia.morphology as kmorph
 import numpy as np
 import torch
+import torch.nn.functional as F
 from scipy.ndimage import convolve, distance_transform_edt
 from skimage import measure, morphology
 from torch import Tensor
@@ -785,9 +787,7 @@ class HCEMeasure(Metric):
 
 
 class MBAMeasure(Metric):
-    """Mean Boundary Accuracy Measure (torchmetrics compatible).
-    Note: This metric requires CPU processing due to OpenCV dependencies.
-    """
+    """Mean Boundary Accuracy Measure (torchmetrics compatible)."""
 
     is_differentiable = False
     higher_is_better = True
@@ -819,54 +819,63 @@ class MBAMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p_np, g_np = self._to_numpy(p.squeeze(0), g.squeeze(0))
-            ba = self._cal_ba(p_np, g_np)
+            p_t, g_t = self._to_tensor(p.squeeze(0), g.squeeze(0))
+            ba = self._cal_ba(p_t, g_t)
             self.ba_sum += ba
             self.num_samples += 1
 
-    def _to_numpy(self, pred: Tensor, gt: Tensor) -> tuple[np.ndarray, np.ndarray]:
-        """Convert to NumPy and apply threshold."""
-        pred_np = pred.detach().cpu().numpy()
-        gt_np = gt.detach().cpu().numpy()
+    def _to_tensor(self, pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
+        """Convert to binary tensors on the original device."""
         if self.normalize:
-            # [0, 255] → bool (threshold at 128)
-            pred_np = pred_np > 128
-            gt_np = gt_np > 128
+            pred_t = pred > 128
+            gt_t = gt > 128
         else:
-            # [0, 1] → bool (threshold at 0.5)
-            pred_np = pred_np > 0.5
-            if gt_np.dtype != bool:
-                gt_np = gt_np.astype(bool)
-        return pred_np, gt_np
+            pred_t = pred > 0.5
+            gt_t = gt > 0.5 if gt.dtype != torch.bool else gt
+        return pred_t, gt_t
 
-    def _get_disk_kernel(self, radius: int) -> np.ndarray:
-        """Get elliptical structuring element."""
-        return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+    def _get_disk_kernel(self, radius: int, device: torch.device, dtype: torch.dtype) -> Tensor:
+        """Create a disk-shaped structuring element for Kornia."""
+        if radius <= 0:
+            return torch.ones((1, 1), device=device, dtype=dtype)
+        coords = torch.arange(-radius, radius + 1, device=device, dtype=dtype)
+        yy, xx = torch.meshgrid(coords, coords, indexing="ij")
+        mask = (xx**2 + yy**2) <= radius**2
+        return mask.to(dtype)
 
-    def _cal_ba(self, pred: np.ndarray, gt: np.ndarray) -> float:
+    def _cal_ba(self, pred: Tensor, gt: Tensor) -> Tensor:
         """Calculate boundary accuracy."""
-        gt = gt.astype(np.uint8)
-        pred = pred.astype(np.uint8)
-        h, w = gt.shape
+        gt_f = gt.to(dtype=torch.float32)
+        pred_f = pred.to(dtype=torch.float32)
+        h, w = gt_f.shape
         min_radius = 1
         max_radius = (w + h) / 300
         num_steps = 5
-        pred_acc = []
+        pred_acc = torch.zeros(num_steps, device=gt_f.device, dtype=torch.float64)
         for i in range(num_steps):
             curr_radius = min_radius + int((max_radius - min_radius) / num_steps * i)
-            kernel = self._get_disk_kernel(curr_radius)
-            boundary_region = cv2.morphologyEx(gt, cv2.MORPH_GRADIENT, kernel) > 0
-            num_edge_pixels = boundary_region.sum()
+            kernel = self._get_disk_kernel(curr_radius, gt_f.device, gt_f.dtype)
+            boundary_region = (
+                kmorph.gradient(
+                    gt_f[None, None, ...],
+                    kernel,
+                    border_type="constant",
+                    border_value=0.0,
+                )
+                > 0
+            )
+            boundary_region = boundary_region[0, 0]
+            num_edge_pixels = int(boundary_region.sum().item())
             if num_edge_pixels == 0:
-                pred_acc.append(1.0)
+                pred_acc[i] = 1.0
                 continue
-            gt_in_bound = gt[boundary_region]
-            pred_in_bound = pred[boundary_region]
+            gt_in_bound = gt_f[boundary_region]
+            pred_in_bound = pred_f[boundary_region]
             num_pred_gd_pix = (
                 gt_in_bound * pred_in_bound + (1 - gt_in_bound) * (1 - pred_in_bound)
             ).sum()
-            pred_acc.append(num_pred_gd_pix / num_edge_pixels)
-        return sum(pred_acc) / num_steps
+            pred_acc[i] = num_pred_gd_pix / num_edge_pixels
+        return pred_acc.mean().to(torch.float64)
 
     def compute(self) -> Tensor:
         """Compute final MBA.
@@ -880,9 +889,7 @@ class MBAMeasure(Metric):
 
 
 class BIoUMeasure(Metric):
-    """Boundary IoU Measure (torchmetrics compatible).
-    Note: This metric requires CPU processing due to OpenCV dependencies.
-    """
+    """Boundary IoU Measure (torchmetrics compatible)."""
 
     is_differentiable = False
     higher_is_better = True
@@ -919,47 +926,57 @@ class BIoUMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p_np, g_np = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
-            biou = self._cal_biou(p_np, g_np)
-            self.biou_sum += torch.from_numpy(biou).to(self.biou_sum)
+            p_t, g_t = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
+            biou = self._cal_biou(p_t, g_t)
+            self.biou_sum += biou.to(self.biou_sum)
             self.num_samples += 1
 
-    def _validate_and_normalize(self, pred: Tensor, gt: Tensor) -> tuple[np.ndarray, np.ndarray]:
-        """Validate, normalize, and convert to NumPy."""
-        pred_np = pred.detach().cpu().numpy()
-        gt_np = gt.detach().cpu().numpy()
-        return _normalize_numpy(pred_np, gt_np, self.normalize)
+    def _validate_and_normalize(self, pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
+        """Validate, normalize, and convert to torch tensors."""
+        pred_t, gt_t = _normalize_torch(pred, gt, self.normalize)
+        return pred_t, gt_t
 
-    def _mask_to_boundary(self, mask: np.ndarray) -> np.ndarray:
+    def _erode_iter(self, mask: Tensor, kernel: Tensor, iterations: int) -> Tensor:
+        """Apply iterative erosion with Kornia."""
+        out = mask
+        for _ in range(iterations):
+            out = kmorph.erosion(out, kernel, border_type="constant", border_value=0.0)
+        return out
+
+    def _mask_to_boundary(self, mask: Tensor) -> Tensor:
         """Convert mask to boundary region."""
         h, w = mask.shape
-        img_diag = np.sqrt(h**2 + w**2)
-        dilation = max(round(self.dilation_ratio * img_diag), 1)
+        img_diag = torch.sqrt(torch.tensor(float(h * h + w * w), device=mask.device))
+        dilation = max(round(self.dilation_ratio * float(img_diag.item())), 1)
         # Pad to handle border-truncated boundaries
-        new_mask = cv2.copyMakeBorder(mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
-        kernel = np.ones((3, 3), dtype=np.uint8)
-        new_mask_erode = cv2.erode(new_mask, kernel, iterations=dilation)
-        mask_erode = new_mask_erode[1 : h + 1, 1 : w + 1]
-        return mask - mask_erode
+        mask_f = mask.to(dtype=torch.float32)[None, None, ...]
+        new_mask = F.pad(mask_f, (1, 1, 1, 1), mode="constant", value=0.0)
+        kernel = torch.ones((3, 3), device=mask.device, dtype=mask_f.dtype)
+        new_mask_erode = self._erode_iter(new_mask, kernel, dilation)
+        mask_erode = new_mask_erode[..., 1 : h + 1, 1 : w + 1]
+        return (mask_f - mask_erode)[0, 0]
 
-    def _cal_biou(self, pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+    def _histc_or_zeros(self, values: Tensor, bins: int) -> Tensor:
+        if values.numel() == 0:
+            return torch.zeros(bins, device=values.device, dtype=torch.float64)
+        return torch.histc(values.float(), bins=bins, min=0, max=255).to(torch.float64)
+
+    def _cal_biou(self, pred: Tensor, gt: Tensor) -> Tensor:
         """Calculate Boundary IoU curve."""
         # Convert to boundary
-        pred_boundary = (pred * 255).astype(np.uint8)
+        pred_boundary = (pred * 255).to(torch.uint8)
         pred_boundary = self._mask_to_boundary(pred_boundary)
-        gt_boundary = (gt.astype(np.float64) * 255).astype(np.uint8)
-        gt_boundary = self._mask_to_boundary(gt_boundary)
-        gt_boundary = gt_boundary > 128
+        gt_boundary = (gt.to(torch.float64) * 255).to(torch.uint8)
+        gt_boundary = self._mask_to_boundary(gt_boundary) > 128
         # Histogram-based threshold sweep
-        bins = np.linspace(0, 256, 257)
-        fg_hist, _ = np.histogram(pred_boundary[gt_boundary], bins=bins)
-        bg_hist, _ = np.histogram(pred_boundary[~gt_boundary], bins=bins)
-        fg_w_thrs = np.cumsum(np.flip(fg_hist), axis=0)
-        bg_w_thrs = np.cumsum(np.flip(bg_hist), axis=0)
+        fg_hist = self._histc_or_zeros(pred_boundary[gt_boundary], bins=256)
+        bg_hist = self._histc_or_zeros(pred_boundary[~gt_boundary], bins=256)
+        fg_w_thrs = torch.flip(fg_hist, dims=[0]).cumsum(dim=0)
+        bg_w_thrs = torch.flip(bg_hist, dims=[0]).cumsum(dim=0)
         TPs = fg_w_thrs
-        T = max(np.count_nonzero(gt_boundary), 1)
+        T = max(int(gt_boundary.sum().item()), 1)
         # IoU = TP / (T + FP) where FP = bg_w_thrs
-        return (TPs / (T + bg_w_thrs)).astype(np.float64)
+        return (TPs / (T + bg_w_thrs)).to(torch.float64)
 
     def compute(self) -> Tensor:
         """Compute final Boundary IoU.

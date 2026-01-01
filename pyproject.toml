@@ -8,6 +8,7 @@ dependencies = [
     "datasets>=4.4.2",
     "huggingface-hub>=0.22",
     "jsonargparse[signatures]>=4.45.0",
+    "kornia>=0.8.2",
     "lightning",
     "numpy",
     "opencv-python",
