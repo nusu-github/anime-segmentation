@@ -60,13 +60,8 @@ class GradientLabelGenerator(nn.Module):
         else:
             gray = image
 
-        # Kornia sobel returns (B, 2, H, W) with [dx, dy]
-        sobel_out = KF.sobel(gray)
-        gx = sobel_out[:, 0:1]
-        gy = sobel_out[:, 1:2]
-
-        # Compute gradient magnitude
-        gradient = torch.sqrt(gx**2 + gy**2 + 1e-8)
+        # Kornia sobel returns gradient magnitude directly: (B, C, H, W)
+        gradient = KF.sobel(gray)
 
         # Normalize per image
         grad_max = gradient.amax(dim=(2, 3), keepdim=True)
@@ -107,10 +102,8 @@ class GradientOutRefBlock(nn.Module):
         else:
             gray = image
 
-        sobel_out = KF.sobel(gray)
-        gx = sobel_out[:, 0:1]
-        gy = sobel_out[:, 1:2]
-        gradient = torch.sqrt(gx**2 + gy**2 + 1e-8)
+        # Kornia sobel returns gradient magnitude directly
+        gradient = KF.sobel(gray)
 
         grad_max = gradient.amax(dim=(2, 3), keepdim=True)
         return gradient / (grad_max + 1e-8)
