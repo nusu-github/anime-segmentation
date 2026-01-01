@@ -50,7 +50,7 @@ model:
   compile_mode: max-autotune
   lr: 0.0001
   optimizer:
-    class_path: torch.optim.Adam
+    class_path: schedulefree.RAdamScheduleFree
     init_args:
       betas: [0.9, 0.999]
       eps: 1e-08
