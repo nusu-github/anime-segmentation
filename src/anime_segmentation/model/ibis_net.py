@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import kornia.filters as KF
 import kornia.losses as KL
 import kornia.morphology as KM
+import kornia.color as KC
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -54,11 +55,7 @@ class GradientLabelGenerator(nn.Module):
     """Generate gradient labels using Kornia's Sobel filter."""
 
     def forward(self, image: Tensor) -> Tensor:
-        # Convert to grayscale if RGB
-        if image.shape[1] == 3:
-            gray = 0.299 * image[:, 0:1] + 0.587 * image[:, 1:2] + 0.114 * image[:, 2:3]
-        else:
-            gray = image
+        gray = KC.rgb_to_grayscale(image)
 
         # Kornia sobel returns gradient magnitude directly: (B, C, H, W)
         gradient = KF.sobel(gray)
