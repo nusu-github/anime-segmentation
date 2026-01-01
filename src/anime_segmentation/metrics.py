@@ -25,9 +25,25 @@ EPS = torch.finfo(torch.float64).eps
 def _ensure_batch(pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
     if pred.shape != gt.shape:
         raise ValueError(f"Shape mismatch: pred {pred.shape} vs gt {gt.shape}")
-    if pred.ndim == 2:
+    # Accept common shapes:
+    # - (H, W)
+    # - (B, H, W)
+    # - (B, 1, H, W)
+    if pred.ndim == 4:
+        # (B, C, H, W) -> only C==1 supported
+        if pred.shape[1] != 1:
+            raise ValueError(f"Expected channel dim C==1 for 4D input, got pred {pred.shape}")
+        pred = pred[:, 0]
+        gt = gt[:, 0]
+    elif pred.ndim == 3:
+        # (B, H, W) as-is
+        pass
+    elif pred.ndim == 2:
+        # (H, W) -> (1, H, W)
         pred = pred.unsqueeze(0)
         gt = gt.unsqueeze(0)
+    else:
+        raise ValueError(f"Unsupported input ndim={pred.ndim}; expected 2, 3, or 4")
     return pred, gt
 
 
@@ -126,7 +142,7 @@ class FMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p, g = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
+            p, g = self._validate_and_normalize(p, g)
             adaptive_fm = self._cal_adaptive_fm(p, g)
             self.adaptive_fm_sum += adaptive_fm
             precisions, recalls, changeable_fms = self._cal_pr(p, g)
@@ -230,7 +246,7 @@ class WeightedFMeasure(Metric):
         for i in range(batch_size):
             p = pred[i].detach().cpu().numpy()
             g = gt[i].detach().cpu().numpy()
-            p, g = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
+            p, g = self._validate_and_normalize(p, g)
             # All background case
             wfm = self._cal_wfm(p, g) if np.any(g) else 0.0
             self.wfm_sum += wfm
@@ -339,7 +355,7 @@ class SMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p, g = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
+            p, g = self._validate_and_normalize(p, g)
             sm = self._cal_sm(p, g)
             self.sm_sum += sm
             self.num_samples += 1
@@ -496,7 +512,7 @@ class EMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p, g = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
+            p, g = self._validate_and_normalize(p, g)
             # Cache for current sample
             gt_fg_numel = g.sum().item()
             gt_size = g.shape[0] * g.shape[1]
@@ -674,7 +690,7 @@ class HCEMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p_np, g_np = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
+            p_np, g_np = self._validate_and_normalize(p, g)
             hce = self._cal_hce(p_np, g_np)
             self.hce_sum += hce
             self.num_samples += 1
@@ -818,64 +834,62 @@ class MBAMeasure(Metric):
         pred, gt = _ensure_batch(pred, gt)
         batch_size = pred.shape[0]
         for i in range(batch_size):
-            p, g = pred[i], gt[i]
-            p_t, g_t = self._to_tensor(p.squeeze(0), g.squeeze(0))
-            ba = self._cal_ba(p_t, g_t)
+            # MBA is defined on binary masks and uses OpenCV morphology.
+            # Keep it CPU to match BiRefNet/PySODMetrics behavior.
+            p_np = pred[i].detach().cpu().numpy()
+            g_np = gt[i].detach().cpu().numpy()
+            p_bin, g_bin = self._to_numpy_binary(p_np, g_np)
+            ba = self._cal_ba_numpy(p_bin, g_bin)
             self.ba_sum += ba
             self.num_samples += 1
 
-    def _to_tensor(self, pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
-        """Convert to binary tensors on the original device."""
+    def _to_numpy_binary(self, pred: np.ndarray, gt: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Convert prediction/gt to uint8 binary arrays (0/1)."""
         if self.normalize:
-            pred_t = pred > 128
-            gt_t = gt > 128
+            pred_bin = (pred > 128).astype(np.uint8)
+            gt_bin = (gt > 128).astype(np.uint8)
         else:
-            pred_t = pred > 0.5
-            gt_t = gt > 0.5 if gt.dtype != torch.bool else gt
-        return pred_t, gt_t
+            # Expect pred in [0,1] float and gt as bool.
+            if not np.issubdtype(pred.dtype, np.floating):
+                raise TypeError(f"pred must be float when normalize=False, got {pred.dtype}")
+            if pred.min() < 0 or pred.max() > 1:
+                raise ValueError("pred values must be in [0, 1]")
+            if gt.dtype != bool:
+                raise TypeError(f"gt must be bool when normalize=False, got {gt.dtype}")
+            pred_bin = (pred > 0.5).astype(np.uint8)
+            gt_bin = gt.astype(np.uint8)
+        return pred_bin, gt_bin
 
-    def _get_disk_kernel(self, radius: int, device: torch.device, dtype: torch.dtype) -> Tensor:
-        """Create a disk-shaped structuring element for Kornia."""
-        if radius <= 0:
-            return torch.ones((1, 1), device=device, dtype=dtype)
-        coords = torch.arange(-radius, radius + 1, device=device, dtype=dtype)
-        yy, xx = torch.meshgrid(coords, coords, indexing="ij")
-        mask = (xx**2 + yy**2) <= radius**2
-        return mask.to(dtype)
+    @staticmethod
+    def _get_ellipse_kernel(radius: int) -> np.ndarray:
+        # Match BiRefNet: cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r*2+1, r*2+1))
+        return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
 
-    def _cal_ba(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Calculate boundary accuracy."""
-        gt_f = gt.to(dtype=torch.float32)
-        pred_f = pred.to(dtype=torch.float32)
-        h, w = gt_f.shape
+    def _cal_ba_numpy(self, pred: np.ndarray, gt: np.ndarray) -> Tensor:
+        """Calculate boundary accuracy (BiRefNet-compatible, CPU/OpenCV)."""
+        h, w = gt.shape
         min_radius = 1
         max_radius = (w + h) / 300
         num_steps = 5
-        pred_acc = torch.zeros(num_steps, device=gt_f.device, dtype=torch.float64)
+
+        pred_acc: list[float] = [0.0] * num_steps
         for i in range(num_steps):
             curr_radius = min_radius + int((max_radius - min_radius) / num_steps * i)
-            kernel = self._get_disk_kernel(curr_radius, gt_f.device, gt_f.dtype)
-            boundary_region = (
-                kmorph.gradient(
-                    gt_f[None, None, ...],
-                    kernel,
-                    border_type="constant",
-                    border_value=0.0,
-                )
-                > 0
-            )
-            boundary_region = boundary_region[0, 0]
-            num_edge_pixels = int(boundary_region.sum().item())
+            kernel = self._get_ellipse_kernel(curr_radius)
+            boundary_region = cv2.morphologyEx(gt, cv2.MORPH_GRADIENT, kernel) > 0
+            num_edge_pixels = int(boundary_region.sum())
             if num_edge_pixels == 0:
                 pred_acc[i] = 1.0
                 continue
-            gt_in_bound = gt_f[boundary_region]
-            pred_in_bound = pred_f[boundary_region]
+            gt_in_bound = gt[boundary_region]
+            pred_in_bound = pred[boundary_region]
             num_pred_gd_pix = (
-                gt_in_bound * pred_in_bound + (1 - gt_in_bound) * (1 - pred_in_bound)
+                (gt_in_bound * pred_in_bound) + ((1 - gt_in_bound) * (1 - pred_in_bound))
             ).sum()
-            pred_acc[i] = num_pred_gd_pix / num_edge_pixels
-        return pred_acc.mean().to(torch.float64)
+            pred_acc[i] = float(num_pred_gd_pix / num_edge_pixels)
+
+        ba = float(sum(pred_acc) / num_steps)
+        return torch.tensor(ba, dtype=torch.float64)
 
     def compute(self) -> Tensor:
         """Compute final MBA.
@@ -926,7 +940,7 @@ class BIoUMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p_t, g_t = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
+            p_t, g_t = self._validate_and_normalize(p, g)
             biou = self._cal_biou(p_t, g_t)
             self.biou_sum += biou.to(self.biou_sum)
             self.num_samples += 1

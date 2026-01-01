@@ -2,10 +2,10 @@
 
 from dataclasses import dataclass, field
 
+import kornia.color as KC
 import kornia.filters as KF
 import kornia.losses as KL
 import kornia.morphology as KM
-import kornia.color as KC
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
