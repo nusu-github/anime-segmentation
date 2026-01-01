@@ -6,7 +6,7 @@ for comprehensive segmentation quality evaluation.
 Based on BiRefNet evaluation design.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 import cv2
 import numpy as np
@@ -124,7 +124,7 @@ class FMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p, g = self._validate_and_normalize(p, g)
+            p, g = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
             adaptive_fm = self._cal_adaptive_fm(p, g)
             self.adaptive_fm_sum += adaptive_fm
             precisions, recalls, changeable_fms = self._cal_pr(p, g)
@@ -170,27 +170,15 @@ class FMeasure(Metric):
         changeable_fms = numerator / denominator
         return precisions, recalls, changeable_fms
 
-    def compute(self) -> dict[str, dict[str, Tensor]]:
+    def compute(self) -> Tensor:
         """Compute final metrics.
         Returns:
-            dict: {
-                "fm": {"adp": Tensor (scalar), "curve": Tensor[256]},
-                "pr": {"p": Tensor[256], "r": Tensor[256]}
-            }
+            Tensor: Adaptive F-measure (scalar)
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
             n = torch.tensor(1.0, dtype=torch.float64)
-        return {
-            "fm": {
-                "adp": self.adaptive_fm_sum / n,
-                "curve": self.changeable_fm_sum / n,
-            },
-            "pr": {
-                "p": self.precision_sum / n,
-                "r": self.recall_sum / n,
-            },
-        }
+        return self.adaptive_fm_sum / n
 
 
 class WeightedFMeasure(Metric):
@@ -240,7 +228,7 @@ class WeightedFMeasure(Metric):
         for i in range(batch_size):
             p = pred[i].detach().cpu().numpy()
             g = gt[i].detach().cpu().numpy()
-            p, g = self._validate_and_normalize(p, g)
+            p, g = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
             # All background case
             wfm = self._cal_wfm(p, g) if np.any(g) else 0.0
             self.wfm_sum += wfm
@@ -291,15 +279,15 @@ class WeightedFMeasure(Metric):
             h /= sumh
         return h
 
-    def compute(self) -> dict[str, Tensor]:
+    def compute(self) -> Tensor:
         """Compute final weighted F-measure.
         Returns:
-            dict: {"wfm": Tensor (scalar)}
+            Tensor: Weighted F-measure (scalar)
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
             n = torch.tensor(1.0, dtype=torch.float64)
-        return {"wfm": self.wfm_sum / n}
+        return self.wfm_sum / n
 
 
 class SMeasure(Metric):
@@ -349,7 +337,7 @@ class SMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p, g = self._validate_and_normalize(p, g)
+            p, g = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
             sm = self._cal_sm(p, g)
             self.sm_sum += sm
             self.num_samples += 1
@@ -450,15 +438,15 @@ class SMeasure(Metric):
             return torch.tensor(1.0, dtype=torch.float64, device=pred.device)
         return torch.tensor(0.0, dtype=torch.float64, device=pred.device)
 
-    def compute(self) -> dict[str, Tensor]:
+    def compute(self) -> Tensor:
         """Compute final S-measure.
         Returns:
-            dict: {"sm": Tensor (scalar)}
+            Tensor: S-measure (scalar)
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
             n = torch.tensor(1.0, dtype=torch.float64)
-        return {"sm": self.sm_sum / n}
+        return self.sm_sum / n
 
 
 class EMeasure(Metric):
@@ -506,7 +494,7 @@ class EMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p, g = self._validate_and_normalize(p, g)
+            p, g = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
             # Cache for current sample
             gt_fg_numel = g.sum().item()
             gt_size = g.shape[0] * g.shape[1]
@@ -625,20 +613,15 @@ class EMeasure(Metric):
         ]
         return parts_numel, combinations
 
-    def compute(self) -> dict[str, dict[str, Tensor]]:
+    def compute(self) -> Tensor:
         """Compute final E-measure metrics.
         Returns:
-            dict: {"em": {"adp": Tensor (scalar), "curve": Tensor[256]}}
+            Tensor: Adaptive E-measure (scalar)
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
             n = torch.tensor(1.0, dtype=torch.float64)
-        return {
-            "em": {
-                "adp": self.adaptive_em_sum / n,
-                "curve": self.changeable_em_sum / n,
-            }
-        }
+        return self.adaptive_em_sum / n
 
 
 class HCEMeasure(Metric):
@@ -689,7 +672,7 @@ class HCEMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p_np, g_np = self._validate_and_normalize(p, g)
+            p_np, g_np = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
             hce = self._cal_hce(p_np, g_np)
             self.hce_sum += hce
             self.num_samples += 1
@@ -790,15 +773,15 @@ class HCEMeasure(Metric):
             num_points += len(approx_poly)
         return num_points
 
-    def compute(self) -> dict[str, Tensor]:
+    def compute(self) -> Tensor:
         """Compute final HCE.
         Returns:
-            dict: {"hce": Tensor (scalar)}
+            Tensor: HCE (scalar)
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
             n = torch.tensor(1.0, dtype=torch.float64)
-        return {"hce": self.hce_sum / n}
+        return self.hce_sum / n
 
 
 class MBAMeasure(Metric):
@@ -836,7 +819,7 @@ class MBAMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p_np, g_np = self._to_numpy(p, g)
+            p_np, g_np = self._to_numpy(p.squeeze(0), g.squeeze(0))
             ba = self._cal_ba(p_np, g_np)
             self.ba_sum += ba
             self.num_samples += 1
@@ -885,15 +868,15 @@ class MBAMeasure(Metric):
             pred_acc.append(num_pred_gd_pix / num_edge_pixels)
         return sum(pred_acc) / num_steps
 
-    def compute(self) -> dict[str, Tensor]:
+    def compute(self) -> Tensor:
         """Compute final MBA.
         Returns:
-            dict: {"mba": Tensor (scalar)}
+            Tensor: MBA (scalar)
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
             n = torch.tensor(1.0, dtype=torch.float64)
-        return {"mba": self.ba_sum / n}
+        return self.ba_sum / n
 
 
 class BIoUMeasure(Metric):
@@ -908,6 +891,7 @@ class BIoUMeasure(Metric):
 
     def __init__(
         self,
+        mode: Literal["mean", "max"] = "mean",
         dilation_ratio: float = 0.02,
         normalize: bool = True,
         **kwargs: Any,
@@ -919,6 +903,7 @@ class BIoUMeasure(Metric):
                       If False, expect pred in [0,1] float and gt as bool.
         """
         super().__init__(**kwargs)
+        self.mode = mode
         self.dilation_ratio = dilation_ratio
         self.normalize = normalize
         self.add_state(
@@ -934,9 +919,9 @@ class BIoUMeasure(Metric):
         batch_size = pred.shape[0]
         for i in range(batch_size):
             p, g = pred[i], gt[i]
-            p_np, g_np = self._validate_and_normalize(p, g)
+            p_np, g_np = self._validate_and_normalize(p.squeeze(0), g.squeeze(0))
             biou = self._cal_biou(p_np, g_np)
-            self.biou_sum += torch.from_numpy(biou)
+            self.biou_sum += torch.from_numpy(biou).to(self.biou_sum)
             self.num_samples += 1
 
     def _validate_and_normalize(self, pred: Tensor, gt: Tensor) -> tuple[np.ndarray, np.ndarray]:
@@ -976,12 +961,18 @@ class BIoUMeasure(Metric):
         # IoU = TP / (T + FP) where FP = bg_w_thrs
         return (TPs / (T + bg_w_thrs)).astype(np.float64)
 
-    def compute(self) -> dict[str, dict[str, Tensor]]:
+    def compute(self) -> Tensor:
         """Compute final Boundary IoU.
         Returns:
-            dict: {"biou": {"curve": Tensor[256]}}
+            dict: {"biou": Tensor (scalar)}
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
             n = torch.tensor(1.0, dtype=torch.float64)
-        return {"biou": {"curve": self.biou_sum / n}}
+        if self.mode == "mean":
+            biou_curve = self.biou_sum / n
+            biou_value = biou_curve.mean()
+        else:  # self.mode == "max"
+            biou_curve = self.biou_sum / n
+            biou_value = biou_curve.max()
+        return biou_value

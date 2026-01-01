@@ -241,7 +241,7 @@ class AnimeSegDataModule(L.LightningDataModule):
         val_synthetic_idx = create_synthetic_index_dataset(
             num_foregrounds=len(self._val_fg_dataset),
             characters_range=self.hparams["characters_range"],
-            seed=43,
+            seed=42,
         )
 
         # Build transforms
@@ -261,24 +261,19 @@ class AnimeSegDataModule(L.LightningDataModule):
             foreground_dataset=self._val_fg_dataset,
             background_dataset=self._val_bg_dataset,
             output_size=(img_size, img_size),
-            seed=43,
+            seed=42,
             edge_blur_p=0.0,  # No augmentation for validation
         )
 
         # Combine datasets using HuggingFace's native interleave_datasets
-        # Note: interleave_datasets does not preserve set_transform, so we apply
-        # transforms after interleaving using a unified transform function
-        num_shards = max(self.hparams["num_workers_train"] * 4, 16)
         train_interleaved = create_interleaved_dataset(
             datasets=[train_real_raw, train_synthetic_idx],
             seed=42,
-            num_shards=num_shards,
             use_iterable=self._use_iterable,
         )
         val_interleaved = create_interleaved_dataset(
             datasets=[val_real_raw, val_synthetic_idx],
-            seed=43,
-            num_shards=num_shards,
+            seed=42,
             use_iterable=self._use_iterable,
         )
 
