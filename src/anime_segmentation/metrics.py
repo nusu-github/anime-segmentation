@@ -179,7 +179,7 @@ class FMeasure(Metric):
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
-            n = torch.tensor(1.0, dtype=torch.float64)
+            n = torch.ones_like(n)
         return self.adaptive_fm_sum / n
 
 
@@ -288,7 +288,7 @@ class WeightedFMeasure(Metric):
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
-            n = torch.tensor(1.0, dtype=torch.float64)
+            n = torch.ones_like(n)
         return self.wfm_sum / n
 
 
@@ -447,7 +447,7 @@ class SMeasure(Metric):
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
-            n = torch.tensor(1.0, dtype=torch.float64)
+            n = torch.ones_like(n)
         return self.sm_sum / n
 
 
@@ -622,7 +622,7 @@ class EMeasure(Metric):
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
-            n = torch.tensor(1.0, dtype=torch.float64)
+            n = torch.ones_like(n)
         return self.adaptive_em_sum / n
 
 
@@ -782,7 +782,7 @@ class HCEMeasure(Metric):
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
-            n = torch.tensor(1.0, dtype=torch.float64)
+            n = torch.ones_like(n)
         return self.hce_sum / n
 
 
@@ -884,7 +884,7 @@ class MBAMeasure(Metric):
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
-            n = torch.tensor(1.0, dtype=torch.float64)
+            n = torch.ones_like(n)
         return self.ba_sum / n
 
 
@@ -985,7 +985,7 @@ class BIoUMeasure(Metric):
         """
         n = self.num_samples.to(torch.float64)
         if n == 0:
-            n = torch.tensor(1.0, dtype=torch.float64)
+            n = torch.ones_like(n)
         if self.mode == "mean":
             biou_curve = self.biou_sum / n
             biou_value = biou_curve.mean()
