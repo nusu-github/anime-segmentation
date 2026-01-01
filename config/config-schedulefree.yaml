@@ -1,10 +1,8 @@
-# lightning_config.yaml (Schedule-Free optimizer version)
+# lightning_config.yaml
 seed_everything: true
 
 # GT encoder training settings (for isnet_is/ibisnet_is only)
-# These inherit from model settings by default
-gt_epoch: 4        # Epochs for GT encoder training
-# gt_lr: null      # Learning rate (null = inherit from model.lr)
+gt_epoch: 4
 
 trainer:
   accelerator: gpu
@@ -49,15 +47,15 @@ model:
   net_name: isnet_is
   img_size: 1024
   compile: true
-  compile_mode: max-autotune  # or reduce-overhead, max-autotune
-  lr: 0.001
+  compile_mode: max-autotune
+  lr: 0.0001
   optimizer:
-    class_path: schedulefree.RAdamScheduleFree
+    class_path: torch.optim.Adam
     init_args:
       betas: [0.9, 0.999]
       eps: 1e-08
       weight_decay: 0
-  # Loss weights for IS-Net/IBIS-Net
+  # Loss weights
   loss_bce: 1.0
   loss_iou: 0.5
   loss_ssim: 0.5
@@ -79,24 +77,22 @@ data:
   batch_size_val: 2
   num_workers_train: 4
   num_workers_val: 4
-  # Augmentation probabilities for synthetic images (set to 0.0 to disable)
-  aug_sharp_background_p: 0.0
-  aug_sketch_p: 0.0
-  aug_grayscale_p: 0.25
-  aug_color_blocks_p: 0.0
-  aug_text_overlay_p: 0.0
-  aug_light_p: 0.0
-  aug_resize_blur_p: 0.15
-  aug_jpeg_p: 0.15
-  aug_color_p: 0.3
-  aug_noise_p: 0.15
-  # Augmentation parameters
-  aug_rotation_degrees_synth: 25.0
-  aug_rotation_degrees_real: 15.0
-  aug_jpeg_quality_range: [50, 95]
-  aug_resize_blur_scale_range: [0.6, 0.9]
+
+  # Simplified augmentation (anime domain optimized)
+  # Geometric transforms
+  aug_rotation_degrees: 15.0
+  aug_scale_range: [0.8, 1.2]
+  aug_translate_ratio: 0.1
+  aug_hflip_p: 0.5
+
+  # Color transforms (light, preserves line art)
+  aug_grayscale_p: 0.1
+  aug_color_jitter_p: 0.2
+  aug_brightness: 0.1
+  aug_contrast: 0.1
+  aug_saturation: 0.1
+  aug_hue: 0.02
+
+  # Compositor settings
   aug_edge_blur_p: 0.2
   aug_edge_blur_kernel_size: 5
-  aug_noise_sigma: 0.05
-  aug_rescale_pad_ratio: 1.25
-  aug_text_font_size_ratio: 0.05
