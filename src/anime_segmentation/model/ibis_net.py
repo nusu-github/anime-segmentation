@@ -1,5 +1,10 @@
+"""IBIS-Net: IS-Net enhanced with BiRefNet-inspired components."""
+
 from dataclasses import dataclass, field
 
+import kornia.filters as KF
+import kornia.losses as KL
+import kornia.morphology as KM
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -8,7 +13,7 @@ from .isnet import RSU4, RSU4F, RSU5, RSU6, RSU7, _upsample_like
 
 
 @dataclass
-class ISNetEnhancedConfig:
+class IBISNetConfig:
     img_size: int = 1024
 
     # OutRef
@@ -46,37 +51,32 @@ class ISNetEnhancedConfig:
 
 
 class GradientLabelGenerator(nn.Module):
-    sobel_x: Tensor
-    sobel_y: Tensor
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.register_buffer(
-            "sobel_x",
-            torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]).float().view(1, 1, 3, 3) / 4.0,
-        )
-        self.register_buffer(
-            "sobel_y",
-            torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]).float().view(1, 1, 3, 3) / 4.0,
-        )
+    """Generate gradient labels using Kornia's Sobel filter."""
 
     def forward(self, image: Tensor) -> Tensor:
-        if image.shape[1] == 1:
-            gray = image
-        else:
+        # Convert to grayscale if RGB
+        if image.shape[1] == 3:
             gray = 0.299 * image[:, 0:1] + 0.587 * image[:, 1:2] + 0.114 * image[:, 2:3]
+        else:
+            gray = image
 
-        gx = F.conv2d(gray, self.sobel_x, padding=1)
-        gy = F.conv2d(gray, self.sobel_y, padding=1)
+        # Kornia sobel returns (B, 2, H, W) with [dx, dy]
+        sobel_out = KF.sobel(gray)
+        gx = sobel_out[:, 0:1]
+        gy = sobel_out[:, 1:2]
+
+        # Compute gradient magnitude
         gradient = torch.sqrt(gx**2 + gy**2 + 1e-8)
 
+        # Normalize per image
         grad_max = gradient.amax(dim=(2, 3), keepdim=True)
         return gradient / (grad_max + 1e-8)
 
 
 class GradientOutRefBlock(nn.Module):
-    sobel_x: Tensor
-    sobel_y: Tensor
+    """Gradient-aware output refinement block using Kornia for morphology."""
+
+    dilation_kernel: Tensor
 
     def __init__(
         self,
@@ -96,35 +96,28 @@ class GradientOutRefBlock(nn.Module):
         self.grad_pred_head = nn.Conv2d(hidden_channels, 1, 1, 1, 0)
         self.grad_attn_head = nn.Conv2d(hidden_channels, 1, 1, 1, 0)
 
-        self.register_buffer(
-            "sobel_x",
-            torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]).float().view(1, 1, 3, 3) / 4.0,
-        )
-        self.register_buffer(
-            "sobel_y",
-            torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]).float().view(1, 1, 3, 3) / 4.0,
-        )
+        # Register dilation kernel as buffer
+        kernel = torch.ones(dilation_kernel_size, dilation_kernel_size)
+        self.register_buffer("dilation_kernel", kernel)
 
     def compute_gradient_label(self, image: Tensor) -> Tensor:
-        if image.shape[1] == 1:
-            gray = image
-        else:
+        """Compute gradient using Kornia sobel."""
+        if image.shape[1] == 3:
             gray = 0.299 * image[:, 0:1] + 0.587 * image[:, 1:2] + 0.114 * image[:, 2:3]
+        else:
+            gray = image
 
-        gx = F.conv2d(gray, self.sobel_x, padding=1)
-        gy = F.conv2d(gray, self.sobel_y, padding=1)
+        sobel_out = KF.sobel(gray)
+        gx = sobel_out[:, 0:1]
+        gy = sobel_out[:, 1:2]
         gradient = torch.sqrt(gx**2 + gy**2 + 1e-8)
 
         grad_max = gradient.amax(dim=(2, 3), keepdim=True)
         return gradient / (grad_max + 1e-8)
 
     def dilate_mask(self, mask: Tensor) -> Tensor:
-        return F.max_pool2d(
-            mask,
-            kernel_size=self.dilation_kernel_size,
-            stride=1,
-            padding=self.dilation_kernel_size // 2,
-        )
+        """Dilate mask using Kornia morphology."""
+        return KM.dilation(mask, self.dilation_kernel)
 
     def forward(
         self,
@@ -191,6 +184,8 @@ class InRefFusion(nn.Module):
 
 
 class GradientLoss(nn.Module):
+    """Gradient prediction loss using SmoothL1."""
+
     def __init__(self) -> None:
         super().__init__()
         self.loss_fn = nn.SmoothL1Loss(reduction="mean")
@@ -205,6 +200,7 @@ class GradientLoss(nn.Module):
                 break
         if device is None or dtype is None:
             return torch.tensor(0.0)
+
         loss = torch.tensor(0.0, device=device, dtype=dtype)
         valid_count = 0
         for pred, label in zip(grad_preds, grad_labels, strict=False):
@@ -221,6 +217,8 @@ class GradientLoss(nn.Module):
 
 
 class IoULoss(nn.Module):
+    """Intersection over Union loss."""
+
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
         pred_sigmoid = pred.sigmoid()
         intersection = (pred_sigmoid * target).sum(dim=(2, 3))
@@ -229,56 +227,21 @@ class IoULoss(nn.Module):
         return (1 - iou).mean()
 
 
-class SSIMLoss(nn.Module):
-    window: Tensor
-
-    def __init__(self, window_size: int = 11) -> None:
-        super().__init__()
-        self.window_size = window_size
-        self.register_buffer("window", self._create_window(window_size))
-
-    def _create_window(self, window_size: int) -> Tensor:
-        def gaussian(size: int, sigma: float = 1.5) -> Tensor:
-            axis = torch.arange(size).float() - size // 2
-            gauss = torch.exp(-(axis**2) / (2 * sigma**2))
-            return gauss / gauss.sum()
-
-        _1d = gaussian(window_size).unsqueeze(1)
-        _2d = _1d @ _1d.t()
-        return _2d.unsqueeze(0).unsqueeze(0)
-
-    def forward(self, pred: Tensor, target: Tensor) -> Tensor:
-        pred_sigmoid = pred.sigmoid()
-        window = self.window.to(pred_sigmoid.device, pred_sigmoid.dtype)
-        mu1 = F.conv2d(pred_sigmoid, window, padding=self.window_size // 2)
-        mu2 = F.conv2d(target, window, padding=self.window_size // 2)
-
-        mu1_sq = mu1**2
-        mu2_sq = mu2**2
-        mu1_mu2 = mu1 * mu2
-
-        sigma1_sq = F.conv2d(pred_sigmoid**2, window, padding=self.window_size // 2) - mu1_sq
-        sigma2_sq = F.conv2d(target**2, window, padding=self.window_size // 2) - mu2_sq
-        sigma12 = F.conv2d(pred_sigmoid * target, window, padding=self.window_size // 2) - mu1_mu2
-
-        c1 = 0.01**2
-        c2 = 0.03**2
-        ssim = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / (
-            (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
-        )
-        return (1 - ssim.mean()) / 2
-
-
 class IBISNet(nn.Module):
+    """IBIS-Net: IS-Net with BiRefNet-inspired enhancements.
+
+    Uses Kornia for SSIM loss computation.
+    """
+
     def __init__(
         self,
         in_ch: int = 3,
         out_ch: int = 1,
-        config: ISNetEnhancedConfig | None = None,
+        config: IBISNetConfig | None = None,
         img_size: int | None = None,
     ) -> None:
         super().__init__()
-        self.config = config or ISNetEnhancedConfig()
+        self.config = config or IBISNetConfig()
         if img_size is not None:
             self.config.img_size = img_size
 
@@ -363,10 +326,12 @@ class IBISNet(nn.Module):
             self.inref2 = None
             self.inref3 = None
 
+        # Loss functions
         self.bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
         self.grad_loss_fn = GradientLoss()
         self.iou_loss_fn = IoULoss()
-        self.ssim_loss_fn = SSIMLoss()
+        # Kornia SSIM loss (returns 1 - SSIM, so higher is worse)
+        self.ssim_loss_fn = KL.SSIMLoss(window_size=11, reduction="mean")
         self.fea_loss = nn.MSELoss(reduction="mean")
 
     def _check_inref_size(self, image: Tensor) -> None:
@@ -455,10 +420,10 @@ class IBISNet(nn.Module):
         if self.use_outref and self.training and self.grad_label_generator is not None:
             grad_gt_fullres = self.grad_label_generator(x)
 
-        grad_preds = [None, None, None]
-        grad_labels = [None, None, None]
-        grad_attns = [None, None, None]
-        local_logits = [None, None, None]
+        grad_preds: list[Tensor | None] = [None, None, None]
+        grad_labels: list[Tensor | None] = [None, None, None]
+        grad_attns: list[Tensor | None] = [None, None, None]
+        local_logits: list[Tensor | None] = [None, None, None]
 
         hx3d_attn = hx3d
         if self.outref3 is not None:
@@ -550,9 +515,8 @@ class IBISNet(nn.Module):
             loss_dict["loss_grad_raw"] = grad_loss.detach().item()
             loss_dict["loss_grad_w"] = (self.config.lambda_grad * grad_loss).detach().item()
 
-        iou_loss_avg: Tensor | None = None
         if self.config.lambda_iou > 0 and self.config.iou_stages:
-            iou_losses = []
+            iou_losses: list[Tensor] = []
             for stage in self.config.iou_stages:
                 idx = stage - 1
                 if idx < 0 or idx >= len(ds):
@@ -565,12 +529,11 @@ class IBISNet(nn.Module):
                 )
                 iou_losses.append(self.iou_loss_fn(pred, target))
             if iou_losses:
-                iou_loss_avg = sum(iou_losses) / len(iou_losses)  # type: ignore[assignment]
+                iou_loss_avg: Tensor = sum(iou_losses) / len(iou_losses)  # type: ignore[assignment]
                 total_loss = total_loss + self.config.lambda_iou * iou_loss_avg
                 loss_dict["loss_region_raw"] = iou_loss_avg.detach().item()
                 loss_dict["loss_region_w"] = (self.config.lambda_iou * iou_loss_avg).detach().item()
 
-        ssim_loss_avg: Tensor | None = None
         if self.config.lambda_ssim > 0 and self.config.ssim_stages:
             ssim_losses = []
             for stage in self.config.ssim_stages:
@@ -583,9 +546,10 @@ class IBISNet(nn.Module):
                     if pred.shape[2:] != labels.shape[2:]
                     else labels
                 )
-                ssim_losses.append(self.ssim_loss_fn(pred, target))
+                # Kornia SSIM expects inputs in [0, 1], apply sigmoid to pred
+                ssim_losses.append(self.ssim_loss_fn(pred.sigmoid(), target))
             if ssim_losses:
-                ssim_loss_avg = sum(ssim_losses) / len(ssim_losses)  # type: ignore[assignment]
+                ssim_loss_avg: Tensor = sum(ssim_losses) / len(ssim_losses)  # type: ignore[assignment]
                 total_loss = total_loss + self.config.lambda_ssim * ssim_loss_avg
                 loss_dict["loss_boundary_raw"] = ssim_loss_avg.detach().item()
                 loss_dict["loss_boundary_w"] = (

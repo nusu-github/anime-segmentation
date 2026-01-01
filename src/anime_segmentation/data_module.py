@@ -9,7 +9,6 @@ import lightning as L
 import torch
 from datasets import Dataset, DatasetDict, IterableDataset
 from torch import Tensor
-from torch.utils.data import DataLoader
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 
@@ -20,17 +19,7 @@ from .hf_dataset import (
     create_synthetic_index_dataset,
     load_anime_seg_dataset,
 )
-from .transforms import (
-    JPEGCompression,
-    RandomColor,
-    RandomColorBlocks,
-    RandomTextOverlay,
-    RescalePad,
-    ResizeBlur,
-    SharpBackground,
-    SimulateLight,
-    SketchConvert,
-)
+from .transforms import RescalePad
 
 
 def segmentation_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Tensor]:
@@ -52,6 +41,12 @@ class AnimeSegDataModule(L.LightningDataModule):
 
     Supports loading from local directories or HuggingFace Hub.
     Uses HuggingFace Datasets for efficient data loading and streaming.
+
+    Augmentation philosophy (based on anime domain research):
+    - Background synthesis is the most critical augmentation
+    - Light geometric transforms for pose variation
+    - Minimal intensity augmentation to preserve line art quality
+    - Avoid heavy noise/blur that destroys high-frequency details
     """
 
     def __init__(
@@ -75,27 +70,20 @@ class AnimeSegDataModule(L.LightningDataModule):
         characters_range: tuple[int, int] = (0, 3),
         *,
         streaming: bool = False,
-        # Augmentation probabilities for synthetic images (set to 0.0 to disable)
-        aug_sharp_background_p: float = 0.0,
-        aug_sketch_p: float = 0.0,
-        aug_grayscale_p: float = 0.25,
-        aug_color_blocks_p: float = 0.0,
-        aug_text_overlay_p: float = 0.0,
-        aug_light_p: float = 0.0,
-        aug_resize_blur_p: float = 0.15,
-        aug_jpeg_p: float = 0.15,
-        aug_color_p: float = 0.3,
-        aug_noise_p: float = 0.15,
-        # Augmentation parameters
-        aug_rotation_degrees_synth: float = 25.0,
-        aug_rotation_degrees_real: float = 15.0,
-        aug_jpeg_quality_range: tuple[int, int] = (50, 95),
-        aug_resize_blur_scale_range: tuple[float, float] = (0.6, 0.9),
+        # Simplified augmentation parameters
+        aug_rotation_degrees: float = 15.0,
+        aug_scale_range: tuple[float, float] = (0.8, 1.2),
+        aug_translate_ratio: float = 0.1,
+        aug_hflip_p: float = 0.5,
+        aug_grayscale_p: float = 0.1,
+        aug_color_jitter_p: float = 0.2,
+        aug_brightness: float = 0.1,
+        aug_contrast: float = 0.1,
+        aug_saturation: float = 0.1,
+        aug_hue: float = 0.02,
+        # Compositor parameters
         aug_edge_blur_p: float = 0.2,
         aug_edge_blur_kernel_size: int = 5,
-        aug_noise_sigma: float = 0.05,
-        aug_rescale_pad_ratio: float = 1.25,
-        aug_text_font_size_ratio: float = 0.05,
     ) -> None:
         """Initialize the data module.
 
@@ -118,25 +106,18 @@ class AnimeSegDataModule(L.LightningDataModule):
             num_workers_val: Number of validation data loader workers.
             characters_range: Range for number of characters per synthetic sample.
             streaming: Whether to use streaming mode (Hub only).
-            aug_sharp_background_p: Probability for sharp background augmentation.
-            aug_sketch_p: Probability for sketch conversion.
-            aug_grayscale_p: Probability for grayscale conversion.
-            aug_color_blocks_p: Probability for random color blocks overlay.
-            aug_text_overlay_p: Probability for random text overlay.
-            aug_light_p: Probability for light simulation.
-            aug_resize_blur_p: Probability for resize blur.
-            aug_jpeg_p: Probability for JPEG compression.
-            aug_color_p: Probability for color augmentation.
-            aug_noise_p: Probability for Gaussian noise.
-            aug_rotation_degrees_synth: Max rotation degrees for synthetic images.
-            aug_rotation_degrees_real: Max rotation degrees for real images.
-            aug_jpeg_quality_range: JPEG quality range (min, max).
-            aug_resize_blur_scale_range: Resize blur scale range (min, max).
-            aug_edge_blur_p: Probability for edge blur in compositing.
+            aug_rotation_degrees: Max rotation degrees.
+            aug_scale_range: Scale range (min, max).
+            aug_translate_ratio: Translation ratio relative to image size.
+            aug_hflip_p: Horizontal flip probability.
+            aug_grayscale_p: Grayscale conversion probability.
+            aug_color_jitter_p: Color jitter probability.
+            aug_brightness: Brightness jitter range.
+            aug_contrast: Contrast jitter range.
+            aug_saturation: Saturation jitter range.
+            aug_hue: Hue jitter range.
+            aug_edge_blur_p: Edge blur probability in compositing.
             aug_edge_blur_kernel_size: Kernel size for edge blur.
-            aug_noise_sigma: Sigma for Gaussian noise.
-            aug_rescale_pad_ratio: Ratio for rescale padding (1.25 = img_size * 1.25).
-            aug_text_font_size_ratio: Font size ratio relative to image size.
         """
         super().__init__()
         self.save_hyperparameters()
@@ -154,7 +135,6 @@ class AnimeSegDataModule(L.LightningDataModule):
     def prepare_data(self) -> None:
         """Verify data directories exist. Called only on rank 0 in distributed training."""
         if self.hparams["dataset_name"] is not None:
-            # Hub dataset - no local verification needed
             return
 
         data_dir = self.hparams["data_dir"]
@@ -203,12 +183,10 @@ class AnimeSegDataModule(L.LightningDataModule):
             streaming=streaming,
         )
 
-        # Cast to DatasetDict (streaming mode not fully supported yet)
         real_ds = cast("DatasetDict", datasets["real"])
         fg_ds = cast("DatasetDict", datasets["foreground"])
         bg_ds = cast("DatasetDict", datasets["background"])
 
-        # Get splits as Dataset
         train_real_raw = cast("Dataset", real_ds["train"])
         val_real_raw = cast("Dataset", real_ds["validation"])
         train_fg_raw = cast("Dataset", fg_ds["train"])
@@ -216,7 +194,6 @@ class AnimeSegDataModule(L.LightningDataModule):
         train_bg_raw = cast("Dataset", bg_ds["train"])
         val_bg_raw = cast("Dataset", bg_ds["validation"])
 
-        # Log dataset sizes
         print("---")
         print(f"train real images: {len(train_real_raw)}")
         print(f"train foregrounds: {len(train_fg_raw)}")
@@ -226,13 +203,11 @@ class AnimeSegDataModule(L.LightningDataModule):
         print(f"val backgrounds: {len(val_bg_raw)}")
         print("---")
 
-        # Store FG/BG datasets for lazy loading in compositor (avoid OOM)
         self._train_fg_dataset = train_fg_raw
         self._train_bg_dataset = train_bg_raw
         self._val_fg_dataset = val_fg_raw
         self._val_bg_dataset = val_bg_raw
 
-        # Create synthetic index datasets
         train_synthetic_idx = create_synthetic_index_dataset(
             num_foregrounds=len(self._train_fg_dataset),
             characters_range=self.hparams["characters_range"],
@@ -245,11 +220,10 @@ class AnimeSegDataModule(L.LightningDataModule):
         )
 
         # Build transforms
-        real_transform = self._build_real_transform(img_size)
-        synthetic_transform = self._build_synthetic_transform(img_size)
+        train_transform = self._build_train_transform(img_size)
         val_transform = self._build_val_transform(img_size)
 
-        # Create compositors for synthetic data
+        # Create compositors
         train_compositor = SyntheticCompositor(
             foreground_dataset=self._train_fg_dataset,
             background_dataset=self._train_bg_dataset,
@@ -262,10 +236,9 @@ class AnimeSegDataModule(L.LightningDataModule):
             background_dataset=self._val_bg_dataset,
             output_size=(img_size, img_size),
             seed=42,
-            edge_blur_p=0.0,  # No augmentation for validation
+            edge_blur_p=0.0,
         )
 
-        # Combine datasets using HuggingFace's native interleave_datasets
         train_interleaved = create_interleaved_dataset(
             datasets=[train_real_raw, train_synthetic_idx],
             seed=42,
@@ -277,15 +250,13 @@ class AnimeSegDataModule(L.LightningDataModule):
             use_iterable=self._use_iterable,
         )
 
-        # Apply unified transform that dispatches based on item type
-        # Note: set_transform is only available on Dataset, not IterableDataset
         if hasattr(train_interleaved, "set_transform"):
             cast("Dataset", train_interleaved).set_transform(
                 self._make_unified_transform_fn(
                     real_base=RealImageTransform(),
-                    real_aug=real_transform,
+                    real_aug=train_transform,
                     compositor=train_compositor,
-                    synthetic_aug=synthetic_transform,
+                    synthetic_aug=train_transform,
                 )
             )
         if hasattr(val_interleaved, "set_transform"):
@@ -301,56 +272,6 @@ class AnimeSegDataModule(L.LightningDataModule):
         self.train_dataset = train_interleaved
         self.val_dataset = val_interleaved
 
-    def _make_real_transform_fn(
-        self,
-        base_transform: RealImageTransform,
-        augmentation: v2.Compose,
-    ):
-        """Create transform function for real images."""
-
-        def transform_fn(examples: dict) -> dict:
-            # Apply base transform (PIL -> tensor)
-            result = base_transform(examples)
-
-            # Apply augmentation
-            augmented_images = []
-            augmented_masks = []
-            for img, mask in zip(result["image"], result["mask"], strict=True):
-                img_tv = tv_tensors.Image(img)
-                mask_tv = tv_tensors.Mask(mask)
-                img_aug, mask_aug = augmentation(img_tv, mask_tv)
-                augmented_images.append(img_aug)
-                augmented_masks.append(mask_aug)
-
-            return {"image": augmented_images, "mask": augmented_masks}
-
-        return transform_fn
-
-    def _make_synthetic_transform_fn(
-        self,
-        compositor: SyntheticCompositor,
-        augmentation: v2.Compose,
-    ):
-        """Create transform function for synthetic images."""
-
-        def transform_fn(examples: dict) -> dict:
-            # Apply compositor
-            result = compositor(examples)
-
-            # Apply augmentation
-            augmented_images = []
-            augmented_masks = []
-            for img, mask in zip(result["image"], result["mask"], strict=True):
-                img_tv = tv_tensors.Image(img)
-                mask_tv = tv_tensors.Mask(mask)
-                img_aug, mask_aug = augmentation(img_tv, mask_tv)
-                augmented_images.append(img_aug)
-                augmented_masks.append(mask_aug)
-
-            return {"image": augmented_images, "mask": augmented_masks}
-
-        return transform_fn
-
     def _make_unified_transform_fn(
         self,
         real_base: RealImageTransform,
@@ -358,20 +279,11 @@ class AnimeSegDataModule(L.LightningDataModule):
         compositor: SyntheticCompositor,
         synthetic_aug: v2.Compose,
     ):
-        """Create unified transform function that dispatches based on item type.
-
-        This is needed because interleave_datasets does not preserve set_transform.
-        We detect item type by checking for 'fg_indices' key (synthetic) vs 'image' key (real).
-        """
+        """Create unified transform function that dispatches based on item type."""
 
         def transform_fn(examples: dict) -> dict:
-            # Handle mixed batches: process each item individually based on its type
-            # After interleave, both 'fg_indices' and 'image'/'mask' keys exist,
-            # but one set will have None values for each item
             fg_indices_batch = examples.get("fg_indices", [])
             images_batch = examples.get("image", [])
-
-            # Determine batch size
             batch_size = len(fg_indices_batch) if fg_indices_batch else len(images_batch)
 
             augmented_images = []
@@ -382,7 +294,6 @@ class AnimeSegDataModule(L.LightningDataModule):
                 is_synthetic = fg_idx is not None
 
                 if is_synthetic:
-                    # Synthetic: apply compositor then augmentation
                     single_example = {"fg_indices": [fg_idx]}
                     result = compositor(single_example)
                     img = result["image"][0]
@@ -391,7 +302,6 @@ class AnimeSegDataModule(L.LightningDataModule):
                     mask_tv = tv_tensors.Mask(mask)
                     img_aug, mask_aug = synthetic_aug(img_tv, mask_tv)
                 else:
-                    # Real: apply base transform then augmentation
                     single_example = {
                         "image": [images_batch[i]],
                         "mask": [examples["mask"][i]],
@@ -410,112 +320,79 @@ class AnimeSegDataModule(L.LightningDataModule):
 
         return transform_fn
 
-    def _build_real_transform(self, img_size: int) -> v2.Compose:
-        """Build transform pipeline for real images."""
-        rot_deg = self.hparams["aug_rotation_degrees_real"]
-        pad_size = int(img_size * self.hparams["aug_rescale_pad_ratio"])
+    def _build_train_transform(self, img_size: int) -> v2.Compose:
+        """Build simplified training transform pipeline.
+
+        Focuses on:
+        - Geometric augmentation (rotation, scale, flip)
+        - Light color jitter (preserves line art)
+        - NO heavy noise/blur that destroys anime line details
+        """
         transforms: list[v2.Transform] = [
-            RescalePad(pad_size),
-            v2.RandomRotation(degrees=(-rot_deg, rot_deg), fill=[0.0]),
-            v2.RandomCrop(img_size),
+            # Resize and pad to square
+            RescalePad(img_size),
         ]
 
-        if self.hparams["aug_color_p"] > 0:
-            transforms.append(RandomColor(p=self.hparams["aug_color_p"]))
-        if self.hparams["aug_noise_p"] > 0:
-            sigma = self.hparams["aug_noise_sigma"]
+        # Geometric augmentation
+        rot_deg = self.hparams["aug_rotation_degrees"]
+        if rot_deg > 0:
             transforms.append(
-                v2.RandomApply(
-                    [v2.GaussianNoise(mean=0.0, sigma=sigma)], p=self.hparams["aug_noise_p"]
+                v2.RandomRotation(
+                    degrees=(-rot_deg, rot_deg),
+                    interpolation=v2.InterpolationMode.BILINEAR,
+                    fill=0.0,
                 )
             )
 
-        return v2.Compose(transforms)
+        scale_min, scale_max = self.hparams["aug_scale_range"]
+        translate = self.hparams["aug_translate_ratio"]
+        if scale_min != 1.0 or scale_max != 1.0 or translate > 0:
+            transforms.append(
+                v2.RandomAffine(
+                    degrees=0,
+                    translate=(translate, translate) if translate > 0 else None,
+                    scale=(scale_min, scale_max),
+                    interpolation=v2.InterpolationMode.BILINEAR,
+                    fill=0.0,
+                )
+            )
 
-    def _build_synthetic_transform(self, img_size: int) -> v2.Compose:
-        """Build transform pipeline for synthetic images.
+        if self.hparams["aug_hflip_p"] > 0:
+            transforms.append(v2.RandomHorizontalFlip(p=self.hparams["aug_hflip_p"]))
 
-        Augmentations are conditionally added based on their probability parameters.
-        Set a probability to 0.0 to disable that augmentation.
-        """
-        transforms: list[v2.Transform] = []
-
-        # Optional augmentations (controlled by hparams)
-        if self.hparams["aug_sharp_background_p"] > 0:
-            transforms.append(SharpBackground(p=self.hparams["aug_sharp_background_p"]))
-        if self.hparams["aug_sketch_p"] > 0:
-            transforms.append(SketchConvert(p=self.hparams["aug_sketch_p"]))
+        # Light color augmentation (only on image, not mask)
         if self.hparams["aug_grayscale_p"] > 0:
             transforms.append(v2.RandomGrayscale(p=self.hparams["aug_grayscale_p"]))
-        if self.hparams["aug_color_blocks_p"] > 0:
-            transforms.append(RandomColorBlocks(p=self.hparams["aug_color_blocks_p"]))
-        if self.hparams["aug_text_overlay_p"] > 0:
-            transforms.append(
-                RandomTextOverlay(
-                    p=self.hparams["aug_text_overlay_p"],
-                    font_size_ratio=self.hparams["aug_text_font_size_ratio"],
-                )
-            )
-        if self.hparams["aug_light_p"] > 0:
-            transforms.append(SimulateLight(p=self.hparams["aug_light_p"]))
 
-        # Rotation (geometric consistency)
-        rot_deg = self.hparams["aug_rotation_degrees_synth"]
-        transforms.append(
-            v2.RandomRotation(
-                degrees=(-rot_deg, rot_deg),
-                interpolation=v2.InterpolationMode.BILINEAR,
-                fill=0.0,
-            )
-        )
-
-        # Quality degradation augmentations
-        if self.hparams["aug_resize_blur_p"] > 0:
-            transforms.append(
-                ResizeBlur(
-                    p=self.hparams["aug_resize_blur_p"],
-                    scale_range=self.hparams["aug_resize_blur_scale_range"],
-                )
-            )
-        if self.hparams["aug_jpeg_p"] > 0:
-            transforms.append(
-                JPEGCompression(
-                    p=self.hparams["aug_jpeg_p"],
-                    quality_range=self.hparams["aug_jpeg_quality_range"],
-                )
-            )
-
-        # Color augmentations (same as real images)
-        if self.hparams["aug_color_p"] > 0:
-            transforms.append(RandomColor(p=self.hparams["aug_color_p"]))
-        if self.hparams["aug_noise_p"] > 0:
-            sigma = self.hparams["aug_noise_sigma"]
+        if self.hparams["aug_color_jitter_p"] > 0:
             transforms.append(
                 v2.RandomApply(
-                    [v2.GaussianNoise(mean=0.0, sigma=sigma)], p=self.hparams["aug_noise_p"]
+                    [
+                        v2.ColorJitter(
+                            brightness=self.hparams["aug_brightness"],
+                            contrast=self.hparams["aug_contrast"],
+                            saturation=self.hparams["aug_saturation"],
+                            hue=self.hparams["aug_hue"],
+                        )
+                    ],
+                    p=self.hparams["aug_color_jitter_p"],
                 )
             )
 
         return v2.Compose(transforms)
 
     def _build_val_transform(self, img_size: int) -> v2.Compose:
-        """Build transform pipeline for validation (minimal augmentation)."""
-        return v2.Compose(
-            [
-                RescalePad(img_size),
-            ]
-        )
+        """Build validation transform (minimal, deterministic)."""
+        return v2.Compose([RescalePad(img_size)])
 
-    def train_dataloader(self) -> DataLoader:
+    def train_dataloader(self) -> "torch.utils.data.DataLoader":
         if self.train_dataset is None:
             msg = "setup() must be called before train_dataloader()"
             raise RuntimeError(msg)
 
-        # IterableDataset doesn't support shuffle in DataLoader
-        # (shuffling is handled by the dataset itself via shuffle buffer)
         is_iterable = isinstance(self.train_dataset, IterableDataset)
 
-        return DataLoader(
+        return torch.utils.data.DataLoader(
             self.train_dataset,  # type: ignore[arg-type]
             batch_size=self.hparams["batch_size_train"],
             shuffle=not is_iterable,
@@ -526,12 +403,12 @@ class AnimeSegDataModule(L.LightningDataModule):
             collate_fn=segmentation_collate_fn,
         )
 
-    def val_dataloader(self) -> DataLoader:
+    def val_dataloader(self) -> "torch.utils.data.DataLoader":
         if self.val_dataset is None:
             msg = "setup() must be called before val_dataloader()"
             raise RuntimeError(msg)
 
-        return DataLoader(
+        return torch.utils.data.DataLoader(
             self.val_dataset,  # type: ignore[arg-type]
             batch_size=self.hparams["batch_size_val"],
             shuffle=False,
@@ -546,7 +423,6 @@ class AnimeSegDataModule(L.LightningDataModule):
         train_len = 0
         val_len = 0
 
-        # IterableDataset doesn't have len(), use -1 to indicate streaming mode
         if self.train_dataset is not None:
             train_len = (
                 -1 if isinstance(self.train_dataset, IterableDataset) else len(self.train_dataset)
@@ -563,4 +439,3 @@ class AnimeSegDataModule(L.LightningDataModule):
 
     def load_state_dict(self, state_dict: dict) -> None:
         """Restore DataModule state from checkpoint."""
-        # Dataset is recreated on setup(), no state to restore
