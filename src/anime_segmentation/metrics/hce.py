@@ -201,7 +201,9 @@ class HumanCorrectionEffort(Metric):
 
         ctrs_fp = self._find_contours_cv2_format(fp_relaxed.astype(np.uint8))
         bdies_fp, indep_cnt_fp = self._filter_bdy_cond(
-            ctrs_fp, fp_relaxed, np.logical_or(tp, fn_relaxed)
+            ctrs_fp,
+            fp_relaxed,
+            np.logical_or(tp, fn_relaxed),
         )
 
         ctrs_fn = self._find_contours_cv2_format(fn_relaxed.astype(np.uint8))
@@ -304,7 +306,8 @@ class HumanCorrectionEffort(Metric):
 
     @staticmethod
     def _approximate_rdp(
-        boundaries: list[NDArray[np.int32]], epsilon: float = 1.0
+        boundaries: list[NDArray[np.int32]],
+        epsilon: float = 1.0,
     ) -> tuple[list[NDArray[np.float64]], list[int], int]:
         """Approximate boundaries using Ramer-Douglas-Peucker algorithm.
 

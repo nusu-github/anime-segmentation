@@ -93,24 +93,31 @@ Or you can use the [Hugging Face Dataset](https://huggingface.co/datasets/skytnt
 
 ### 2. Run Training
 
-Train using the default configuration:
+This repo uses a **two-stage** workflow:
+
+1) Train the ground-truth encoder (`isnet_gt`) and save it to a fixed path: `artifacts/gt_encoder.ckpt`
 
 ```bash
-python -m anime_segmentation.train fit --config config/config.yaml
+python -m anime_segmentation.train fit --config config/stage1_gt_encoder.yaml
 ```
 
-Override parameters from CLI:
+2) Train the main model (`isnet_is`) using the saved gt_encoder (always frozen)
+
+```bash
+python -m anime_segmentation.train fit --config config/stage2_isnet_is.yaml
+```
+
+Override parameters from CLI (example):
 
 ```bash
 python -m anime_segmentation.train fit \
-    --config config/config.yaml \
-    --model.net_name isnet_is \
+    --config config/stage2_isnet_is.yaml \
     --data.batch_size_train 4
 ```
 
 ### 3. Configuration
 
-Check `config/config.yaml` to modify:
+Check `config/stage1_gt_encoder.yaml` / `config/stage2_isnet_is.yaml` to modify:
 
 - **Model**: Architecture, learning rate, optimizer, loss weights.
 - **Data**: Batch size, image size, augmentation parameters.

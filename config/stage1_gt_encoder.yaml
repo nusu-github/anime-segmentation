@@ -1,0 +1,45 @@
+seed_everything: 7
+
+model:
+  net_name: isnet_gt
+  img_size: 1024
+  lr: 1e-4
+
+data:
+  data_dir: ../../dataset/anime-seg
+  fg_dir: fg
+  bg_dir: bg
+  img_dir: imgs
+  mask_dir: masks
+  fg_ext: .png
+  bg_ext: .jpg
+  img_ext: .jpg
+  mask_ext: .jpg
+  data_split: 0.95
+  img_size: 1024
+
+  batch_size_train: 2
+  batch_size_val: 2
+  workers_train: 4
+  workers_val: 4
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 4
+  benchmark: false
+  accumulate_grad_batches: 4
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 2
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val_Sm
+        mode: max
+        save_top_k: 1
+        save_last: false
+        auto_insert_metric_name: false
+        dirpath: artifacts
+        filename: gt_encoder
