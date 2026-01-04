@@ -130,17 +130,17 @@ ignore = [
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.ruff.lint.isort]
+known-first-party = ["anime_segmentation"]
+
 [tool.ruff.format]
 line-ending = "lf"
 docstring-code-format = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
 addopts = ["-v", "--tb=short"]
-filterwarnings = ["ignore::UserWarning", "ignore::DeprecationWarning"]
 
 [tool.pyright]
+include = ["src"]
 typeCheckingMode = "standard"
