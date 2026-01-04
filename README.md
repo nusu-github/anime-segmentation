@@ -6,11 +6,11 @@
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/skytnt/anime-remove-background)
 
-High-precision background removal tool specifically designed for anime characters. This project focuses on **IS-Net** and **IBIS-Net** (Intermediate Bilateral Integration for Segmentation Network), providing a complete pipeline for training, inference, and deployment.
+High-precision background removal tool specifically designed for anime characters. This project focuses on **IS-Net** with intermediate supervision, providing a complete pipeline for training, inference, and deployment.
 
 ## Features
 
-- **IS-Net / IBIS-Net**: Focused on IS-Net with intermediate supervision and IBIS-Net (enhanced version for anime).
+- **IS-Net**: Focused on IS-Net with intermediate supervision for anime segmentation.
 - **High Resolution**: Optimized for handling high-resolution anime artwork (1024x1024).
 - **Web UI**: Integrated Gradio app for easy interactive usage.
 - **Training Pipeline**: Full training support with PyTorch Lightning, including distributed training and mixed precision.
@@ -66,7 +66,7 @@ python scripts/inference.py \
 
 **Options:**
 
-- `--net`: Model architecture (`isnet_is`, `isnet`, `ibisnet_is`, `ibisnet`)
+- `--net`: Model architecture (`isnet_is`, `isnet`)
 - `--ckpt`: Path to the model checkpoint.
 - `--data`: Input directory or image path.
 - `--out`: Output directory.
@@ -104,7 +104,7 @@ Override parameters from CLI:
 ```bash
 python -m anime_segmentation.train fit \
     --config config/config.yaml \
-    --model.net_name ibisnet_is \
+    --model.net_name isnet_is \
     --data.batch_size_train 4
 ```
 
@@ -132,8 +132,6 @@ python scripts/export.py \
 
 | Model Code   | Description                                     | Recommended Size |
 | ------------ | ----------------------------------------------- | ---------------- |
-| `ibisnet_is` | IBIS-Net with intermediate supervision          | 1024             |
-| `ibisnet`    | IBIS-Net without intermediate supervision       | 1024             |
 | `isnet_is`   | IS-Net with intermediate supervision            | 1024             |
 | `isnet`      | Standard IS-Net                                 | 1024             |
 | `isnet_gt`   | IS-Net Ground Truth Encoder (for training only) | 1024             |
@@ -173,8 +171,7 @@ This fork introduces significant engineering improvements and modernization over
 
 ### Model Focus
 
-- **IS-Net / IBIS-Net**: Concentrated development on IS-Net and IBIS-Net (Intermediate Bilateral Integration for Segmentation Network) for anime-specific segmentation.
-- **IBIS-Net**: Enhanced IS-Net variant with OutRef (gradient-aware output refinement) and InRef (input reference fusion) modules.
+- **IS-Net Focus**: Concentrated development on IS-Net with intermediate supervision for anime-specific segmentation.
 
 ## Acknowledgements
 

@@ -44,7 +44,8 @@ state = ModelState()
 
 def rmbg_fn(img, img_size, white_bg_checkbox, only_matted_checkbox):
     if not state.is_loaded or state.model is None:
-        raise gr.Error("Please load the model first!")
+        msg = "Please load the model first!"
+        raise gr.Error(msg)
     try:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mask = get_mask(state.model, img, False, int(img_size))
@@ -65,7 +66,8 @@ def rmbg_fn(img, img_size, white_bg_checkbox, only_matted_checkbox):
         mask = mask.repeat(3, axis=2)
         return mask, img
     except Exception as e:
-        raise gr.Error(f"Error processing image: {e!s}") from e
+        msg = f"Error processing image: {e!s}"
+        raise gr.Error(msg) from e
 
 
 def get_available_devices() -> list[str]:
@@ -84,7 +86,8 @@ def auto_load_model():
         project_root = Path(__file__).parent.parent
         model_paths = sorted(project_root.rglob("*.ckpt"))
         if not model_paths:
-            raise gr.Error("No model files found")
+            msg = "No model files found"
+            raise gr.Error(msg)
 
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         return load_model(str(model_paths[0]), "isnet_is", 1024, device)
@@ -133,7 +136,8 @@ def get_model_path():
         model_paths = [str(p) for p in model_paths]
         return gr.Dropdown(choices=model_paths, value=model_paths[0])
 
-    raise gr.Error("No model files found")
+    msg = "No model files found"
+    raise gr.Error(msg)
 
 
 def batch_inference(
@@ -143,11 +147,13 @@ def batch_inference(
     output_path = Path(output_dir)
 
     if not input_path.exists():
-        raise gr.Error("Input directory does not exist")
+        msg = "Input directory does not exist"
+        raise gr.Error(msg)
 
     img_paths = sorted(input_path.glob("*.*"))
     if not img_paths:
-        raise gr.Error("No image files found")
+        msg = "No image files found"
+        raise gr.Error(msg)
 
     progress = gr.Progress(track_tqdm=True)
     total_images = len(img_paths)
@@ -158,7 +164,8 @@ def batch_inference(
         for i, path in enumerate(progress.tqdm(img_paths, desc="Processing images")):
             img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
             if img is None:
-                raise gr.Error(f"Failed to read image: {path}")
+                msg = f"Failed to read image: {path}"
+                raise gr.Error(msg)
 
             # no need mask for batch processing
             _, processed_img = rmbg_fn(img, img_size, white_bg_checkbox, only_matted_checkbox)
@@ -166,7 +173,8 @@ def batch_inference(
             cv2.imwrite(str(output_path / f"{i:06d}.png"), processed_img)
 
     except Exception as e:
-        raise gr.Error(f"Processing error: {e!s}") from e
+        msg = f"Processing error: {e!s}"
+        raise gr.Error(msg) from e
 
     return f"Batch processing completed: {total_images} images processed"
 

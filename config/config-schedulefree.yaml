@@ -1,7 +1,7 @@
 # lightning_config.yaml
 seed_everything: true
 
-# GT encoder training settings (for isnet_is/ibisnet_is only)
+# GT encoder training settings (for isnet_is only)
 gt_epoch: 4
 
 trainer:

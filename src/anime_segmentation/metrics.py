@@ -24,7 +24,8 @@ EPS = torch.finfo(torch.float64).eps
 
 def _ensure_batch(pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
     if pred.shape != gt.shape:
-        raise ValueError(f"Shape mismatch: pred {pred.shape} vs gt {gt.shape}")
+        msg = f"Shape mismatch: pred {pred.shape} vs gt {gt.shape}"
+        raise ValueError(msg)
     # Accept common shapes:
     # - (H, W)
     # - (B, H, W)
@@ -32,7 +33,8 @@ def _ensure_batch(pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
     if pred.ndim == 4:
         # (B, C, H, W) -> only C==1 supported
         if pred.shape[1] != 1:
-            raise ValueError(f"Expected channel dim C==1 for 4D input, got pred {pred.shape}")
+            msg = f"Expected channel dim C==1 for 4D input, got pred {pred.shape}"
+            raise ValueError(msg)
         pred = pred[:, 0]
         gt = gt[:, 0]
     elif pred.ndim == 3:
@@ -43,7 +45,8 @@ def _ensure_batch(pred: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
         pred = pred.unsqueeze(0)
         gt = gt.unsqueeze(0)
     else:
-        raise ValueError(f"Unsupported input ndim={pred.ndim}; expected 2, 3, or 4")
+        msg = f"Unsupported input ndim={pred.ndim}; expected 2, 3, or 4"
+        raise ValueError(msg)
     return pred, gt
 
 
@@ -55,11 +58,14 @@ def _normalize_torch(pred: Tensor, gt: Tensor, normalize: bool) -> tuple[Tensor,
             pred = (pred - pred.min()) / (pred.max() - pred.min())
     else:
         if not pred.is_floating_point():
-            raise TypeError(f"pred must be float when normalize=False, got {pred.dtype}")
+            msg = f"pred must be float when normalize=False, got {pred.dtype}"
+            raise TypeError(msg)
         if pred.min() < 0 or pred.max() > 1:
-            raise ValueError("pred values must be in [0, 1]")
+            msg = "pred values must be in [0, 1]"
+            raise ValueError(msg)
         if gt.dtype != torch.bool:
-            raise TypeError(f"gt must be bool when normalize=False, got {gt.dtype}")
+            msg = f"gt must be bool when normalize=False, got {gt.dtype}"
+            raise TypeError(msg)
         pred = pred.to(torch.float64)
     return pred, gt.bool()
 
@@ -74,11 +80,14 @@ def _normalize_numpy(
             pred = (pred - pred.min()) / (pred.max() - pred.min())
     else:
         if not np.issubdtype(pred.dtype, np.floating):
-            raise TypeError(f"pred must be float when normalize=False, got {pred.dtype}")
+            msg = f"pred must be float when normalize=False, got {pred.dtype}"
+            raise TypeError(msg)
         if pred.min() < 0 or pred.max() > 1:
-            raise ValueError("pred values must be in [0, 1]")
+            msg = "pred values must be in [0, 1]"
+            raise ValueError(msg)
         if gt.dtype != bool:
-            raise TypeError(f"gt must be bool when normalize=False, got {gt.dtype}")
+            msg = f"gt must be bool when normalize=False, got {gt.dtype}"
+            raise TypeError(msg)
         pred = pred.astype(np.float64)
     return pred.astype(np.float64), gt.astype(bool)
 
@@ -102,11 +111,10 @@ class FMeasure(Metric):
         normalize: bool = True,
         **kwargs: Any,
     ) -> None:
-        """
-        Args:
-            beta: Weight of precision in F-measure calculation.
-            normalize: If True, normalize pred from [0,255] and gt from uint8.
-                      If False, expect pred in [0,1] float and gt as bool.
+        """Args:
+        beta: Weight of precision in F-measure calculation.
+        normalize: If True, normalize pred from [0,255] and gt from uint8.
+                  If False, expect pred in [0,1] float and gt as bool.
         """
         super().__init__(**kwargs)
         self.beta = beta
@@ -190,6 +198,7 @@ class FMeasure(Metric):
 
     def compute(self) -> Tensor:
         """Compute final metrics.
+
         Returns:
             Tensor: Adaptive F-measure (scalar)
         """
@@ -219,11 +228,10 @@ class WeightedFMeasure(Metric):
         normalize: bool = True,
         **kwargs: Any,
     ) -> None:
-        """
-        Args:
-            beta: Weight for balancing precision and recall. Defaults to 1.0 (F1-score).
-            normalize: If True, normalize pred from [0,255] and gt from uint8.
-                      If False, expect pred in [0,1] float and gt as bool.
+        """Args:
+        beta: Weight for balancing precision and recall. Defaults to 1.0 (F1-score).
+        normalize: If True, normalize pred from [0,255] and gt from uint8.
+                  If False, expect pred in [0,1] float and gt as bool.
         """
         super().__init__(**kwargs)
         self.beta = beta
@@ -237,6 +245,7 @@ class WeightedFMeasure(Metric):
 
     def update(self, pred: Tensor, gt: Tensor) -> None:
         """Update state with predictions and ground truth.
+
         Args:
             pred: Prediction tensor, shape (H, W) or (B, H, W).
             gt: Ground truth tensor, shape (H, W) or (B, H, W).
@@ -299,6 +308,7 @@ class WeightedFMeasure(Metric):
 
     def compute(self) -> Tensor:
         """Compute final weighted F-measure.
+
         Returns:
             Tensor: Weighted F-measure (scalar)
         """
@@ -327,13 +337,12 @@ class SMeasure(Metric):
         normalize: bool = True,
         **kwargs: Any,
     ) -> None:
-        """
-        Args:
-            alpha: Weight for balancing object and region scores.
-                   Higher values give more weight to object-level similarity.
-                   Valid range: [0, 1]. Defaults to 0.5.
-            normalize: If True, normalize pred from [0,255] and gt from uint8.
-                      If False, expect pred in [0,1] float and gt as bool.
+        """Args:
+        alpha: Weight for balancing object and region scores.
+               Higher values give more weight to object-level similarity.
+               Valid range: [0, 1]. Defaults to 0.5.
+        normalize: If True, normalize pred from [0,255] and gt from uint8.
+                  If False, expect pred in [0,1] float and gt as bool.
         """
         super().__init__(**kwargs)
         self.alpha = alpha
@@ -347,6 +356,7 @@ class SMeasure(Metric):
 
     def update(self, pred: Tensor, gt: Tensor) -> None:
         """Update state with predictions and ground truth.
+
         Args:
             pred: Prediction tensor, shape (H, W) or (B, H, W).
             gt: Ground truth tensor, shape (H, W) or (B, H, W).
@@ -458,6 +468,7 @@ class SMeasure(Metric):
 
     def compute(self) -> Tensor:
         """Compute final S-measure.
+
         Returns:
             Tensor: S-measure (scalar)
         """
@@ -485,10 +496,9 @@ class EMeasure(Metric):
         normalize: bool = True,
         **kwargs: Any,
     ) -> None:
-        """
-        Args:
-            normalize: If True, normalize pred from [0,255] and gt from uint8.
-                      If False, expect pred in [0,1] float and gt as bool.
+        """Args:
+        normalize: If True, normalize pred from [0,255] and gt from uint8.
+                  If False, expect pred in [0,1] float and gt as bool.
         """
         super().__init__(**kwargs)
         self.normalize = normalize
@@ -504,6 +514,7 @@ class EMeasure(Metric):
 
     def update(self, pred: Tensor, gt: Tensor) -> None:
         """Update state with predictions and ground truth.
+
         Args:
             pred: Prediction tensor, shape (H, W) or (B, H, W).
             gt: Ground truth tensor, shape (H, W) or (B, H, W).
@@ -633,6 +644,7 @@ class EMeasure(Metric):
 
     def compute(self) -> Tensor:
         """Compute final E-measure metrics.
+
         Returns:
             Tensor: Adaptive E-measure (scalar)
         """
@@ -661,12 +673,11 @@ class HCEMeasure(Metric):
         normalize: bool = True,
         **kwargs: Any,
     ) -> None:
-        """
-        Args:
-            relax: Number of morphological relaxation iterations. Defaults to 5.
-            epsilon: RDP approximation tolerance for polygon simplification. Defaults to 2.0.
-            normalize: If True, normalize pred from [0,255] and gt from uint8.
-                      If False, expect pred in [0,1] float and gt as bool.
+        """Args:
+        relax: Number of morphological relaxation iterations. Defaults to 5.
+        epsilon: RDP approximation tolerance for polygon simplification. Defaults to 2.0.
+        normalize: If True, normalize pred from [0,255] and gt from uint8.
+                  If False, expect pred in [0,1] float and gt as bool.
         """
         super().__init__(**kwargs)
         self.relax = relax
@@ -682,6 +693,7 @@ class HCEMeasure(Metric):
 
     def update(self, pred: Tensor, gt: Tensor) -> None:
         """Update state with predictions and ground truth.
+
         Args:
             pred: Prediction tensor, shape (H, W) or (B, H, W).
             gt: Ground truth tensor, shape (H, W) or (B, H, W).
@@ -793,6 +805,7 @@ class HCEMeasure(Metric):
 
     def compute(self) -> Tensor:
         """Compute final HCE.
+
         Returns:
             Tensor: HCE (scalar)
         """
@@ -815,10 +828,9 @@ class MBAMeasure(Metric):
         normalize: bool = True,
         **kwargs: Any,
     ) -> None:
-        """
-        Args:
-            normalize: If True, normalize pred from [0,255] and gt from uint8.
-                      If False, expect pred in [0,1] float and gt as bool.
+        """Args:
+        normalize: If True, normalize pred from [0,255] and gt from uint8.
+                  If False, expect pred in [0,1] float and gt as bool.
         """
         super().__init__(**kwargs)
         self.normalize = normalize
@@ -851,11 +863,14 @@ class MBAMeasure(Metric):
         else:
             # Expect pred in [0,1] float and gt as bool.
             if not np.issubdtype(pred.dtype, np.floating):
-                raise TypeError(f"pred must be float when normalize=False, got {pred.dtype}")
+                msg = f"pred must be float when normalize=False, got {pred.dtype}"
+                raise TypeError(msg)
             if pred.min() < 0 or pred.max() > 1:
-                raise ValueError("pred values must be in [0, 1]")
+                msg = "pred values must be in [0, 1]"
+                raise ValueError(msg)
             if gt.dtype != bool:
-                raise TypeError(f"gt must be bool when normalize=False, got {gt.dtype}")
+                msg = f"gt must be bool when normalize=False, got {gt.dtype}"
+                raise TypeError(msg)
             pred_bin = (pred > 0.5).astype(np.uint8)
             gt_bin = gt.astype(np.uint8)
         return pred_bin, gt_bin
@@ -893,6 +908,7 @@ class MBAMeasure(Metric):
 
     def compute(self) -> Tensor:
         """Compute final MBA.
+
         Returns:
             Tensor: MBA (scalar)
         """
@@ -917,11 +933,10 @@ class BIoUMeasure(Metric):
         normalize: bool = True,
         **kwargs: Any,
     ) -> None:
-        """
-        Args:
-            dilation_ratio: Ratio of image diagonal for boundary dilation. Defaults to 0.02.
-            normalize: If True, normalize pred from [0,255] and gt from uint8.
-                      If False, expect pred in [0,1] float and gt as bool.
+        """Args:
+        dilation_ratio: Ratio of image diagonal for boundary dilation. Defaults to 0.02.
+        normalize: If True, normalize pred from [0,255] and gt from uint8.
+                  If False, expect pred in [0,1] float and gt as bool.
         """
         super().__init__(**kwargs)
         self.mode = mode
@@ -994,6 +1009,7 @@ class BIoUMeasure(Metric):
 
     def compute(self) -> Tensor:
         """Compute final Boundary IoU.
+
         Returns:
             dict: {"biou": Tensor (scalar)}
         """

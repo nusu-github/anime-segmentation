@@ -29,7 +29,8 @@ def _feature_loss(pred: torch.Tensor, target: torch.Tensor, mode: str) -> torch.
         return F.l1_loss(pred, target, reduction="mean")
     if mode == "SmoothL1":
         return F.smooth_l1_loss(pred, target, reduction="mean")
-    raise ValueError(f"Unsupported feature loss mode: {mode}")
+    msg = f"Unsupported feature loss mode: {mode}"
+    raise ValueError(msg)
 
 
 def multi_loss_fusion(
@@ -42,8 +43,8 @@ def multi_loss_fusion(
     for i, pred in enumerate(preds):
         resized_target = _resize_target_like(target, pred)
         bce = _bce_with_logits(pred, resized_target)
-        bce_total = bce_total + bce
-        loss = loss + bce
+        bce_total += bce
+        loss += bce
         if i == 0:
             loss0 = loss
     loss_dict = {
@@ -69,16 +70,16 @@ def multi_loss_fusion_kl(
     for i, pred in enumerate(preds):
         resized_target = _resize_target_like(target, pred)
         bce = _bce_with_logits(pred, resized_target)
-        bce_total = bce_total + bce
-        loss = loss + bce
+        bce_total += bce
+        loss += bce
         if i == 0:
             loss0 = loss
 
     fea_total = torch.zeros(1, dtype=target.dtype, device=target.device)
     for df, fs_i in zip(dfs, fs, strict=True):
         fea = _feature_loss(df, fs_i, mode)
-        fea_total = fea_total + fea
-        loss = loss + fea
+        fea_total += fea
+        loss += fea
 
     loss_dict = {
         "loss_pix_raw": bce_total.detach().item(),
@@ -105,12 +106,12 @@ class RebnConv(nn.Module):
         return self.relu_s1(self.bn_s1(self.conv_s1(x)))
 
 
-## upsample tensor 'src' to have the same spatial size with tensor 'tar'
+# upsample tensor 'src' to have the same spatial size with tensor 'tar'
 def _upsample_like(src: torch.Tensor, tar: torch.Tensor) -> torch.Tensor:
     return F.interpolate(src, size=tar.shape[2:], mode="bilinear", align_corners=False)
 
 
-### RSU-7 ###
+# RSU-7 ###
 class RSU7(nn.Module):
     def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3, img_size: int = 512):
         super().__init__()
@@ -119,7 +120,7 @@ class RSU7(nn.Module):
         self.mid_ch = mid_ch
         self.out_ch = out_ch
 
-        self.rebnconvin = RebnConv(in_ch, out_ch, dirate=1)  ## 1 -> 1/2
+        self.rebnconvin = RebnConv(in_ch, out_ch, dirate=1)  # 1 -> 1/2
 
         self.rebnconv1 = RebnConv(out_ch, mid_ch, dirate=1)
         self.pool1 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
@@ -189,7 +190,7 @@ class RSU7(nn.Module):
         return hx1d + hxin
 
 
-### RSU-6 ###
+# RSU-6 ###
 class RSU6(nn.Module):
     def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3):
         super().__init__()
@@ -254,7 +255,7 @@ class RSU6(nn.Module):
         return hx1d + hxin
 
 
-### RSU-5 ###
+# RSU-5 ###
 class RSU5(nn.Module):
     def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3):
         super().__init__()
@@ -309,7 +310,7 @@ class RSU5(nn.Module):
         return hx1d + hxin
 
 
-### RSU-4 ###
+# RSU-4 ###
 class RSU4(nn.Module):
     def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3):
         super().__init__()
@@ -354,7 +355,7 @@ class RSU4(nn.Module):
         return hx1d + hxin
 
 
-### RSU-4F ###
+# RSU-4F ###
 class RSU4F(nn.Module):
     def __init__(self, in_ch: int = 3, mid_ch: int = 12, out_ch: int = 3):
         super().__init__()

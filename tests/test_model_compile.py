@@ -1,19 +1,17 @@
-"""Test torch.compile and torch.jit.script compatibility for IS-Net/IBIS-Net models."""
+"""Test torch.compile and torch.jit.script compatibility for IS-Net models."""
 
 import pytest
 import torch
 from torch import nn
 
-# Test configurations for IS-Net/IBIS-Net models
+# Test configurations for IS-Net models
 MODEL_CONFIGS = {
-    "IBISNet": {"img_size": 256},
     "ISNetDIS": {"in_ch": 3, "out_ch": 1},
     "ISNetGTEncoder": {"in_ch": 1, "out_ch": 1},
 }
 
 # Input size configurations
 INPUT_SIZES = {
-    "IBISNet": (1, 3, 256, 256),
     "ISNetDIS": (1, 3, 256, 256),
     "ISNetGTEncoder": (1, 1, 256, 256),
 }
@@ -21,10 +19,9 @@ INPUT_SIZES = {
 
 def get_model(model_name: str) -> nn.Module:
     """Create model instance by name."""
-    from anime_segmentation.model import IBISNet, ISNetDIS, ISNetGTEncoder
+    from anime_segmentation.model import ISNetDIS, ISNetGTEncoder
 
     model_classes = {
-        "IBISNet": IBISNet,
         "ISNetDIS": ISNetDIS,
         "ISNetGTEncoder": ISNetGTEncoder,
     }
@@ -133,37 +130,6 @@ def test_isnet_loss_fullgraph():
         print("[PASS] ISNetDIS loss compilation (fullgraph=True) works")
     except Exception as e:
         pytest.fail(f"[FAIL] ISNetDIS loss compilation (fullgraph=True) failed - {e}")
-
-
-def test_ibisnet_loss_fullgraph():
-    """Test that IBISNet loss computation is compile-friendly (no graph breaks)."""
-    from anime_segmentation.model.ibis_net import IBISNet
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    model = IBISNet(img_size=256).to(device)
-    model.eval()
-
-    B, H, W = 1, 256, 256
-    x = torch.randn(B, 3, H, W, device=device)
-    labels = torch.rand(B, 1, H, W, device=device)
-
-    with torch.no_grad():
-        outputs = model(x)
-
-    def loss_wrapper(out, lab):
-        return model.compute_loss([out, lab])
-
-    # Compile with fullgraph=True to catch graph breaks
-    opt_loss = torch.compile(loss_wrapper, backend="eager", fullgraph=True)
-
-    try:
-        _loss0, loss, _loss_dict = opt_loss(outputs, labels)
-        assert isinstance(loss, torch.Tensor)
-        assert loss.item() > 0
-        print("[PASS] IBISNet loss compilation (fullgraph=True) works")
-    except Exception as e:
-        pytest.fail(f"[FAIL] IBISNet loss compilation (fullgraph=True) failed - {e}")
 
 
 @pytest.mark.parametrize("model_name", list(MODEL_CONFIGS.keys()))

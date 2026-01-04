@@ -25,11 +25,9 @@ from .metrics import (
     SMeasure,
     WeightedFMeasure,
 )
-from .model import IBISNet, ISNetDIS, ISNetGTEncoder
+from .model import ISNetDIS, ISNetGTEncoder
 
 NET_NAMES = [
-    "ibisnet_is",
-    "ibisnet",
     "isnet_is",
     "isnet",
     "isnet_gt",
@@ -37,12 +35,9 @@ NET_NAMES = [
 
 
 def get_net(
-    net_name: str, img_size: int | tuple[int, int] | None
-) -> ISNetDIS | ISNetGTEncoder | IBISNet:
+    net_name: str, img_size: int | tuple[int, int] | None  # noqa: ARG001
+) -> ISNetDIS | ISNetGTEncoder:
     match net_name:
-        case "ibisnet" | "ibisnet_is":
-            ibis_img_size = img_size[0] if isinstance(img_size, tuple) else img_size
-            return IBISNet(img_size=ibis_img_size)
         case "isnet" | "isnet_is":
             return ISNetDIS()
         case "isnet_gt":
@@ -341,17 +336,11 @@ class AnimeSegmentation(
 
         self.net = get_net(net_name, img_size)
 
-        # Apply loss weights to IBISNet config
-        if isinstance(self.net, IBISNet):
-            self.net.config.lambda_bce = loss_bce
-            self.net.config.lambda_iou = loss_iou
-            self.net.config.lambda_ssim = loss_ssim
-
         # Apply torch.compile to the network if enabled
         if compile:
             self.net = torch.compile(self.net, mode=compile_mode)
 
-        if self.hparams["net_name"] in {"isnet_is", "ibisnet_is"}:
+        if self.hparams["net_name"] == "isnet_is":
             self.gt_encoder = get_net("isnet_gt", img_size)
             self.freeze_gt_encoder()
         else:
@@ -394,7 +383,7 @@ class AnimeSegmentation(
         """Load model from checkpoint.
 
         Args:
-            net_name: Network name (e.g., 'isnet_is', 'ibisnet_is')
+            net_name: Network name (e.g., 'isnet_is')
             ckpt_path: Path to checkpoint file
             map_location: Device to map tensors to
             img_size: Image size (required for some models)
@@ -446,9 +435,6 @@ class AnimeSegmentation(
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         match self._net_unwrapped:
-            case IBISNet():
-                outputs = self.net(x)
-                return outputs["ds"][0].sigmoid()
             case ISNetDIS() | ISNetGTEncoder():
                 return self.net(x)[0][0].sigmoid()
             case _:
@@ -466,11 +452,6 @@ class AnimeSegmentation(
                 gt_features = self.gt_encoder(labels)[1]
 
         match self._net_unwrapped:
-            case IBISNet():
-                outputs = self.net(images)
-                loss_args = [outputs, labels]
-                if gt_features is not None:
-                    loss_args.append(gt_features)
             case ISNetDIS():
                 ds, dfs = self.net(images)
                 loss_args = [ds, dfs, labels]
@@ -493,50 +474,6 @@ class AnimeSegmentation(
         self.log("train/loss", loss, prog_bar=True)
         self.log("train/loss_tar", loss0)
 
-        if isinstance(self._net_unwrapped, IBISNet) and self._net_unwrapped.use_outref:
-            with torch.inference_mode():
-                grad_gt_gen = self._net_unwrapped.grad_label_generator
-                if grad_gt_gen is not None:
-                    grad_gt_fullres = grad_gt_gen(images)
-                    self.log("train/grad_gt_mean", grad_gt_fullres.mean())
-                    self.log("train/grad_gt_max", grad_gt_fullres.max())
-
-                if grad_labels := [
-                    grad_label
-                    for grad_label in loss_args[0]["grad_labels"]
-                    if grad_label is not None
-                ]:
-                    grad_label_mean = torch.stack([g.mean() for g in grad_labels]).mean()
-                    self.log("train/grad_label_mean", grad_label_mean)
-
-                if grad_preds := [
-                    grad_pred for grad_pred in loss_args[0]["grad_preds"] if grad_pred is not None
-                ]:
-                    grad_pred_mean = torch.stack([g.sigmoid().mean() for g in grad_preds]).mean()
-                    self.log("train/grad_pred_mean", grad_pred_mean)
-
-                if grad_attns := [
-                    grad_attn for grad_attn in loss_args[0]["grad_attns"] if grad_attn is not None
-                ]:
-                    attn_mean = torch.stack([g.mean() for g in grad_attns]).mean()
-                    attn_std = torch.stack([g.std() for g in grad_attns]).mean()
-                    self.log("train/outref_attn_mean", attn_mean)
-                    self.log("train/outref_attn_std", attn_std)
-
-                local_logits = loss_args[0]["local_logits"]
-                blocks = [
-                    self._net_unwrapped.outref1,
-                    self._net_unwrapped.outref2,
-                    self._net_unwrapped.outref3,
-                ]
-                mask_means = []
-                for logit, block in zip(local_logits, blocks, strict=False):
-                    if logit is None or block is None:
-                        continue
-                    mask_dilated = block.dilate_mask(logit.sigmoid().detach())
-                    mask_means.append(mask_dilated.mean())
-                if mask_means:
-                    self.log("train/mask_area_mean", torch.stack(mask_means).mean())
         return loss
 
     def validation_step(self, batch: dict[str, torch.Tensor]) -> None:
@@ -668,7 +605,7 @@ class AnimeSegmentationCLI(LightningCLI):
             "--gt_epoch",
             type=int,
             default=4,
-            help="Epochs for training ground truth encoder (isnet_is/ibisnet_is only)",
+            help="Epochs for training ground truth encoder (isnet_is only)",
         )
         parser.add_argument(
             "--gt_lr",
@@ -686,9 +623,10 @@ class AnimeSegmentationCLI(LightningCLI):
         ckpt_path = config.get("ckpt_path")
 
         # Check if we need to train GT encoder
-        if net_name in {"isnet_is", "ibisnet_is"} and not ckpt_path:
+        if net_name == "isnet_is" and not ckpt_path:
             if self.datamodule is None:
-                raise RuntimeError("DataModule is not instantiated. Cannot train GT encoder.")
+                msg = "DataModule is not instantiated. Cannot train GT encoder."
+                raise RuntimeError(msg)
 
             assert self.model.gt_encoder is not None
 
