@@ -12,7 +12,6 @@ import torchvision.utils as vutils
 from huggingface_hub import HfApi
 from lightning.pytorch.callbacks import BaseFinetuning
 from lightning.pytorch.trainer.states import TrainerFn
-from torch import nn
 
 from .datamodule import IMAGENET_MEAN, IMAGENET_STD
 from .protocols import Finetunable, HasBackbone
@@ -313,55 +312,15 @@ class VisualizationCallback(L.Callback):
 
 
 class ScheduleFreeCallback(L.Callback):
-    """Schedule-Free Optimizer Callback for Lightning.
+    """Schedule-Free Optimizer Callback for Lightning."""
 
-    Automatically switches Schedule-Free optimizers between train and eval modes
-    at appropriate points in the training lifecycle.
-
-    When precise_bn is enabled, this callback also updates BatchNorm running
-    statistics using the averaged weights (x sequence) before validation.
-    This is necessary because Schedule-Free optimizers maintain two weight
-    sequences: z (optimizer state) and x (averaged weights for evaluation).
-    BatchNorm statistics computed during training use z, but evaluation uses x,
-    so the BN statistics need to be recomputed for x.
-
-    See: "The Road Less Scheduled" (arXiv:2405.15682) Section 5.1
-    """
-
-    # Lifecycle hook to mode mapping (hooks with simple mode switching)
-    _HOOK_MODES: dict[str, str] = {
-        "on_fit_start": "train",
-        "on_train_start": "train",
-        "on_validation_start": "eval",
-        "on_test_start": "eval",
-        "on_predict_start": "eval",
-    }
-
-    def __init__(
-        self,
-        debug: bool = False,
-        precise_bn: bool = False,
-        precise_bn_num_iters: int = 200,
-    ) -> None:
-        """Initialize Schedule-Free callback.
-
-        Args:
-            debug: Enable debug logging.
-            precise_bn: Enable PreciseBN to update BatchNorm statistics
-                before validation using the averaged weights (x sequence).
-            precise_bn_num_iters: Number of training batches to use for
-                computing precise BN statistics.
-
-        """
+    def __init__(self, debug: bool = False) -> None:
         super().__init__()
         self.debug = debug
-        self.precise_bn = precise_bn
-        self.precise_bn_num_iters = precise_bn_num_iters
 
     def _log(self, msg: str) -> None:
-        """Log debug message if debug mode is enabled."""
         if self.debug:
-            logger.debug("[ScheduleFree] %s", msg)
+            print(f"[ScheduleFreeCallback] {msg}")
 
     def _is_schedule_free(self, opt) -> bool:
         """Check if it is a Schedule-Free optimizer with train()/eval() methods."""
@@ -380,151 +339,25 @@ class ScheduleFreeCallback(L.Callback):
         return False
 
     def _set_mode(self, trainer: L.Trainer, mode: str) -> None:
-        """Set mode for all Schedule-Free optimizers."""
         self._log(f"_set_mode called: mode={mode}, num_optimizers={len(trainer.optimizers)}")
         for i, opt in enumerate(trainer.optimizers):
             if self._is_schedule_free(opt):
                 self._log(f"  opt[{i}]: calling {mode}()")
                 getattr(opt, mode)()
 
-    def _handle_hook(self, hook_name: str, trainer: L.Trainer) -> None:
-        """Handle a lifecycle hook by setting the appropriate mode."""
-        mode = self._HOOK_MODES[hook_name]
-        self._log(f"{hook_name} called")
-        self._set_mode(trainer, mode)
-
-    def _update_precise_bn(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        """Update BatchNorm statistics using training data with averaged weights.
-
-        This runs forward passes through the model with BatchNorm layers in training
-        mode to recompute their running statistics for the averaged weights (x sequence).
-
-        The algorithm computes population statistics by combining per-batch statistics,
-        taking into account varying batch sizes. This is more accurate than the
-        exponential moving average (EMA) used during training.
-
-        See: "Rethinking Batch in BatchNorm" (arXiv:2105.07576)
-        """
-        # Find all BatchNorm layers with running stats enabled
-        bn_types = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm)
-        bn_layers = [
-            m
-            for m in pl_module.modules()
-            if isinstance(m, bn_types) and m.running_mean is not None and m.running_var is not None
-        ]
-
-        if not bn_layers:
-            self._log("No BatchNorm layers found, skipping PreciseBN")
-            return
-
-        self._log(f"Updating PreciseBN for {len(bn_layers)} layers")
-
-        # Get training dataloader
-        train_dataloader = trainer.train_dataloader
-        if train_dataloader is None:
-            logger.warning("train_dataloader is None, skipping PreciseBN")
-            return
-
-        if isinstance(train_dataloader, list):
-            train_dataloader = train_dataloader[0]
-
-        # Save original state
-        original_training = pl_module.training
-        original_momentum = [bn.momentum for bn in bn_layers]
-
-        # Initialize accumulators for population statistics
-        # Uses Welford's online algorithm for numerical stability
-        # Note: bn.running_mean/var are guaranteed non-None by our filter above
-        pop_mean = [torch.zeros_like(bn.running_mean) for bn in bn_layers]  # ty:ignore[invalid-argument-type]
-        pop_sq_mean = [torch.zeros_like(bn.running_var) for bn in bn_layers]  # ty:ignore[invalid-argument-type]
-        total_samples = [0] * len(bn_layers)
-
-        # Track batch size per layer via hooks
-        batch_sizes: dict[nn.Module, int] = {}
-
-        def capture_batch_size(module: nn.Module, inputs: tuple[torch.Tensor]) -> None:
-            x = inputs[0]
-            # Spatial dimensions count as batch for BN statistics
-            batch_sizes[module] = x.numel() // x.shape[1]
-
-        hooks = [bn.register_forward_pre_hook(capture_batch_size) for bn in bn_layers]
-
-        try:
-            # Set BN to training mode with momentum=1.0 to get pure batch statistics
-            pl_module.train()
-            for bn in bn_layers:
-                bn.momentum = 1.0
-
-            # Accumulate statistics
-            with torch.no_grad():
-                for i, batch in enumerate(train_dataloader):
-                    if i >= self.precise_bn_num_iters:
-                        break
-
-                    batch_sizes.clear()
-                    images = batch[0] if isinstance(batch, (list, tuple)) else batch
-                    pl_module(images.to(pl_module.device))
-
-                    # Update population statistics for each BN layer
-                    for j, bn in enumerate(bn_layers):
-                        n = batch_sizes.get(bn)
-                        if n is None:
-                            continue
-
-                        # Welford's algorithm with batch size weighting
-                        total_samples[j] += n
-                        weight = n / total_samples[j]
-
-                        # running_mean/var now contain this batch's statistics (momentum=1.0)
-                        # These are guaranteed non-None by our filter above
-                        batch_mean = bn.running_mean
-                        batch_var = bn.running_var
-                        assert batch_mean is not None
-                        assert batch_var is not None
-
-                        # Undo Bessel correction: PyTorch BN uses n-1 for running_var update
-                        batch_sq_mean = batch_mean.square() + batch_var * ((n - 1) / n)
-
-                        pop_mean[j] += (batch_mean - pop_mean[j]) * weight
-                        pop_sq_mean[j] += (batch_sq_mean - pop_sq_mean[j]) * weight
-
-            # Apply computed population statistics
-            for j, bn in enumerate(bn_layers):
-                if total_samples[j] > 0:
-                    assert bn.running_mean is not None
-                    assert bn.running_var is not None
-                    bn.running_mean.copy_(pop_mean[j])
-                    bn.running_var.copy_(pop_sq_mean[j] - pop_mean[j].square())
-
-        finally:
-            # Cleanup hooks
-            for hook in hooks:
-                hook.remove()
-
-            # Restore original state
-            for bn, mom in zip(bn_layers, original_momentum, strict=False):
-                bn.momentum = mom
-            if not original_training:
-                pl_module.eval()
-
-        self._log("PreciseBN update completed")
-
     # === Training ===
     def on_fit_start(self, trainer, pl_module) -> None:  # noqa: ARG002
-        self._handle_hook("on_fit_start", trainer)
+        self._log("on_fit_start called")
+        self._set_mode(trainer, "train")
 
     def on_train_start(self, trainer, pl_module) -> None:  # noqa: ARG002
-        self._handle_hook("on_train_start", trainer)
+        self._log("on_train_start called")
+        self._set_mode(trainer, "train")
 
     # === Validation ===
-    def on_validation_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+    def on_validation_start(self, trainer, pl_module) -> None:  # noqa: ARG002
         self._log(f"on_validation_start called (sanity={trainer.sanity_checking})")
-        # Switch to eval mode (weights become x sequence)
         self._set_mode(trainer, "eval")
-
-        # Update BatchNorm statistics for the x sequence if enabled
-        if self.precise_bn and not trainer.sanity_checking:
-            self._update_precise_bn(trainer, pl_module)
 
     def on_validation_end(self, trainer, pl_module) -> None:  # noqa: ARG002
         # During fit, trainer.training is False while validating, so check state.fn instead
@@ -535,10 +368,12 @@ class ScheduleFreeCallback(L.Callback):
 
     # === Test / Predict ===
     def on_test_start(self, trainer, pl_module) -> None:  # noqa: ARG002
-        self._handle_hook("on_test_start", trainer)
+        self._log("on_test_start called")
+        self._set_mode(trainer, "eval")
 
     def on_predict_start(self, trainer, pl_module) -> None:  # noqa: ARG002
-        self._handle_hook("on_predict_start", trainer)
+        self._log("on_predict_start called")
+        self._set_mode(trainer, "eval")
 
     # === Checkpoint ===
     def on_save_checkpoint(self, trainer, pl_module, checkpoint) -> None:  # noqa: ARG002
@@ -549,11 +384,11 @@ class ScheduleFreeCallback(L.Callback):
                 was_train = self._get_train_mode(opt)
                 if was_train:
                     # Type Safety: switch to eval mode
-                    opt.eval()
+                    opt.eval()  # pyright: ignore[reportAttributeAccessIssue]
                 new_states.append(trainer.strategy.optimizer_state(opt))
                 if was_train:
                     # Type Safety: restore to train mode
-                    opt.train()
+                    opt.train()  # pyright: ignore[reportAttributeAccessIssue]
             else:
                 new_states.append(checkpoint["optimizer_states"][i])
         checkpoint["optimizer_states"] = new_states
