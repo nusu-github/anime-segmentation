@@ -10,6 +10,7 @@ from .backbones.build_backbone import build_backbone
 from .config import get_lateral_channels
 from .modules.decoder_blocks import BasicDecBlk, ResBlk
 from .modules.lateral_blocks import BasicLatBlk
+from .modules.norms import group_norm
 
 
 def image2patches(
@@ -75,7 +76,7 @@ class BiRefNet(
         dec_att="ASPPDeformable",
         dec_ipt=True,
         dec_ipt_split=True,
-        use_bn=True,
+        use_norm=True,
         ms_supervision=True,
         out_ref=True,
         dec_channels_inter="fixed",
@@ -122,7 +123,7 @@ class BiRefNet(
                     BlockClass(
                         channels[0] + sum(self.cxt),
                         channels[0],
-                        use_bn=use_bn,
+                        use_norm=use_norm,
                         attention_type=dec_att,
                         dec_channels_inter=dec_channels_inter,
                     )
@@ -138,7 +139,7 @@ class BiRefNet(
             dec_att=dec_att,
             dec_ipt=dec_ipt,
             dec_ipt_split=dec_ipt_split,
-            use_bn=use_bn,
+            use_norm=use_norm,
             ms_supervision=ms_supervision,
             out_ref=out_ref,
             dec_channels_inter=dec_channels_inter,
@@ -233,7 +234,7 @@ class Decoder(nn.Module):
         dec_att,
         dec_ipt,
         dec_ipt_split,
-        use_bn,
+        use_norm,
         ms_supervision,
         out_ref,
         dec_channels_inter,
@@ -325,28 +326,28 @@ class Decoder(nn.Module):
             dec_blk_in_channels[0],
             dec_blk_out_channels[0],
             attention_type=dec_att,
-            use_bn=use_bn,
+            use_norm=use_norm,
             dec_channels_inter=dec_channels_inter,
         )
         self.decoder_block3 = DecoderBlock(
             dec_blk_in_channels[1],
             dec_blk_out_channels[1],
             attention_type=dec_att,
-            use_bn=use_bn,
+            use_norm=use_norm,
             dec_channels_inter=dec_channels_inter,
         )
         self.decoder_block2 = DecoderBlock(
             dec_blk_in_channels[2],
             dec_blk_out_channels[2],
             attention_type=dec_att,
-            use_bn=use_bn,
+            use_norm=use_norm,
             dec_channels_inter=dec_channels_inter,
         )
         self.decoder_block1 = DecoderBlock(
             dec_blk_in_channels[3],
             dec_blk_out_channels[3],
             attention_type=dec_att,
-            use_bn=use_bn,
+            use_norm=use_norm,
             dec_channels_inter=dec_channels_inter,
         )
         self.conv_out1 = nn.Sequential(
@@ -375,24 +376,24 @@ class Decoder(nn.Module):
                     _N,
                     3,
                     padding=1,
-                    norm_layer=nn.BatchNorm2d,
-                    apply_norm=use_bn,
+                    norm_layer=group_norm,
+                    apply_norm=use_norm,
                 )
                 self.gdt_convs_3 = ConvNormAct(
                     dec_blk_out_channels[1],
                     _N,
                     3,
                     padding=1,
-                    norm_layer=nn.BatchNorm2d,
-                    apply_norm=use_bn,
+                    norm_layer=group_norm,
+                    apply_norm=use_norm,
                 )
                 self.gdt_convs_2 = ConvNormAct(
                     dec_blk_out_channels[2],
                     _N,
                     3,
                     padding=1,
-                    norm_layer=nn.BatchNorm2d,
-                    apply_norm=use_bn,
+                    norm_layer=group_norm,
+                    apply_norm=use_norm,
                 )
 
                 self.gdt_convs_pred_4 = nn.Sequential(nn.Conv2d(_N, 1, 1, 1, 0))

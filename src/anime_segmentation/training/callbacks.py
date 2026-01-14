@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torchvision.utils as vutils
 from huggingface_hub import HfApi
 from lightning.pytorch.callbacks import BaseFinetuning
+from lightning.pytorch.trainer.states import TrainerFn
 from torch import nn
 
 from .datamodule import IMAGENET_MEAN, IMAGENET_STD
@@ -527,8 +528,6 @@ class ScheduleFreeCallback(L.Callback):
 
     def on_validation_end(self, trainer, pl_module) -> None:  # noqa: ARG002
         # During fit, trainer.training is False while validating, so check state.fn instead
-        from lightning.pytorch.trainer.states import TrainerFn
-
         is_fitting = trainer.state.fn == TrainerFn.FITTING
         self._log(f"on_validation_end called (fitting={is_fitting})")
         if is_fitting:
