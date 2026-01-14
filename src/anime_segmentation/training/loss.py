@@ -294,38 +294,47 @@ class PixLoss(nn.Module):
             Tuple of (total_loss, per_component_loss_dict).
 
         """
-        total = gt.new_zeros(())
-        log_accum: dict[str, torch.Tensor] = {}
         n = len(scaled_preds)
+        gt_size = gt.shape[2:]
 
-        for pred_lvl in scaled_preds:
-            # Resize prediction to match ground truth size if needed
-            if pred_lvl.shape[2:] != gt.shape[2:]:
-                resized_pred = F.interpolate(
-                    pred_lvl,
-                    size=gt.shape[2:],
-                    mode="bilinear",
-                    align_corners=True,
-                )
-            else:
-                resized_pred = pred_lvl
+        # Pre-resize all predictions to GT size (batch operation)
+        resized_logits = [
+            F.interpolate(p, size=gt_size, mode="bilinear", align_corners=True)
+            if p.shape[2:] != gt_size
+            else p
+            for p in scaled_preds
+        ]
 
-            logits = resized_pred
-            probs = logits.sigmoid()
+        # Stack for efficient computation: [num_scales, B, C, H, W]
+        stacked_logits = torch.stack(resized_logits)
+        stacked_probs = stacked_logits.sigmoid()
+
+        # Pre-initialize log accumulators for efficiency
+        log_accum: dict[str, torch.Tensor] = {
+            name: gt.new_zeros(())
+            for name in list(self.loss_prob.keys()) + list(self.loss_logit.keys())
+        }
+
+        total = gt.new_zeros(())
+
+        # Compute losses for all scales at once where possible
+        for i in range(n):
+            probs = stacked_probs[i]
+            logits = stacked_logits[i]
 
             # Probability-based losses
             for name, crit in self.loss_prob.items():
                 w = self.lambdas[name] * pix_loss_lambda
                 loss_val = crit(probs, gt) * w
                 total = total + loss_val
-                log_accum[name] = log_accum.get(name, gt.new_zeros(())) + (loss_val.detach() / n)
+                log_accum[name] = log_accum[name] + (loss_val.detach() / n)
 
             # Logit-based losses
             for name, crit in self.loss_logit.items():
                 w = self.lambdas[name] * pix_loss_lambda
                 loss_val = crit(logits, gt) * w
                 total = total + loss_val
-                log_accum[name] = log_accum.get(name, gt.new_zeros(())) + (loss_val.detach() / n)
+                log_accum[name] = log_accum[name] + (loss_val.detach() / n)
 
-        loss_dict = {k: v.item() for k, v in log_accum.items()}
+        loss_dict = {k: v.item() for k, v in log_accum.items() if k in self.lambdas}
         return total, loss_dict

@@ -63,6 +63,8 @@ class BiRefNetLightning(
         bb_pretrained: bool = True,
         out_ref: bool = True,
         ms_supervision: bool = True,
+        act_layer: str = "relu",
+        act_kwargs: dict[str, Any] | None = None,
         strict_loading: bool = True,
         optimizer: OptimizerCallable = torch.optim.AdamW,
         scheduler: LRSchedulerCallable | None = None,
@@ -181,6 +183,8 @@ class BiRefNetLightning(
             bb_pretrained=self.hparams["bb_pretrained"],
             ms_supervision=self.hparams["ms_supervision"],
             out_ref=self.hparams["out_ref"],
+            act_layer=self.hparams.get("act_layer", "relu"),
+            act_kwargs=self.hparams.get("act_kwargs", None),
         )
 
         self.model.compile(
@@ -361,18 +365,25 @@ class BiRefNetLightning(
             Mean gradient loss.
 
         """
-        loss_gdt = torch.tensor(0.0, device=self.device)
-        for _gdt_pred, _gdt_label in zip(outs_gdt_pred, outs_gdt_label, strict=False):
-            _gdt_pred = nn.functional.interpolate(
-                _gdt_pred,
-                size=_gdt_label.shape[2:],
-                mode="bilinear",
-                align_corners=True,
-            )
+        if not outs_gdt_pred:
+            return torch.tensor(0.0, device=self.device)
+
+        # Compute losses for each scale and stack
+        losses = []
+        for gdt_pred, gdt_label in zip(outs_gdt_pred, outs_gdt_label, strict=False):
+            # Resize prediction to match label size
+            if gdt_pred.shape[2:] != gdt_label.shape[2:]:
+                gdt_pred = nn.functional.interpolate(
+                    gdt_pred,
+                    size=gdt_label.shape[2:],
+                    mode="bilinear",
+                    align_corners=True,
+                )
             # BCEWithLogitsLoss expects logits for pred, probabilities for target
-            _gdt_label = _gdt_label.sigmoid()
-            loss_gdt += self.criterion_gdt(_gdt_pred, _gdt_label)
-        return loss_gdt / max(len(outs_gdt_pred), 1)
+            losses.append(self.criterion_gdt(gdt_pred, gdt_label.sigmoid()))
+
+        # Stack and compute mean efficiently
+        return torch.stack(losses).mean()
 
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler.

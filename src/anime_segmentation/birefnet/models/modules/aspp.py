@@ -10,7 +10,15 @@ from .norms import group_norm
 class ASPP(nn.Module):
     """Atrous Spatial Pyramid Pooling for multi-scale context aggregation."""
 
-    def __init__(self, in_channels=64, out_channels=None, output_stride=16, use_norm=True) -> None:
+    def __init__(
+        self,
+        in_channels=64,
+        out_channels=None,
+        output_stride=16,
+        use_norm=True,
+        act_layer=nn.ReLU,
+        act_kwargs=None,
+    ) -> None:
         super().__init__()
         self.down_scale = 1
         if out_channels is None:
@@ -33,6 +41,8 @@ class ASPP(nn.Module):
             dilation=dilations[0],
             norm_layer=norm_layer,
             apply_norm=use_norm,
+            act_layer=act_layer,
+            act_kwargs=act_kwargs,
             bias=False,
         )
         self.aspp2 = ConvNormAct(
@@ -43,6 +53,8 @@ class ASPP(nn.Module):
             dilation=dilations[1],
             norm_layer=norm_layer,
             apply_norm=use_norm,
+            act_layer=act_layer,
+            act_kwargs=act_kwargs,
             bias=False,
         )
         self.aspp3 = ConvNormAct(
@@ -53,6 +65,8 @@ class ASPP(nn.Module):
             dilation=dilations[2],
             norm_layer=norm_layer,
             apply_norm=use_norm,
+            act_layer=act_layer,
+            act_kwargs=act_kwargs,
             bias=False,
         )
         self.aspp4 = ConvNormAct(
@@ -63,6 +77,8 @@ class ASPP(nn.Module):
             dilation=dilations[3],
             norm_layer=norm_layer,
             apply_norm=use_norm,
+            act_layer=act_layer,
+            act_kwargs=act_kwargs,
             bias=False,
         )
 
@@ -74,6 +90,8 @@ class ASPP(nn.Module):
                 1,
                 norm_layer=norm_layer,
                 apply_norm=use_norm,
+                act_layer=act_layer,
+                act_kwargs=act_kwargs,
                 bias=False,
             ),
         )
@@ -83,6 +101,8 @@ class ASPP(nn.Module):
             1,
             norm_layer=norm_layer,
             apply_norm=use_norm,
+            act_layer=act_layer,
+            act_kwargs=act_kwargs,
             bias=False,
         )
         self.dropout = nn.Dropout(0.5)
@@ -109,6 +129,8 @@ class ASPPDeformable(nn.Module):
         out_channels=None,
         parallel_block_sizes=None,
         use_norm=True,
+        act_layer=nn.ReLU,
+        act_kwargs=None,
     ) -> None:
         if parallel_block_sizes is None:
             parallel_block_sizes = [1, 3, 7]
@@ -119,6 +141,13 @@ class ASPPDeformable(nn.Module):
         self.in_channelster = 256 // self.down_scale
         norm_layer = group_norm
 
+        if act_layer is None:
+            act = nn.Identity
+            act_kwargs = {}
+        else:
+            act = act_layer
+            act_kwargs = act_kwargs or {}
+
         self.aspp1 = nn.Sequential(
             DeformableConv2d(
                 in_channels,
@@ -128,7 +157,7 @@ class ASPPDeformable(nn.Module):
                 bias=False,
             ),
             group_norm(self.in_channelster) if use_norm else nn.Identity(),
-            nn.ReLU(inplace=True),
+            act(**act_kwargs),
         )
 
         self.aspp_deforms = nn.ModuleList(
@@ -142,7 +171,7 @@ class ASPPDeformable(nn.Module):
                         bias=False,
                     ),
                     group_norm(self.in_channelster) if use_norm else nn.Identity(),
-                    nn.ReLU(inplace=True),
+                    act(**act_kwargs),
                 )
                 for conv_size in parallel_block_sizes
             ],
@@ -156,6 +185,8 @@ class ASPPDeformable(nn.Module):
                 1,
                 norm_layer=norm_layer,
                 apply_norm=use_norm,
+                act_layer=act_layer,
+                act_kwargs=act_kwargs,
                 bias=False,
             ),
         )
@@ -165,6 +196,8 @@ class ASPPDeformable(nn.Module):
             1,
             norm_layer=norm_layer,
             apply_norm=use_norm,
+            act_layer=act_layer,
+            act_kwargs=act_kwargs,
             bias=False,
         )
         self.dropout = nn.Dropout(0.5)

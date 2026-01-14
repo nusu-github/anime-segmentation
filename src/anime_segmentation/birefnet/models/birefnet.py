@@ -12,6 +12,29 @@ from .modules.decoder_blocks import BasicDecBlk, ResBlk
 from .modules.lateral_blocks import BasicLatBlk
 from .modules.norms import group_norm
 
+_ACT_LAYER_MAP = {
+    "relu": nn.ReLU,
+    "leaky_relu": nn.LeakyReLU,
+    "mish": nn.Mish,
+    "silu": nn.SiLU,
+    "swish": nn.SiLU,
+    "gelu": nn.GELU,
+}
+
+
+def _resolve_act_layer(act_layer, act_kwargs):
+    if act_layer is None:
+        act_layer = "relu"
+    if isinstance(act_layer, str):
+        key = act_layer.replace("-", "_").lower()
+        if key not in _ACT_LAYER_MAP:
+            msg = f"Unknown activation '{act_layer}'. Available: {', '.join(_ACT_LAYER_MAP)}"
+            raise ValueError(msg)
+        act_layer = _ACT_LAYER_MAP[key]
+    if act_kwargs is None and act_layer is nn.ReLU:
+        act_kwargs = {"inplace": True}
+    return act_layer, act_kwargs
+
 
 def image2patches(
     image,
@@ -80,6 +103,8 @@ class BiRefNet(
         ms_supervision=True,
         out_ref=True,
         dec_channels_inter="fixed",
+        act_layer="relu",
+        act_kwargs=None,
         num_classes=None,
     ) -> None:
         super().__init__()
@@ -92,6 +117,7 @@ class BiRefNet(
         self.ms_supervision = ms_supervision
         self.dec_ipt = dec_ipt
         self.dec_att = dec_att
+        self.act_layer, self.act_kwargs = _resolve_act_layer(act_layer, act_kwargs)
 
         self.bb = build_backbone(bb_name, pretrained=bb_pretrained)
 
@@ -126,6 +152,8 @@ class BiRefNet(
                         use_norm=use_norm,
                         attention_type=dec_att,
                         dec_channels_inter=dec_channels_inter,
+                        act_layer=self.act_layer,
+                        act_kwargs=self.act_kwargs,
                     )
                     for _ in range(num_blocks)
                 ],
@@ -144,6 +172,8 @@ class BiRefNet(
             out_ref=out_ref,
             dec_channels_inter=dec_channels_inter,
             bb_name=bb_name,
+            act_layer=self.act_layer,
+            act_kwargs=self.act_kwargs,
         )
 
     def forward_enc(self, x):
@@ -239,6 +269,8 @@ class Decoder(nn.Module):
         out_ref,
         dec_channels_inter,
         bb_name,
+        act_layer,
+        act_kwargs,
     ) -> None:
         super().__init__()
         self.mul_scl_ipt = mul_scl_ipt
@@ -246,6 +278,8 @@ class Decoder(nn.Module):
         self.split = dec_ipt_split
         self.ms_supervision = ms_supervision
         self.out_ref = out_ref
+        self.act_layer = act_layer
+        self.act_kwargs = act_kwargs
 
         DecoderBlock = {"BasicDecBlk": BasicDecBlk, "ResBlk": ResBlk}[dec_blk]
         LateralBlock = {"BasicLatBlk": BasicLatBlk}[lat_blk]
@@ -328,6 +362,8 @@ class Decoder(nn.Module):
             attention_type=dec_att,
             use_norm=use_norm,
             dec_channels_inter=dec_channels_inter,
+            act_layer=self.act_layer,
+            act_kwargs=self.act_kwargs,
         )
         self.decoder_block3 = DecoderBlock(
             dec_blk_in_channels[1],
@@ -335,6 +371,8 @@ class Decoder(nn.Module):
             attention_type=dec_att,
             use_norm=use_norm,
             dec_channels_inter=dec_channels_inter,
+            act_layer=self.act_layer,
+            act_kwargs=self.act_kwargs,
         )
         self.decoder_block2 = DecoderBlock(
             dec_blk_in_channels[2],
@@ -342,6 +380,8 @@ class Decoder(nn.Module):
             attention_type=dec_att,
             use_norm=use_norm,
             dec_channels_inter=dec_channels_inter,
+            act_layer=self.act_layer,
+            act_kwargs=self.act_kwargs,
         )
         self.decoder_block1 = DecoderBlock(
             dec_blk_in_channels[3],
@@ -349,6 +389,8 @@ class Decoder(nn.Module):
             attention_type=dec_att,
             use_norm=use_norm,
             dec_channels_inter=dec_channels_inter,
+            act_layer=self.act_layer,
+            act_kwargs=self.act_kwargs,
         )
         self.conv_out1 = nn.Sequential(
             nn.Conv2d(
@@ -378,6 +420,8 @@ class Decoder(nn.Module):
                     padding=1,
                     norm_layer=group_norm,
                     apply_norm=use_norm,
+                    act_layer=self.act_layer,
+                    act_kwargs=self.act_kwargs,
                 )
                 self.gdt_convs_3 = ConvNormAct(
                     dec_blk_out_channels[1],
@@ -386,6 +430,8 @@ class Decoder(nn.Module):
                     padding=1,
                     norm_layer=group_norm,
                     apply_norm=use_norm,
+                    act_layer=self.act_layer,
+                    act_kwargs=self.act_kwargs,
                 )
                 self.gdt_convs_2 = ConvNormAct(
                     dec_blk_out_channels[2],
@@ -394,6 +440,8 @@ class Decoder(nn.Module):
                     padding=1,
                     norm_layer=group_norm,
                     apply_norm=use_norm,
+                    act_layer=self.act_layer,
+                    act_kwargs=self.act_kwargs,
                 )
 
                 self.gdt_convs_pred_4 = nn.Sequential(nn.Conv2d(_N, 1, 1, 1, 0))

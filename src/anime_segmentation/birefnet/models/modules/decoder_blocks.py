@@ -16,6 +16,8 @@ class BasicDecBlk(nn.Module):
         dec_channels_inter="fixed",
         attention_type=None,
         use_norm=True,
+        act_layer=nn.ReLU,
+        act_kwargs=None,
     ) -> None:
         super().__init__()
         inter_channels = in_channels // 4 if dec_channels_inter == "adap" else 64
@@ -28,12 +30,24 @@ class BasicDecBlk(nn.Module):
             padding=1,
             norm_layer=norm_layer,
             apply_norm=use_norm,
+            act_layer=act_layer,
+            act_kwargs=act_kwargs,
         )
 
         if attention_type == "ASPP":
-            self.dec_att = ASPP(in_channels=inter_channels, use_norm=use_norm)
+            self.dec_att = ASPP(
+                in_channels=inter_channels,
+                use_norm=use_norm,
+                act_layer=act_layer,
+                act_kwargs=act_kwargs,
+            )
         elif attention_type == "ASPPDeformable":
-            self.dec_att = ASPPDeformable(in_channels=inter_channels, use_norm=use_norm)
+            self.dec_att = ASPPDeformable(
+                in_channels=inter_channels,
+                use_norm=use_norm,
+                act_layer=act_layer,
+                act_kwargs=act_kwargs,
+            )
 
         self.conv_out = ConvNormAct(
             inter_channels,
@@ -43,6 +57,8 @@ class BasicDecBlk(nn.Module):
             norm_layer=norm_layer,
             apply_norm=use_norm,
             apply_act=False,
+            act_layer=act_layer,
+            act_kwargs=act_kwargs,
         )
 
     def forward(self, x):
@@ -63,6 +79,8 @@ class ResBlk(nn.Module):
         dec_channels_inter="fixed",
         attention_type=None,
         use_norm=True,
+        act_layer=nn.ReLU,
+        act_kwargs=None,
     ) -> None:
         super().__init__()
         if out_channels is None:
@@ -77,12 +95,24 @@ class ResBlk(nn.Module):
             padding=1,
             norm_layer=norm_layer,
             apply_norm=use_norm,
+            act_layer=act_layer,
+            act_kwargs=act_kwargs,
         )
 
         if attention_type == "ASPP":
-            self.dec_att = ASPP(in_channels=inter_channels, use_norm=use_norm)
+            self.dec_att = ASPP(
+                in_channels=inter_channels,
+                use_norm=use_norm,
+                act_layer=act_layer,
+                act_kwargs=act_kwargs,
+            )
         elif attention_type == "ASPPDeformable":
-            self.dec_att = ASPPDeformable(in_channels=inter_channels, use_norm=use_norm)
+            self.dec_att = ASPPDeformable(
+                in_channels=inter_channels,
+                use_norm=use_norm,
+                act_layer=act_layer,
+                act_kwargs=act_kwargs,
+            )
 
         self.conv_out = ConvNormAct(
             inter_channels,
@@ -92,6 +122,8 @@ class ResBlk(nn.Module):
             norm_layer=norm_layer,
             apply_norm=use_norm,
             apply_act=False,
+            act_layer=act_layer,
+            act_kwargs=act_kwargs,
         )
         self.conv_resi = nn.Conv2d(in_channels, out_channels, 1, 1, 0)
 

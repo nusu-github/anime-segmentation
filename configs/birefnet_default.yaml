@@ -43,6 +43,10 @@ model:
   # Model settings
   out_ref: true
   ms_supervision: true
+  # Activation (default: ReLU)
+  # act_layer: mish
+  # act_kwargs:
+  #   inplace: true
 
   # Optimizer - any torch.optim optimizer can be used
   # Examples:

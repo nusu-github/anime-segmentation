@@ -6,6 +6,7 @@ For comprehensive evaluation with curves, use the NumPy-based metrics in metrics
 
 import torch
 from torch import Tensor
+from torch.func import vmap
 from torchmetrics import Metric, MetricCollection
 
 
@@ -74,18 +75,21 @@ class IoUMetric(Metric):
         """
         preds, target_bin = _normalize_tensors(preds, target)
 
-        # Process each sample
-        for pred, gt in zip(preds, target_bin, strict=True):
-            # Adaptive or fixed threshold
-            thresh = min(2 * pred.mean(), 1.0) if self.threshold is None else self.threshold
+        if self.threshold is None:
+            # Adaptive threshold per sample: [B]
+            adaptive_thresh = torch.clamp(2 * preds.mean(dim=(1, 2)), max=1.0)
+            thresh = adaptive_thresh.view(-1, 1, 1)
+        else:
+            thresh = self.threshold
 
-            pred_bin = (pred >= thresh).float()
+        pred_bin = (preds >= thresh).float()
 
-            intersection = (pred_bin * gt).sum()
-            union = pred_bin.sum() + gt.sum() - intersection
+        # Batch computation: [B] -> sum to scalar
+        intersection = (pred_bin * target_bin).sum(dim=(1, 2))
+        union = pred_bin.sum(dim=(1, 2)) + target_bin.sum(dim=(1, 2)) - intersection
 
-            self.intersection += intersection
-            self.union += union
+        self.intersection += intersection.sum()
+        self.union += union.sum()
 
     def compute(self) -> Tensor:
         """Compute IoU."""
@@ -156,24 +160,25 @@ class FMeasureMetric(Metric):
         preds, target_bin = _normalize_tensors(preds, target)
         target_bin = target_bin > 0.5  # Convert back to bool
 
-        # Process each sample
-        for pred, gt in zip(preds, target_bin, strict=True):
-            # Adaptive threshold
-            thresh = min(2 * pred.mean().item(), 1.0)
-            pred_bin = pred >= thresh
+        # Adaptive threshold per sample: [B]
+        adaptive_thresh = torch.clamp(2 * preds.mean(dim=(1, 2)), max=1.0)
+        thresh = adaptive_thresh.view(-1, 1, 1)
+        pred_bin = preds >= thresh
 
-            # Compute intersection
-            intersection = (pred_bin & gt).sum().float()
+        # Batch computation: [B]
+        intersection = (pred_bin & target_bin).sum(dim=(1, 2)).float()
+        pred_sum = pred_bin.sum(dim=(1, 2)).float()
+        gt_sum = target_bin.sum(dim=(1, 2)).float()
 
-            if intersection == 0:
-                fm = torch.tensor(0.0, device=preds.device)
-            else:
-                precision = intersection / max(pred_bin.sum().float(), 1e-8)
-                recall = intersection / max(gt.sum().float(), 1e-8)
-                fm = (1 + self.beta) * precision * recall / (self.beta * precision + recall + 1e-8)
+        precision = intersection / (pred_sum + 1e-8)
+        recall = intersection / (gt_sum + 1e-8)
+        fm = (1 + self.beta) * precision * recall / (self.beta * precision + recall + 1e-8)
 
-            self.fm_sum += fm
-            self.count += 1
+        # Replace conditional with torch.where: fm = 0 when intersection == 0
+        fm = torch.where(intersection > 0, fm, torch.zeros_like(fm))
+
+        self.fm_sum += fm.sum()
+        self.count += preds.shape[0]
 
     def compute(self) -> Tensor:
         """Compute mean F-measure."""
@@ -223,16 +228,17 @@ class SMeasureMetric(Metric):
         """Compute S-measure for a single sample."""
         y = gt.mean()
 
-        if y == 0:
-            # No foreground in GT
-            return 1 - pred.mean()
-        if y == 1:
-            # All foreground in GT
-            return pred.mean()
-        # Combine object and region similarity
+        # Compute object and region similarity
         so = self._object_similarity(pred, gt)
         sr = self._region_similarity(pred, gt)
-        return self.alpha * so + (1 - self.alpha) * sr
+        combined = self.alpha * so + (1 - self.alpha) * sr
+
+        # Replace conditionals with torch.where
+        return torch.where(
+            y == 0,
+            1 - pred.mean(),
+            torch.where(y == 1, pred.mean(), combined),
+        )
 
     def _object_similarity(self, pred: Tensor, gt: Tensor) -> Tensor:
         """Compute object-aware structural similarity."""
@@ -248,13 +254,17 @@ class SMeasureMetric(Metric):
     def _s_object(self, pred: Tensor, gt: Tensor) -> Tensor:
         """Compute object similarity component."""
         mask = gt > 0.5
-        if mask.sum() == 0:
-            return torch.tensor(0.0, device=pred.device)
+        mask_sum = mask.sum()
 
-        x = pred[mask].mean()
-        sigma_x = pred[mask].std()
+        # Safe indexing with fallback
+        masked_pred = pred[mask] if mask_sum > 0 else pred.new_zeros(1)
+        x = masked_pred.mean()
+        sigma_x = masked_pred.std() if mask_sum > 1 else pred.new_zeros(())
 
-        return 2 * x / (x.pow(2) + 1 + sigma_x + 1e-8)
+        score = 2 * x / (x.pow(2) + 1 + sigma_x + 1e-8)
+
+        # Return 0 if no foreground
+        return torch.where(mask_sum > 0, score, pred.new_zeros(()))
 
     def _region_similarity(self, pred: Tensor, gt: Tensor) -> Tensor:
         """Compute region-aware structural similarity."""
@@ -316,8 +326,9 @@ class SMeasureMetric(Metric):
         y = gt.mean()
         n = pred.numel()
 
+        # Handle edge case: n <= 1
         if n <= 1:
-            return torch.tensor(1.0, device=pred.device)
+            return pred.new_ones(())
 
         sigma_x = ((pred - x).pow(2)).sum() / (n - 1)
         sigma_y = ((gt - y).pow(2)).sum() / (n - 1)
@@ -326,11 +337,13 @@ class SMeasureMetric(Metric):
         alpha = 4 * x * y * sigma_xy
         beta = (x.pow(2) + y.pow(2)) * (sigma_x + sigma_y)
 
-        if alpha != 0:
-            return alpha / (beta + 1e-8)
-        if beta == 0:
-            return torch.tensor(1.0, device=pred.device)
-        return torch.tensor(0.0, device=pred.device)
+        # Replace conditionals with torch.where
+        normal_result = alpha / (beta + 1e-8)
+        return torch.where(
+            alpha != 0,
+            normal_result,
+            torch.where(beta == 0, pred.new_ones(()), pred.new_zeros(())),
+        )
 
     def compute(self) -> Tensor:
         """Compute mean S-measure."""
@@ -364,16 +377,14 @@ class EMeasureMetric(Metric):
         """
         preds, target_bin = _normalize_tensors(preds, target)
 
-        # Process each sample
-        for pred, gt in zip(preds, target_bin, strict=True):
-            em = self._compute_em(pred, gt)
-            self.em_sum += em
-            self.count += 1
+        em_values = vmap(self._compute_em)(preds, target_bin)
+        self.em_sum += em_values.sum()
+        self.count += preds.shape[0]
 
     def _compute_em(self, pred: Tensor, gt: Tensor) -> Tensor:
         """Compute E-measure for a single sample with adaptive threshold."""
-        # Adaptive threshold
-        thresh = min(2 * pred.mean().item(), 1.0)
+        # Adaptive threshold (no .item() call)
+        thresh = torch.clamp(2 * pred.mean(), max=1.0)
         pred_bin = (pred >= thresh).float()
 
         h, w = gt.shape
@@ -385,12 +396,6 @@ class EMeasureMetric(Metric):
         pred_fg_numel = pred_bin.sum()
         pred_bg_numel = gt_size - pred_fg_numel
 
-        if gt_fg_numel == 0:
-            # No foreground: E-measure is proportion of true negatives
-            return pred_bg_numel / (gt_size - 1 + 1e-8)
-        if gt_fg_numel == gt_size:
-            # All foreground: E-measure is proportion of true positives
-            return pred_fg_numel / (gt_size - 1 + 1e-8)
         # General case: compute enhanced alignment matrix
         bg_fg = gt_fg_numel - fg_match  # False negatives
         bg_bg = pred_bg_numel - bg_fg  # True negatives
@@ -404,21 +409,26 @@ class EMeasureMetric(Metric):
         d_gt_fg = 1 - mean_gt
         d_gt_bg = -mean_gt
 
-        # Compute enhanced matrix for each part
-        parts = [
-            (fg_match, d_pred_fg, d_gt_fg),  # TP
-            (fg_mismatch, d_pred_fg, d_gt_bg),  # FP
-            (bg_fg, d_pred_bg, d_gt_fg),  # FN
-            (bg_bg, d_pred_bg, d_gt_bg),  # TN
-        ]
+        # Compute enhanced matrix for each part (vectorized, no loop)
+        numels = torch.stack([fg_match, fg_mismatch, bg_fg, bg_bg])
+        d_preds = torch.stack([d_pred_fg, d_pred_fg, d_pred_bg, d_pred_bg])
+        d_gts = torch.stack([d_gt_fg, d_gt_bg, d_gt_fg, d_gt_bg])
 
-        enhanced_sum = torch.tensor(0.0, device=pred.device)
-        for numel, d_pred, d_gt in parts:
-            align = 2 * d_pred * d_gt / (d_pred**2 + d_gt**2 + 1e-8)
-            enhanced = (align + 1) ** 2 / 4
-            enhanced_sum += enhanced * numel
+        align = 2 * d_preds * d_gts / (d_preds**2 + d_gts**2 + 1e-8)
+        enhanced = (align + 1) ** 2 / 4
+        enhanced_sum = (enhanced * numels).sum()
 
-        return enhanced_sum / (gt_size - 1 + 1e-8)
+        general_result = enhanced_sum / (gt_size - 1 + 1e-8)
+
+        # Handle edge cases with torch.where
+        case_no_fg = pred_bg_numel / (gt_size - 1 + 1e-8)
+        case_all_fg = pred_fg_numel / (gt_size - 1 + 1e-8)
+
+        return torch.where(
+            gt_fg_numel == 0,
+            case_no_fg,
+            torch.where(gt_fg_numel == gt_size, case_all_fg, general_result),
+        )
 
     def compute(self) -> Tensor:
         """Compute mean E-measure."""
