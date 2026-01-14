@@ -1,32 +1,33 @@
 [project]
 name = "anime-segmentation"
 version = "0.1.0"
-description = "Anime Segmentation Project"
+description = "Segmentation for anime character"
 readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "SkyTNT" }, { name = "nusu-github" }]
+maintainers = [{ name = "nusu-github" }]
 requires-python = ">=3.12"
 dependencies = [
-    "datasets>=4.4.2",
-    "huggingface-hub>=0.22",
-    "jsonargparse[signatures]>=4.45.0",
-    "kornia>=0.8.2",
+    "datasets",
+    "einops",
+    "huggingface-hub>0.25",
+    "jsonargparse[signatures]",
+    "kornia",
     "lightning",
     "numpy",
-    "opencv-python",
-    "pillow",
-    "scikit-image",
-    "scipy",
-    "torch>=2.9.1",
-    "torchmetrics>=1.8.2",
-    "torchvision>=0.24.1",
+    "opencv-python>4,<5",
+    "timm",
+    "torch>2",
+    "torchmetrics",
+    "torchvision",
 ]
 
 [project.optional-dependencies]
 schedulefree = ["schedulefree>=1.4.1"]
-came = ["came-pytorch>=0.1.3"]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["uv_build>=0.9.17,<0.10.0"]
+build-backend = "uv_build"
 
 [tool.uv.sources]
 torch = [
@@ -49,83 +50,11 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [dependency-groups]
-dev = [
-    "pyright>=1.1.407",
-    "pytest>=9.0.2",
-    "ruff>=0.14.10",
-    "scipy-stubs>=1.16.3.3",
-]
-
-app = ["gradio>6.0,<=7.0"]
-export = ["onnx", "onnxslim"]
+dev = ["ty", "pytest", "ruff"]
 
 [tool.ruff]
-preview = true
 line-length = 100
 target-version = "py312"
-
-[tool.ruff.lint]
-select = ["ALL"]
-ignore = [
-    "CPY",
-    "T20",
-    "COM812",
-    "D203",
-    "D213",
-
-    # Scripts are standalone, not a package
-    "INP001",
-
-    # Docstrings - Excessive for research/ML code
-    "D100",
-    "D101",
-    "D102",
-    "D103",
-    "D104",
-    "D107",
-    "D205",
-    "D400",
-    "D415",
-    "D417",
-    "DOC201",
-    "DOC501",
-
-    # Type annotations - Gradual addition is fine
-    "ANN001",
-    "ANN002",
-    "ANN003",
-    "ANN201",
-    "ANN202",
-    "ANN204",
-    "ANN206",
-    "ANN401", # Any is sometimes necessary
-
-    # Common patterns in ML/Scientific computing
-    "N806",
-    "N812",    # Short variable names like F, L, N
-    "PLR0913",
-    "PLR0917", # many args (config classes)
-    "PLR0914", # many local vars (complex algorithms)
-    "PLR2004", # magic values (ML hyperparams)
-
-    # Boolean args - Acceptable in config functions
-    "FBT001",
-    "FBT002",
-    "FBT003",
-
-    # Tests
-    "S101", # assert in tests is fine
-
-    # Acceptable patterns
-    "TRY003",  # long exception messages
-    "PLR6301", # could be static - not always better
-    "PLC0415", # imports in functions (for optional deps)
-    "S311",    # random for non-crypto (shuffling data)
-]
-
-[tool.ruff.lint.per-file-ignores]
-"__init__.py" = ["E402"]
-"**/{tests,docs,tools}/*" = ["ANN", "BLE", "INP", "D", "DOC"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -139,8 +68,3 @@ docstring-code-format = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-v", "--tb=short"]
-
-[tool.pyright]
-include = ["src"]
-typeCheckingMode = "standard"

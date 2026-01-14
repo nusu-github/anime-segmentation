@@ -1,31 +1,26 @@
 # Anime Segmentation
 
-![Banner](./doc/banner.jpg)
-
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/skytnt/anime-remove-background)
 
-High-precision background removal tool specifically designed for anime characters. This project focuses on **IS-Net** with intermediate supervision, providing a complete pipeline for training, inference, and deployment.
+High-precision background removal for anime characters using **BiRefNet** (Bilateral Reference Network). This project provides a complete training and inference pipeline built on PyTorch Lightning with modern tooling and Hugging Face Hub integration.
 
 ## Features
 
-- **IS-Net**: Focused on IS-Net with intermediate supervision for anime segmentation.
-- **High Resolution**: Optimized for handling high-resolution anime artwork (1024x1024).
-- **Web UI**: Integrated Gradio app for easy interactive usage.
-- **Training Pipeline**: Full training support with PyTorch Lightning, including distributed training and mixed precision.
-- **ONNX Export**: Tools to export models for efficient deployment.
+- **BiRefNet Architecture**: State-of-the-art encoder-decoder with gradient-aware refinement (Out-Ref) and multi-scale supervision
+- **16+ Backbone Options**: ConvNeXt, Swin Transformer, PVT v2, DINOv3
+- **YAML Configuration**: Full training customization via LightningCLI
+- **Hugging Face Integration**: Load/push models directly from/to the Hub
+- **Production Ready**: Type-hinted codebase, torch.compile support, distributed training
 
 ## Installation
 
-Ensure you have Python 3.12 or higher installed.
+Requires Python 3.12+.
 
-### Using `uv` (Recommended)
-
-This project uses `uv` for dependency management.
+### Using uv (Recommended)
 
 ```bash
-# Install dependencies
 uv sync
 ```
 
@@ -35,152 +30,215 @@ uv sync
 pip install .
 ```
 
-## Usage
+## Quick Start
 
-### Pre-trained Models
-
-Download pre-trained models from [Hugging Face](https://huggingface.co/skytnt/anime-seg) and place them in the `checkpoints/` or `saved_models/` directory.
-
-### Web UI (Gradio)
-
-The easiest way to use the tool is via the web interface.
+### Training
 
 ```bash
-python scripts/app.py
+python -m anime_segmentation.training.train fit --config configs/birefnet_default.yaml
 ```
 
-This will launch a local server (usually at `http://127.0.0.1:6006`) where you can upload images and adjust settings interactively.
-
-### Command Line Inference
-
-Run inference on a single image or a directory of images.
+Override parameters from CLI:
 
 ```bash
-python scripts/inference.py \
-    --net isnet_is \
-    --ckpt checkpoints/isnetis.ckpt \
-    --data path/to/input_images \
-    --out output_directory \
-    --img-size 1024
+python -m anime_segmentation.training.train fit \
+    --config configs/birefnet_default.yaml \
+    --model.bb_name swin_v1_t \
+    --data.batch_size 4
 ```
 
-**Options:**
+## Model Architecture
 
-- `--net`: Model architecture (`isnet_is`, `isnet`)
-- `--ckpt`: Path to the model checkpoint.
-- `--data`: Input directory or image path.
-- `--out`: Output directory.
-- `--only-matted`: Output only the matted image (RGBA).
-- `--bg-white`: Replace background with white instead of transparent.
+BiRefNet uses a hierarchical encoder-decoder structure with:
 
-## Training
+- **Backbone Encoder**: Extracts multi-scale features (16 variants available)
+- **ASPP/ASPPDeformable**: Atrous Spatial Pyramid Pooling for context aggregation
+- **Multi-scale Supervision**: Loss computed at multiple decoder levels
+- **Out-Ref Module**: Gradient-aware output refinement for edge quality
+- **In-Ref Module**: Input reference fusion for detail preservation
 
-The project uses **PyTorch Lightning** and **LightningCLI** for training. Configuration is managed via YAML files.
+### Supported Backbones
 
-### 1. Prepare Dataset
+| Family           | Variants                                                                                            |
+| ---------------- | --------------------------------------------------------------------------------------------------- |
+| ConvNeXt         | `convnext_atto`, `convnext_femto`, `convnext_pico`, `convnext_nano`, `convnext_tiny`                |
+| ConvNeXt V2      | `convnext_v2_atto`, `convnext_v2_femto`, `convnext_v2_pico`, `convnext_v2_nano`, `convnext_v2_tiny` |
+| Swin Transformer | `swin_v1_t`, `swin_v1_s`, `swin_v1_b`, `swin_v1_l`                                                  |
+| PVT v2           | `pvt_v2_b0`, `pvt_v2_b1`, `pvt_v2_b2`, `pvt_v2_b5`                                                  |
+| DINOv3           | `dino_v3_s`, `dino_v3_b`, `dino_v3_l`, `dino_v3_h_plus`, `dino_v3_7b`                               |
 
-The training pipeline expects a dataset with the following structure:
+## Dataset Format
 
-```
+Prepare your dataset in BiRefNet-style structure:
+
+```text
 dataset/
-├── fg/          # Foreground images (RGBA png)
-├── bg/          # Background images (jpg/png)
-├── imgs/        # Real training images (jpg)
-└── masks/       # Corresponding masks (jpg/png)
+├── train/
+│   ├── im/     # Input images (.png, .jpg)
+│   └── gt/     # Ground truth masks (.png)
+├── val/
+│   ├── im/
+│   └── gt/
+└── test/
+    ├── im/
+    └── gt/
 ```
 
-Or you can use the [Hugging Face Dataset](https://huggingface.co/datasets/skytnt/anime-segmentation).
+Update the config file:
 
-### 2. Run Training
-
-This repo uses a **two-stage** workflow:
-
-1) Train the ground-truth encoder (`isnet_gt`) and save it to a fixed path: `artifacts/gt_encoder.ckpt`
-
-```bash
-python -m anime_segmentation.train fit --config config/stage1_gt_encoder.yaml
+```yaml
+data:
+  data_root: path/to/dataset
+  training_sets:
+    - train
+  validation_sets:
+    - val
+  test_sets:
+    - test
 ```
 
-2) Train the main model (`isnet_is`) using the saved gt_encoder (always frozen)
+## Configuration
 
-```bash
-python -m anime_segmentation.train fit --config config/stage2_isnet_is.yaml
+Training is configured via YAML files. See `configs/birefnet_default.yaml` for all options.
+
+### Key Configuration Sections
+
+**Model**:
+
+```yaml
+model:
+  bb_name: convnext_atto      # Backbone selection
+  bb_pretrained: true
+  out_ref: true               # Gradient-aware refinement
+  ms_supervision: true        # Multi-scale supervision
+  dec_att: ASPPDeformable     # Decoder attention type
 ```
 
-Override parameters from CLI (example):
+**Optimizer & Scheduler**:
 
-```bash
-python -m anime_segmentation.train fit \
-    --config config/stage2_isnet_is.yaml \
-    --data.batch_size_train 4
+```yaml
+model:
+  optimizer:
+    class_path: torch.optim.AdamW
+    init_args:
+      lr: 1e-4
+      weight_decay: 0.01
+  scheduler:
+    class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+    init_args:
+      T_max: 120
 ```
 
-### 3. Configuration
+**Loss Weights**:
 
-Check `config/stage1_gt_encoder.yaml` / `config/stage2_isnet_is.yaml` to modify:
-
-- **Model**: Architecture, learning rate, optimizer, loss weights.
-- **Data**: Batch size, image size, augmentation parameters.
-- **Trainer**: Epochs, GPUs, precision, callbacks.
-
-## Export to ONNX
-
-Export trained models to ONNX for use in other applications.
-
-```bash
-python scripts/export.py \
-    --net isnet_is \
-    --ckpt checkpoints/isnetis.ckpt \
-    --out exported_models/isnet.onnx \
-    --img-size 1024
+```yaml
+model:
+  lambdas_pix_last:
+    bce: 30.0
+    iou: 0.5
+    ssim: 10.0
 ```
 
-## Supported Models
+**Data Augmentation**:
 
-| Model Code   | Description                                     | Recommended Size |
-| ------------ | ----------------------------------------------- | ---------------- |
-| `isnet_is`   | IS-Net with intermediate supervision            | 1024             |
-| `isnet`      | Standard IS-Net                                 | 1024             |
-| `isnet_gt`   | IS-Net Ground Truth Encoder (for training only) | 1024             |
-
-## Dataset
-
-The official dataset is a combination of [AniSeg](https://github.com/jerryli27/AniSeg) and manual collections, cleaned and annotated for high-quality anime segmentation.
-
-Download via Git LFS:
-
-```bash
-git lfs install
-git clone https://huggingface.co/datasets/skytnt/anime-segmentation
+```yaml
+data:
+  size: [1024, 1024]
+  hflip_prob: 0.5
+  rotation_degrees: 10.0
+  color_jitter: true
 ```
+
+**Trainer**:
+
+```yaml
+trainer:
+  max_epochs: 120
+  precision: 16-mixed
+  accumulate_grad_batches: 4
+```
+
+## Evaluation Metrics
+
+The training pipeline includes BiRefNet-style metrics:
+
+| Metric    | Description                   |
+| --------- | ----------------------------- |
+| IoU       | Intersection over Union       |
+| MAE       | Mean Absolute Error           |
+| S-measure | Spatial/structural similarity |
+| E-measure | Enhanced alignment measure    |
+| F-measure | Weighted precision-recall     |
+
+## Hugging Face Hub
+
+### Load Pretrained Model
+
+```python
+from anime_segmentation.birefnet.models import BiRefNet
+
+model = BiRefNet.from_pretrained("ZhengPeng7/BiRefNet")
+```
+
+### Push to Hub
+
+```python
+model.push_to_hub("your-username/your-model")
+```
+
+## Project Structure
+
+```text
+anime-segmentation/
+├── src/anime_segmentation/
+│   ├── birefnet/
+│   │   ├── models/           # BiRefNet architecture
+│   │   │   ├── birefnet.py
+│   │   │   ├── backbones/    # Encoder implementations
+│   │   │   └── modules/      # Decoder components
+│   │   ├── predictor.py      # Inference wrapper
+│   │   └── image_proc.py     # Foreground refinement
+│   └── training/
+│       ├── train.py          # LightningCLI entry point
+│       ├── lightning_module.py
+│       ├── datamodule.py
+│       ├── loss.py           # Multi-component loss
+│       ├── metrics.py        # TorchMetrics implementations
+│       └── callbacks.py      # Training callbacks
+├── configs/
+│   └── birefnet_default.yaml
+└── pyproject.toml
+```
+
+## Training Callbacks
+
+| Callback                        | Description                                 |
+| ------------------------------- | ------------------------------------------- |
+| `FinetuneCallback`              | Adjusts loss weights in final epochs        |
+| `BackboneFreezeCallback`        | Freezes backbone initially, unfreezes later |
+| `GradientAccumulationScheduler` | Dynamic gradient accumulation               |
+| `VisualizationCallback`         | Logs predictions during training            |
+| `HubUploadCallback`             | Auto-uploads checkpoints to HF Hub          |
+
+## Important Notes
+
+This project integrates [BiRefNet](https://github.com/ZhengPeng7/BiRefNet) with significant custom modifications:
+
+- Added ConvNeXt backbone family (atto, femto, pico, nano, tiny)
+- Refactored backbone interface and feature extraction
+- Modified decoder architecture and loss computation
+- Restructured training pipeline with LightningCLI
+
+**These changes are NOT compatible with the original BiRefNet pretrained weights.** You will need to train from scratch or use weights specifically trained with this codebase.
 
 ## License
 
 This project is licensed under the Apache 2.0 License. See [LICENSE](LICENSE) for details.
 
-## Custom Modifications
-
-This fork introduces significant engineering improvements and modernization over the original [anime-segmentation](https://github.com/SkyTNT/anime-segmentation) repository:
-
-### Architecture & Engineering
-
-- **Package Structure**: Refactored into a proper `src/anime_segmentation` Python package.
-- **Dependency Management**: Migrated to **uv** for deterministic and fast dependency resolution (`pyproject.toml`).
-- **Code Quality**: Fully type-hinted codebase, formatted and linted with **Ruff**.
-- **Configuration**: Replaced `argparse` with **LightningCLI**, allowing configuration via structured YAML files (`config/config.yaml`).
-
-### Performance & Training
-
-- **Data Pipeline**: Replaced custom data loaders with **Hugging Face Datasets** for efficient caching, streaming, and multiprocessing.
-- **Augmentation**: Migrated all augmentations to **torchvision.transforms.v2** for GPU acceleration and modern API usage.
-- **Optimization**: Added support for **TorchCompile** (`torch.compile`) and **Schedule-Free Optimizers** (`schedulefree`).
-- **Metrics**: Implemented BiRefNet-style robust evaluation metrics (S-measure, E-measure, Weighted F-measure) via `torchmetrics`.
-
-### Model Focus
-
-- **IS-Net Focus**: Concentrated development on IS-Net with intermediate supervision for anime-specific segmentation.
+This project includes code from [BiRefNet](https://github.com/ZhengPeng7/BiRefNet), which is licensed under the MIT License.
 
 ## Acknowledgements
 
-- [ISNet (DIS)](https://github.com/xuebinqin/DIS)
-- [BiRefNet](https://github.com/ZhengPeng7/BiRefNet) (for loss and metric implementations)
+- [BiRefNet](https://github.com/ZhengPeng7/BiRefNet)
+- [DIS (ISNet)](https://github.com/xuebinqin/DIS)
+- [Original anime-segmentation](https://github.com/SkyTNT/anime-segmentation)
