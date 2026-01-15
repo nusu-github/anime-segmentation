@@ -4,7 +4,12 @@ from torchvision.ops import deform_conv2d
 
 
 class DeformableConv2d(nn.Module):
-    """Deformable convolution with learnable offsets and modulation weights."""
+    """Deformable convolution with learnable offsets and modulation weights.
+
+    Unlike standard convolution that samples on a fixed grid, deformable conv
+    learns per-pixel offsets to adaptively sample from relevant locations.
+    Modulation weights (0-2 range via 2*sigmoid) control each sample's contribution.
+    """
 
     def __init__(
         self,

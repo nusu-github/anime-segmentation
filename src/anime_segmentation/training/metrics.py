@@ -186,10 +186,14 @@ class FMeasureMetric(Metric):
 
 
 class SMeasureMetric(Metric):
-    """Structure Measure metric.
+    """Structure Measure (S-measure) for salient object detection.
 
-    Evaluates structural similarity between prediction and ground truth.
-    Combines object-aware and region-aware structural similarity.
+    Evaluates structural similarity via two complementary components:
+    - Object-aware (So): similarity within foreground/background regions
+    - Region-aware (Sr): SSIM computed over 4 quadrants centered on the mask centroid
+
+    Final score: alpha * So + (1 - alpha) * Sr
+    Reference: Fan et al., "Structure-measure: A New Way to Evaluate Foreground Maps" (ICCV 2017)
     """
 
     is_differentiable: bool = False
@@ -352,10 +356,13 @@ class SMeasureMetric(Metric):
 
 
 class EMeasureMetric(Metric):
-    """Enhanced-alignment Measure metric (adaptive version).
+    """Enhanced-alignment Measure (E-measure) for binary segmentation.
 
-    Evaluates the alignment between prediction and ground truth
-    considering both pixel-level and image-level information.
+    Computes alignment between prediction and ground truth by measuring
+    how well the prediction's global mean and local values match the target.
+    Uses an enhanced alignment matrix that penalizes both false positives and negatives.
+
+    Reference: Fan et al., "Enhanced-alignment Measure for Binary Foreground Map Evaluation" (IJCAI 2018)
     """
 
     is_differentiable: bool = False

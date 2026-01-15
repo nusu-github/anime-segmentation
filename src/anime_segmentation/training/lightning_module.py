@@ -198,7 +198,7 @@ class BiRefNetLightning(
     def forward(self, x):
         return self._require_model()(x)
 
-    def training_step(self, batch, batch_idx):  # noqa: ARG002
+    def training_step(self, batch, batch_idx):
         """Training step with modular loss computation.
 
         Args:
@@ -242,7 +242,7 @@ class BiRefNetLightning(
 
         """
         model = self._require_model()
-        with self.trainer.profiler.profile("model_forward"):
+        with self.trainer.profiler.profile("model_forward"):  # ty:ignore[unresolved-attribute]
             return model(inputs)
 
     def _compute_training_losses(
@@ -266,7 +266,7 @@ class BiRefNetLightning(
             Dictionary containing total, pix, cls, gdt losses and pix_details.
 
         """
-        with self.trainer.profiler.profile("loss_calculation"):
+        with self.trainer.profiler.profile("loss_calculation"):  # ty:ignore[unresolved-attribute]
             # Gradient Loss (if out_ref is enabled)
             loss_gdt = inputs.new_zeros(())
             if self.out_ref:
@@ -350,8 +350,8 @@ class BiRefNetLightning(
 
         This helps in detecting exploding gradients early.
         """
-        if self.trainer.global_step % self.trainer.log_every_n_steps == 0:
-            norms = grad_norm(self.model, norm_type=2)  # type: ignore[arg-type]
+        if self.trainer.global_step % self.trainer.log_every_n_steps == 0:  # ty:ignore[unresolved-attribute]
+            norms = grad_norm(self.model, norm_type=2)  # ty:ignore[invalid-argument-type]
             self.log_dict(norms)
 
     def _calculate_gdt_loss(self, outs_gdt_pred, outs_gdt_label) -> torch.Tensor:
@@ -606,7 +606,7 @@ class BiRefNetLightning(
 
         return pred, loss, gts
 
-    def validation_step(self, batch, batch_idx):  # noqa: ARG002
+    def validation_step(self, batch, batch_idx):
         """Validation step with loss computation and metrics update.
 
         Args:
@@ -625,7 +625,7 @@ class BiRefNetLightning(
         # Log loss and metrics
         self.log(
             "val/loss",
-            loss,
+            loss,  # ty:ignore[invalid-argument-type]
             on_step=False,
             on_epoch=True,
             prog_bar=True,
@@ -635,7 +635,7 @@ class BiRefNetLightning(
 
         return loss
 
-    def test_step(self, batch, batch_idx) -> None:  # noqa: ARG002
+    def test_step(self, batch, batch_idx) -> None:
         """Test step with metrics update only.
 
         Args:
@@ -649,7 +649,7 @@ class BiRefNetLightning(
         self.test_metrics.update(pred, gts)
         self.log_dict(self.test_metrics, on_step=False, on_epoch=True, sync_dist=True)
 
-    def predict_step(self, batch, batch_idx):  # noqa: ARG002
+    def predict_step(self, batch, batch_idx):
         """Prediction step.
 
         Args:

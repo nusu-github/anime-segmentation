@@ -192,8 +192,8 @@ class VisualizationCallback(L.Callback):
 
     def on_validation_start(
         self,
-        trainer: L.Trainer,  # noqa: ARG002
-        pl_module: L.LightningModule,  # noqa: ARG002
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
     ) -> None:
         """Reset state at the start of each validation epoch."""
         self._cleanup()
@@ -201,11 +201,11 @@ class VisualizationCallback(L.Callback):
     def on_validation_batch_end(
         self,
         trainer: L.Trainer,
-        pl_module: L.LightningModule,  # noqa: ARG002
-        outputs,  # noqa: ARG002
+        pl_module: L.LightningModule,
+        outputs,
         batch,
         batch_idx: int,
-        dataloader_idx: int = 0,  # noqa: ARG002
+        dataloader_idx: int = 0,
     ) -> None:
         """Capture samples from the first validation batch.
 
@@ -346,20 +346,20 @@ class ScheduleFreeCallback(L.Callback):
                 getattr(opt, mode)()
 
     # === Training ===
-    def on_fit_start(self, trainer, pl_module) -> None:  # noqa: ARG002
+    def on_fit_start(self, trainer, pl_module) -> None:
         self._log("on_fit_start called")
         self._set_mode(trainer, "train")
 
-    def on_train_start(self, trainer, pl_module) -> None:  # noqa: ARG002
+    def on_train_start(self, trainer, pl_module) -> None:
         self._log("on_train_start called")
         self._set_mode(trainer, "train")
 
     # === Validation ===
-    def on_validation_start(self, trainer, pl_module) -> None:  # noqa: ARG002
+    def on_validation_start(self, trainer, pl_module) -> None:
         self._log(f"on_validation_start called (sanity={trainer.sanity_checking})")
         self._set_mode(trainer, "eval")
 
-    def on_validation_end(self, trainer, pl_module) -> None:  # noqa: ARG002
+    def on_validation_end(self, trainer, pl_module) -> None:
         # During fit, trainer.training is False while validating, so check state.fn instead
         is_fitting = trainer.state.fn == TrainerFn.FITTING
         self._log(f"on_validation_end called (fitting={is_fitting})")
@@ -367,16 +367,16 @@ class ScheduleFreeCallback(L.Callback):
             self._set_mode(trainer, "train")
 
     # === Test / Predict ===
-    def on_test_start(self, trainer, pl_module) -> None:  # noqa: ARG002
+    def on_test_start(self, trainer, pl_module) -> None:
         self._log("on_test_start called")
         self._set_mode(trainer, "eval")
 
-    def on_predict_start(self, trainer, pl_module) -> None:  # noqa: ARG002
+    def on_predict_start(self, trainer, pl_module) -> None:
         self._log("on_predict_start called")
         self._set_mode(trainer, "eval")
 
     # === Checkpoint ===
-    def on_save_checkpoint(self, trainer, pl_module, checkpoint) -> None:  # noqa: ARG002
+    def on_save_checkpoint(self, trainer, pl_module, checkpoint) -> None:
         """Save the optimizer state in eval mode."""
         new_states = []
         for i, opt in enumerate(trainer.optimizers):
@@ -384,11 +384,11 @@ class ScheduleFreeCallback(L.Callback):
                 was_train = self._get_train_mode(opt)
                 if was_train:
                     # Type Safety: switch to eval mode
-                    opt.eval()  # pyright: ignore[reportAttributeAccessIssue]
+                    opt.eval()
                 new_states.append(trainer.strategy.optimizer_state(opt))
                 if was_train:
                     # Type Safety: restore to train mode
-                    opt.train()  # pyright: ignore[reportAttributeAccessIssue]
+                    opt.train()
             else:
                 new_states.append(checkpoint["optimizer_states"][i])
         checkpoint["optimizer_states"] = new_states

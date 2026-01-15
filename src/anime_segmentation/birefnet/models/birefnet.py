@@ -178,7 +178,13 @@ class BiRefNet(
         )
 
     def forward_enc(self, x):
-        x1, x2, x3, x4 = self.bb(x)  # 4-level feature pyramid
+        """Encode input through backbone with optional multi-scale fusion.
+
+        Multi-scale input (mul_scl_ipt) processes a downscaled version of the input
+        through the backbone and fuses features at each level via concatenation or
+        addition. This captures both fine and coarse details for better segmentation.
+        """
+        x1, x2, x3, x4 = self.bb(x)
 
         if self.mul_scl_ipt:
             _B, _C, H, W = x.shape
@@ -254,7 +260,14 @@ class BiRefNet(
 
 
 class Decoder(nn.Module):
-    """Progressive decoder with multi-scale supervision and gradient-aware refinement."""
+    """Progressive decoder with multi-scale supervision and gradient-aware refinement.
+
+    The decoder progressively upsamples features from the encoder while:
+    - Fusing encoder skip connections via lateral blocks
+    - Optionally injecting input image patches (dec_ipt) for detail preservation
+    - Applying gradient-aware attention (out_ref) to focus on edge regions
+    - Generating intermediate predictions (ms_supervision) for deep supervision
+    """
 
     def __init__(
         self,
@@ -524,7 +537,7 @@ class Decoder(nn.Module):
         p4 = self.decoder_block4(x4)
         m4 = self.conv_ms_spvn_4(p4) if self.ms_supervision and self.training else None
         if self.out_ref:
-            # Gradient-aware refinement at scale 4
+            # Gradient-aware refinement: predict edge map and use it as spatial attention
             p4_gdt = self.gdt_convs_4(p4)
             if self.training:
                 m4_dia = m4
@@ -570,7 +583,6 @@ class Decoder(nn.Module):
         p3 = self.decoder_block3(_p3)
         m3 = self.conv_ms_spvn_3(p3) if self.ms_supervision and self.training else None
         if self.out_ref:
-            # Gradient-aware refinement at scale 3
             p3_gdt = self.gdt_convs_3(p3)
             if self.training:
                 m3_dia = m3
@@ -616,7 +628,6 @@ class Decoder(nn.Module):
         p2 = self.decoder_block2(_p2)
         m2 = self.conv_ms_spvn_2(p2) if self.ms_supervision and self.training else None
         if self.out_ref:
-            # Gradient-aware refinement at scale 2
             p2_gdt = self.gdt_convs_2(p2)
             if self.training:
                 m2_dia = m2

@@ -141,12 +141,10 @@ def main() -> None:
     # Set float32 matrix multiplication precision for better performance on Ampere+ GPUs
     torch.set_float32_matmul_precision("high")
 
-    cli = BiRefNetCLI(  # noqa: F841
+    _cli = BiRefNetCLI(
         BiRefNetLightning,
         BiRefNetDataModule,
         seed_everything_default=7,
-        # Disable automatic optimizer configuration - we use OptimizerCallable/LRSchedulerCallable
-        # in the model to allow any optimizer/scheduler to be configured via YAML
         auto_configure_optimizers=False,
         parser_kwargs={
             "default_env": True,
