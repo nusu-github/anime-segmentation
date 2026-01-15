@@ -47,11 +47,13 @@ class BaseLoss(nn.Module):
             Reduced loss tensor.
 
         """
-        if self.reduction == "none":
-            return loss
-        if self.reduction == "sum":
-            return loss.sum()
-        return loss.mean()
+        match self.reduction:
+            case "none":
+                return loss
+            case "sum":
+                return loss.sum()
+            case _:
+                return loss.mean()
 
 
 # =============================================================================

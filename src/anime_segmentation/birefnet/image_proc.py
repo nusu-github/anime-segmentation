@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import torch
 import torchvision.transforms.functional as F
+from einops import rearrange
 from PIL import Image, ImageEnhance
 
 
@@ -96,8 +97,8 @@ def refine_foreground(image, mask, r=90, device=None, compile=False):
         mask = mask.resize(image.size)
 
     if device == "cuda":
-        img_tensor = F.to_tensor(image).unsqueeze(0).to(device)
-        mask_tensor = F.to_tensor(mask).unsqueeze(0).to(device)
+        img_tensor = rearrange(F.to_tensor(image), "c h w -> 1 c h w").to(device)
+        mask_tensor = rearrange(F.to_tensor(mask), "c h w -> 1 c h w").to(device)
 
         if compile:
             global _compiled_FB_blur_fusion_foreground_estimator_gpu_2
@@ -115,8 +116,8 @@ def refine_foreground(image, mask, r=90, device=None, compile=False):
             r=r,
         )
 
-        estimated_foreground = (estimated_foreground.squeeze().mul(255.0)).to(torch.uint8)
-        estimated_foreground = estimated_foreground.permute(1, 2, 0).cpu().numpy()
+        estimated_foreground = estimated_foreground.squeeze(0).mul(255.0).to(torch.uint8)
+        estimated_foreground = rearrange(estimated_foreground, "c h w -> h w c").cpu().numpy()
     else:
         img_np = np.array(image, dtype=np.float32) / 255.0
         mask_np = np.array(mask, dtype=np.float32) / 255.0

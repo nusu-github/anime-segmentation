@@ -9,6 +9,7 @@ import lightning as L
 import torch
 import torch.nn.functional as F
 import torchvision.utils as vutils
+from einops import rearrange, repeat
 from huggingface_hub import HfApi
 from lightning.pytorch.callbacks import BaseFinetuning
 from lightning.pytorch.trainer.states import TrainerFn
@@ -271,17 +272,16 @@ class VisualizationCallback(L.Callback):
             del inputs_device  # Free GPU memory immediately
 
         # Denormalize inputs for visualization
-        mean = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
-        std = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
+        mean = rearrange(torch.tensor(IMAGENET_MEAN), "c -> 1 c 1 1")
+        std = rearrange(torch.tensor(IMAGENET_STD), "c -> 1 c 1 1")
         inputs_viz = torch.clamp(inputs_captured * std + mean, 0, 1)
 
-        # Create visualization grid
-        viz_list = []
-        for i in range(inputs_captured.size(0)):
-            gt_rgb = gts_captured[i].repeat(3, 1, 1)
-            pred_rgb = preds[i].repeat(3, 1, 1)
-            viz = torch.cat([inputs_viz[i], gt_rgb, pred_rgb], dim=2)
-            viz_list.append(viz)
+        # Create visualization grid: grayscale to RGB by repeating channel
+        gts_rgb = repeat(gts_captured, "b 1 h w -> b 3 h w")
+        preds_rgb = repeat(preds, "b 1 h w -> b 3 h w")
+        # Concatenate input, ground truth, prediction along width
+        viz_batch = torch.cat([inputs_viz, gts_rgb, preds_rgb], dim=3)
+        viz_list = list(viz_batch)
 
         grid = vutils.make_grid(viz_list, nrow=1, padding=2)
 
@@ -464,9 +464,11 @@ class HubUploadCallback(L.Callback):
         """Check if current score is an improvement over best."""
         if self.best_score is None:
             return True
-        if self.mode == "min":
-            return current < self.best_score
-        return current > self.best_score
+        match self.mode:
+            case "min":
+                return current < self.best_score
+            case _:
+                return current > self.best_score
 
     def _should_upload_best(self, trainer: L.Trainer) -> bool:
         """Check if best model should be uploaded based on current state."""

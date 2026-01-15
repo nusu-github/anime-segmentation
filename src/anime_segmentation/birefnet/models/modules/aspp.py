@@ -24,12 +24,13 @@ class ASPP(nn.Module):
         if out_channels is None:
             out_channels = in_channels
         self.in_channelster = 256 // self.down_scale
-        if output_stride == 16:
-            dilations = [1, 6, 12, 18]
-        elif output_stride == 8:
-            dilations = [1, 12, 24, 36]
-        else:
-            raise NotImplementedError
+        match output_stride:
+            case 16:
+                dilations = [1, 6, 12, 18]
+            case 8:
+                dilations = [1, 12, 24, 36]
+            case _:
+                raise NotImplementedError
 
         norm_layer = group_norm
 

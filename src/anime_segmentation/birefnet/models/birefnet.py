@@ -12,17 +12,14 @@ from .modules.decoder_blocks import BasicDecBlk, ResBlk
 from .modules.lateral_blocks import BasicLatBlk
 from .modules.norms import group_norm
 
-_ACT_LAYER_MAP = {
+_ACT_LAYER_MAP: dict[str, type[nn.Module]] = {
     "relu": nn.ReLU,
-    "leaky_relu": nn.LeakyReLU,
-    "mish": nn.Mish,
-    "silu": nn.SiLU,
-    "swish": nn.SiLU,
     "gelu": nn.GELU,
+    "swish": nn.SiLU,
 }
 
 
-def _resolve_act_layer(act_layer, act_kwargs):
+def _resolve_act_layer(act_layer: str | None = None, act_kwargs=None):
     if act_layer is None:
         act_layer = "relu"
     if isinstance(act_layer, str):
@@ -30,9 +27,13 @@ def _resolve_act_layer(act_layer, act_kwargs):
         if key not in _ACT_LAYER_MAP:
             msg = f"Unknown activation '{act_layer}'. Available: {', '.join(_ACT_LAYER_MAP)}"
             raise ValueError(msg)
-        act_layer = _ACT_LAYER_MAP[key]
-    if act_kwargs is None and act_layer is nn.ReLU:
-        act_kwargs = {"inplace": True}
+        act_layer: type[nn.Module] = _ACT_LAYER_MAP[key]
+    if act_kwargs is None:
+        match act_layer:
+            case nn.ReLU | nn.SiLU:
+                act_kwargs = {"inplace": True}
+            case nn.GELU:
+                act_kwargs = {"approximate": "tanh"}
     return act_layer, act_kwargs
 
 

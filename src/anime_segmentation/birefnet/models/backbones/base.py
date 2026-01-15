@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import timm
 import torch
+from einops import rearrange
 from torch import nn
 
 if TYPE_CHECKING:
@@ -171,4 +172,4 @@ class NHWCWrapper(TimmBackboneWrapper):
             Tuple of feature tensors in NCHW format
 
         """
-        return tuple(o.permute(0, 3, 1, 2).contiguous() for o in outs)
+        return tuple(rearrange(o, "n h w c -> n c h w") for o in outs)

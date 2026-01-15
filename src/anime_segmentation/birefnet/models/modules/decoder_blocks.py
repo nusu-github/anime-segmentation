@@ -34,20 +34,21 @@ class BasicDecBlk(nn.Module):
             act_kwargs=act_kwargs,
         )
 
-        if attention_type == "ASPP":
-            self.dec_att = ASPP(
-                in_channels=inter_channels,
-                use_norm=use_norm,
-                act_layer=act_layer,
-                act_kwargs=act_kwargs,
-            )
-        elif attention_type == "ASPPDeformable":
-            self.dec_att = ASPPDeformable(
-                in_channels=inter_channels,
-                use_norm=use_norm,
-                act_layer=act_layer,
-                act_kwargs=act_kwargs,
-            )
+        match attention_type:
+            case "ASPP":
+                self.dec_att = ASPP(
+                    in_channels=inter_channels,
+                    use_norm=use_norm,
+                    act_layer=act_layer,
+                    act_kwargs=act_kwargs,
+                )
+            case "ASPPDeformable":
+                self.dec_att = ASPPDeformable(
+                    in_channels=inter_channels,
+                    use_norm=use_norm,
+                    act_layer=act_layer,
+                    act_kwargs=act_kwargs,
+                )
 
         self.conv_out = ConvNormAct(
             inter_channels,
@@ -99,20 +100,21 @@ class ResBlk(nn.Module):
             act_kwargs=act_kwargs,
         )
 
-        if attention_type == "ASPP":
-            self.dec_att = ASPP(
-                in_channels=inter_channels,
-                use_norm=use_norm,
-                act_layer=act_layer,
-                act_kwargs=act_kwargs,
-            )
-        elif attention_type == "ASPPDeformable":
-            self.dec_att = ASPPDeformable(
-                in_channels=inter_channels,
-                use_norm=use_norm,
-                act_layer=act_layer,
-                act_kwargs=act_kwargs,
-            )
+        match attention_type:
+            case "ASPP":
+                self.dec_att = ASPP(
+                    in_channels=inter_channels,
+                    use_norm=use_norm,
+                    act_layer=act_layer,
+                    act_kwargs=act_kwargs,
+                )
+            case "ASPPDeformable":
+                self.dec_att = ASPPDeformable(
+                    in_channels=inter_channels,
+                    use_norm=use_norm,
+                    act_layer=act_layer,
+                    act_kwargs=act_kwargs,
+                )
 
         self.conv_out = ConvNormAct(
             inter_channels,
