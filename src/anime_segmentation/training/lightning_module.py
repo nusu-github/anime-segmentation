@@ -58,14 +58,31 @@ class BiRefNetLightning(
 ):
     def __init__(
         self,
-        # Model parameters
+        # Model parameters - backbone
         bb_name: str = "swin_v1_t",
         bb_pretrained: bool = True,
+        # Model parameters - decoder architecture
         out_ref: bool = True,
         ms_supervision: bool = True,
+        dec_ipt: bool = True,
+        dec_ipt_split: bool = True,
+        cxt_num: int = 3,
+        mul_scl_ipt: Literal["", "add", "cat"] = "cat",
+        dec_att: Literal["", "ASPP", "ASPPDeformable"] = "ASPPDeformable",
+        squeeze_block: str = "BasicDecBlk_x1",
+        dec_blk: Literal["BasicDecBlk", "ResBlk"] = "BasicDecBlk",
+        lat_blk: Literal["BasicLatBlk"] = "BasicLatBlk",
+        dec_channels_inter: Literal["fixed", "adap"] = "fixed",
+        use_norm: bool = True,
+        # Model parameters - auxiliary classification
+        auxiliary_classification: bool = False,
+        num_classes: int | None = None,
+        # Model parameters - activation
         act_layer: str = "relu",
         act_kwargs: dict[str, Any] | None = None,
+        # Loading
         strict_loading: bool = True,
+        # Optimizer and scheduler
         optimizer: OptimizerCallable = torch.optim.AdamW,
         scheduler: LRSchedulerCallable | None = None,
         scheduler_interval: Literal["epoch", "step"] = "epoch",
@@ -179,19 +196,38 @@ class BiRefNetLightning(
             return
 
         self.model = BiRefNet(
+            # Backbone
             bb_name=self.hparams["bb_name"],
             bb_pretrained=self.hparams["bb_pretrained"],
+            # Decoder architecture
             ms_supervision=self.hparams["ms_supervision"],
             out_ref=self.hparams["out_ref"],
+            dec_ipt=self.hparams.get("dec_ipt", True),
+            dec_ipt_split=self.hparams.get("dec_ipt_split", True),
+            cxt_num=self.hparams.get("cxt_num", 3),
+            mul_scl_ipt=self.hparams.get("mul_scl_ipt", "cat"),
+            dec_att=self.hparams.get("dec_att", "ASPPDeformable"),
+            squeeze_block=self.hparams.get("squeeze_block", "BasicDecBlk_x1"),
+            dec_blk=self.hparams.get("dec_blk", "BasicDecBlk"),
+            lat_blk=self.hparams.get("lat_blk", "BasicLatBlk"),
+            dec_channels_inter=self.hparams.get("dec_channels_inter", "fixed"),
+            use_norm=self.hparams.get("use_norm", True),
+            # Auxiliary classification
+            auxiliary_classification=self.hparams.get("auxiliary_classification", False),
+            num_classes=self.hparams.get("num_classes", None),
+            # Activation
             act_layer=self.hparams.get("act_layer", "relu"),
             act_kwargs=self.hparams.get("act_kwargs", None),
         )
 
-        self.model.compile(
-            mode=self.hparams.get("compile_mode", "default"),
-            dynamic=self.hparams.get("compile_dynamic", None),
-            disable=self.hparams.get("compile_disable", False),
-        )
+        if self.hparams.get("compile", False):
+            self.model.compile(
+                mode=self.hparams.get("compile_mode", "default"),
+                fullgraph=self.hparams.get("compile_fullgraph", False),
+                dynamic=self.hparams.get("compile_dynamic", None),
+                backend=self.hparams.get("compile_backend", "inductor"),
+                disable=self.hparams.get("compile_disable", False),
+            )
 
         self.example_input_array = torch.randn(1, 3, 1024, 1024)  # for Lightning model summary
 

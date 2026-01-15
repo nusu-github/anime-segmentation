@@ -98,6 +98,10 @@ class PairedTransform:
         hflip_prob: float = 0.5,
         rotation_degrees: float = 10.0,
         color_jitter: bool = True,
+        color_jitter_brightness: float = 0.2,
+        color_jitter_contrast: float = 0.2,
+        color_jitter_saturation: float = 0.2,
+        color_jitter_hue: float = 0.1,
     ) -> None:
         """Initialize transforms.
 
@@ -107,6 +111,10 @@ class PairedTransform:
             hflip_prob: Probability of horizontal flip.
             rotation_degrees: Max rotation angle.
             color_jitter: Whether to apply color jitter to image.
+            color_jitter_brightness: Brightness jitter range.
+            color_jitter_contrast: Contrast jitter range.
+            color_jitter_saturation: Saturation jitter range.
+            color_jitter_hue: Hue jitter range.
 
         Raises:
             ValueError: If parameters are invalid.
@@ -139,10 +147,10 @@ class PairedTransform:
         # Color jitter for image only
         if color_jitter and is_train:
             self.jitter = transforms.ColorJitter(
-                brightness=0.2,
-                contrast=0.2,
-                saturation=0.2,
-                hue=0.1,
+                brightness=color_jitter_brightness,
+                contrast=color_jitter_contrast,
+                saturation=color_jitter_saturation,
+                hue=color_jitter_hue,
             )
         else:
             self.jitter = None
@@ -267,6 +275,10 @@ class BiRefNetDataModule(L.LightningDataModule):
         hflip_prob: float = 0.5,
         rotation_degrees: float = 10.0,
         color_jitter: bool = True,
+        color_jitter_brightness: float = 0.2,
+        color_jitter_contrast: float = 0.2,
+        color_jitter_saturation: float = 0.2,
+        color_jitter_hue: float = 0.1,
     ) -> None:
         """Initialize DataModule.
 
@@ -282,6 +294,10 @@ class BiRefNetDataModule(L.LightningDataModule):
             hflip_prob: Probability of horizontal flip during training.
             rotation_degrees: Max rotation angle during training.
             color_jitter: Whether to apply color jitter during training.
+            color_jitter_brightness: Brightness jitter range (0.0-1.0).
+            color_jitter_contrast: Contrast jitter range (0.0-1.0).
+            color_jitter_saturation: Saturation jitter range (0.0-1.0).
+            color_jitter_hue: Hue jitter range (0.0-0.5).
 
         """
         super().__init__()
@@ -300,6 +316,10 @@ class BiRefNetDataModule(L.LightningDataModule):
         self.hflip_prob = hflip_prob
         self.rotation_degrees = rotation_degrees
         self.color_jitter = color_jitter
+        self.color_jitter_brightness = color_jitter_brightness
+        self.color_jitter_contrast = color_jitter_contrast
+        self.color_jitter_saturation = color_jitter_saturation
+        self.color_jitter_hue = color_jitter_hue
 
         # Will be set in setup()
         self.train_dataset: SegmentationDataset | None = None
@@ -374,6 +394,10 @@ class BiRefNetDataModule(L.LightningDataModule):
                 hflip_prob=self.hflip_prob,
                 rotation_degrees=self.rotation_degrees,
                 color_jitter=self.color_jitter,
+                color_jitter_brightness=self.color_jitter_brightness,
+                color_jitter_contrast=self.color_jitter_contrast,
+                color_jitter_saturation=self.color_jitter_saturation,
+                color_jitter_hue=self.color_jitter_hue,
             )
         else:
             transform = PairedTransform(size=self.size, is_train=False)

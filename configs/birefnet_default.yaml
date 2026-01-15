@@ -40,11 +40,26 @@ model:
   bb_name: convnext_atto
   bb_pretrained: true
 
-  # Model settings
+  # Decoder architecture
   out_ref: true
   ms_supervision: true
+  dec_ipt: true                    # Decoder input projection
+  dec_ipt_split: true              # Split mode for input projection
+  cxt_num: 3                       # Context feature count (0-3)
+  mul_scl_ipt: cat                 # Multi-scale input fusion: "", "add", "cat"
+  dec_att: ASPPDeformable          # Decoder attention: "", "ASPP", "ASPPDeformable"
+  squeeze_block: BasicDecBlk_x1    # Squeeze block: "", "BasicDecBlk_x1", "ResBlk_x4"
+  dec_blk: BasicDecBlk             # Decoder block type: "BasicDecBlk", "ResBlk"
+  lat_blk: BasicLatBlk             # Lateral block type: "BasicLatBlk"
+  dec_channels_inter: fixed        # Decoder intermediate channels: "fixed", "adap"
+  use_norm: true                   # Use normalization layers
+
+  # Auxiliary classification (disabled by default)
+  # auxiliary_classification: true
+  # num_classes: 225  # Required when auxiliary_classification is true
+
   # Activation (default: ReLU)
-  # act_layer: mish
+  # act_layer: gelu  # relu, gelu, swish
   # act_kwargs:
   #   inplace: true
 
@@ -75,13 +90,22 @@ model:
     bce: 30.0
     iou: 0.5
     ssim: 10.0
+    # Additional loss options (set to 0.0 to disable):
+    # iou_patch: 0.5    # Patch-based IoU loss
+    # mae: 30.0         # Mean Absolute Error
+    # mse: 30.0         # Mean Squared Error
+    # reg: 100.0        # Regularization
+    # cnt: 5.0          # Contour loss
+    # structure: 5.0    # Structure loss
   lambdas_cls:
     ce: 5.0
 
   # torch.compile settings (optional)
   # compile: true
-  # compile_mode: default  # default, reduce-overhead, max-autotune, max-autotune-no-cudagraphs
-  # compile_dynamic: null  # null=auto, true=dynamic shapes, false=static shapes
+  # compile_mode: default           # default, reduce-overhead, max-autotune, max-autotune-no-cudagraphs
+  # compile_fullgraph: false        # Compile as a single graph
+  # compile_dynamic: null           # null=auto, true=dynamic shapes, false=static shapes
+  # compile_backend: inductor       # Backend: inductor, eager, aot_eager, etc.
 
 # =============================================================================
 # Data Configuration
@@ -102,6 +126,10 @@ data:
   hflip_prob: 0.5
   rotation_degrees: 10.0
   color_jitter: true
+  color_jitter_brightness: 0.2
+  color_jitter_contrast: 0.2
+  color_jitter_saturation: 0.2
+  color_jitter_hue: 0.1
 
 # =============================================================================
 # Callbacks
@@ -128,6 +156,7 @@ early_stopping:
 visualization:
   num_samples: 4
   log_every_n_epochs: 1
+  max_resolution: 512  # Max resolution for visualization (null to keep original)
 
 backbone_freeze:
   unfreeze_at_epoch: 10
