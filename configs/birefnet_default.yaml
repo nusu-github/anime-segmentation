@@ -111,25 +111,27 @@ model:
 # Data Configuration
 # =============================================================================
 data:
-  data_root: DIS5K # REQUIRED: Change this to your dataset path
-  training_sets:
-    - DIS-TR # Example: DIS5K training set
-  validation_sets:
-    - DIS-VD # Example: DIS5K validation set
-  test_sets: []
-  size: [1024, 1024]
-  batch_size: 8
-  num_workers: 4
-  pin_memory: true
+  class_path: anime_segmentation.training.datamodule.BiRefNetDataModule
+  init_args:
+    data_root: DIS5K # REQUIRED: Change this to your dataset path
+    training_sets:
+      - DIS-TR # Example: DIS5K training set
+    validation_sets:
+      - DIS-VD # Example: DIS5K validation set
+    test_sets: []
+    size: [1024, 1024]
+    batch_size: 8
+    num_workers: 4
+    pin_memory: true
 
-  # Augmentation settings
-  hflip_prob: 0.5
-  rotation_degrees: 10.0
-  color_jitter: true
-  color_jitter_brightness: 0.2
-  color_jitter_contrast: 0.2
-  color_jitter_saturation: 0.2
-  color_jitter_hue: 0.1
+    # Augmentation settings
+    hflip_prob: 0.5
+    rotation_degrees: 10.0
+    color_jitter: true
+    color_jitter_brightness: 0.2
+    color_jitter_contrast: 0.2
+    color_jitter_saturation: 0.2
+    color_jitter_hue: 0.1
 
 # =============================================================================
 # Callbacks
@@ -158,11 +160,30 @@ visualization:
   log_every_n_epochs: 1
   max_resolution: 512  # Max resolution for visualization (null to keep original)
 
-backbone_freeze:
-  unfreeze_at_epoch: 10
-  backbone_lr_scale: 0.1
+# Backbone freezing - only recommended for DINO backbones
+# backbone_freeze:
+#   unfreeze_at_epoch: 10
+#   backbone_lr_scale: 0.1
 
 accumulate_grad:
   scheduling:
     0: 4 # Accumulate 4 steps for first 10 epochs
     10: 1 # No accumulation after epoch 10
+
+on_exception_checkpoint:
+  dirpath: ckpts/
+  filename: on_exception
+
+# Spike detection - skip batches with loss spikes to stabilize training
+# Useful when dataset may contain corrupted or mislabeled samples
+# spike_detection:
+#   mode: min                    # 'min' or 'max' - direction to detect spikes
+#   window: 10                   # Window size for running statistics
+#   warmup: 1                    # Warmup batches before detection starts
+#   rtol: 2.0                    # Relative tolerance (skip if loss > rtol * running_mean)
+#   finite_only: true            # Also skip NaN/Inf losses
+
+# Device stats monitor - log GPU/CPU memory usage
+# Useful for debugging memory issues and optimizing batch size
+# device_stats_monitor:
+#   cpu_stats: null              # null=auto, true=always log CPU, false=never

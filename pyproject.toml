@@ -50,7 +50,7 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [dependency-groups]
-dev = ["ty", "pytest", "ruff"]
+dev = ["ty", "pytest", "ruff", "psutil"]
 
 [tool.ruff]
 line-length = 100

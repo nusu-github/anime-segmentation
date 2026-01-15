@@ -102,7 +102,14 @@ class BackboneFreezeCallback(BaseFinetuning):
             pl_module: BiRefNet Lightning module implementing HasBackbone protocol.
 
         """
+        # Skip if unfreezing is disabled (unfreeze_at_epoch=0 means no freezing)
+        if self.unfreeze_at_epoch == 0:
+            return
+
         if isinstance(pl_module, HasBackbone):
+            # Ensure model is initialized before accessing backbone
+            if hasattr(pl_module, "configure_model"):
+                pl_module.configure_model()
             self.freeze(pl_module.backbone)
 
     def finetune_function(

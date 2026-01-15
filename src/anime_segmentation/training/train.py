@@ -31,10 +31,13 @@ import os
 import lightning as L
 import torch
 from lightning.pytorch.callbacks import (
+    DeviceStatsMonitor,
     EarlyStopping,
     GradientAccumulationScheduler,
     LearningRateMonitor,
     ModelCheckpoint,
+    OnExceptionCheckpoint,
+    SpikeDetection,
 )
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
 
@@ -44,8 +47,11 @@ from .callbacks import (
     ScheduleFreeCallback,
     VisualizationCallback,
 )
-from .datamodule import BiRefNetDataModule
+from .datamodule import AnimeSegmentationDataModule, BiRefNetDataModule
 from .lightning_module import BiRefNetLightning
+
+# Register AnimeSegmentationDataModule for CLI discovery
+__all__ = ["AnimeSegmentationDataModule", "BiRefNetDataModule", "BiRefNetLightning"]
 
 # Enable expandable segments for CUDA memory allocation (PyTorch 2.5+)
 if tuple(map(int, torch.__version__.split("+")[0].split(".")[:3])) >= (2, 5, 0):
@@ -128,6 +134,19 @@ class BiRefNetCLI(LightningCLI):
 
         parser.add_lightning_class_args(ScheduleFreeCallback, "schedule_free")
 
+        # Reliability callbacks
+        parser.add_lightning_class_args(OnExceptionCheckpoint, "on_exception_checkpoint")
+        parser.set_defaults(
+            {
+                "on_exception_checkpoint.dirpath": "ckpts/",
+                "on_exception_checkpoint.filename": "on_exception",
+            },
+        )
+
+        # Optional monitoring callbacks (disabled by default)
+        parser.add_lightning_class_args(SpikeDetection, "spike_detection")
+        parser.add_lightning_class_args(DeviceStatsMonitor, "device_stats_monitor")
+
     def before_instantiate_classes(self) -> None:
         """Hook called before instantiating classes."""
         # Set random seed if specified
@@ -143,9 +162,10 @@ def main() -> None:
 
     _cli = BiRefNetCLI(
         BiRefNetLightning,
-        BiRefNetDataModule,
+        L.LightningDataModule,
         seed_everything_default=7,
         auto_configure_optimizers=False,
+        subclass_mode_data=True,
         parser_kwargs={
             "default_env": True,
         },
