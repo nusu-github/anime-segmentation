@@ -71,7 +71,7 @@ model:
   scheduler_interval: epoch # 'epoch' or 'step'
 
   # Loss weights
-  lambdas_pix_last:
+  lambdas_pix:
     bce: 30.0
     iou: 0.5
     ssim: 10.0

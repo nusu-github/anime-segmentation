@@ -2,7 +2,7 @@ from timm.layers import ConvNormAct
 from torch import nn
 
 from .aspp import ASPP, ASPPDeformable
-from .norms import group_norm
+from .norms import adaptive_group_norm_act
 
 
 class BasicDecBlk(nn.Module):
@@ -22,7 +22,7 @@ class BasicDecBlk(nn.Module):
         super().__init__()
         inter_channels = in_channels // 4 if dec_channels_inter == "adap" else 64
 
-        norm_layer = group_norm
+        norm_layer = adaptive_group_norm_act
         self.conv_in = ConvNormAct(
             in_channels,
             inter_channels,
@@ -88,7 +88,7 @@ class ResBlk(nn.Module):
             out_channels = in_channels
         inter_channels = in_channels // 4 if dec_channels_inter == "adap" else 64
 
-        norm_layer = group_norm
+        norm_layer = adaptive_group_norm_act
         self.conv_in = ConvNormAct(
             in_channels,
             inter_channels,

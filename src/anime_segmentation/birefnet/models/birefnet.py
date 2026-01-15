@@ -10,7 +10,7 @@ from .backbones.build_backbone import build_backbone
 from .config import get_lateral_channels
 from .modules.decoder_blocks import BasicDecBlk, ResBlk
 from .modules.lateral_blocks import BasicLatBlk
-from .modules.norms import group_norm
+from .modules.norms import adaptive_group_norm_act
 
 _ACT_LAYER_MAP: dict[str, type[nn.Module]] = {
     "relu": nn.ReLU,
@@ -432,7 +432,7 @@ class Decoder(nn.Module):
                     _N,
                     3,
                     padding=1,
-                    norm_layer=group_norm,
+                    norm_layer=adaptive_group_norm_act,
                     apply_norm=use_norm,
                     act_layer=self.act_layer,
                     act_kwargs=self.act_kwargs,
@@ -442,7 +442,7 @@ class Decoder(nn.Module):
                     _N,
                     3,
                     padding=1,
-                    norm_layer=group_norm,
+                    norm_layer=adaptive_group_norm_act,
                     apply_norm=use_norm,
                     act_layer=self.act_layer,
                     act_kwargs=self.act_kwargs,
@@ -452,7 +452,7 @@ class Decoder(nn.Module):
                     _N,
                     3,
                     padding=1,
-                    norm_layer=group_norm,
+                    norm_layer=adaptive_group_norm_act,
                     apply_norm=use_norm,
                     act_layer=self.act_layer,
                     act_kwargs=self.act_kwargs,

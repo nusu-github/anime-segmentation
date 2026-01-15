@@ -9,12 +9,18 @@ from .backbones.base import TimmBackboneWrapper
 # Lateral channels map: backbone name -> [x4, x3, x2, x1] (deepest to shallowest)
 # This was previously hardcoded in BiRefNet.__init__
 LATERAL_CHANNELS_MAP: dict[str, list[int]] = {
-    # ConvNeXt v2
+    # ConvNeXt
     "convnext_atto": [320, 160, 80, 40],
     "convnext_femto": [384, 192, 96, 48],
     "convnext_pico": [512, 256, 128, 64],
     "convnext_nano": [640, 320, 160, 80],
     "convnext_tiny": [768, 384, 192, 96],
+    # ConvNeXt v2
+    "convnextv2_atto": [320, 160, 80, 40],
+    "convnextv2_femto": [384, 192, 96, 48],
+    "convnextv2_pico": [512, 256, 128, 64],
+    "convnextv2_nano": [640, 320, 160, 80],
+    "convnextv2_tiny": [768, 384, 192, 96],
     # DINOv3 (uniform channels)
     "dino_v3_7b": [4096, 4096, 4096, 4096],
     "dino_v3_h_plus": [1280, 1280, 1280, 1280],
@@ -32,6 +38,11 @@ LATERAL_CHANNELS_MAP: dict[str, list[int]] = {
     "pvt_v2_b2": [512, 320, 128, 64],
     "pvt_v2_b1": [512, 320, 128, 64],
     "pvt_v2_b0": [256, 160, 64, 32],
+    # CAFormer (MetaFormer with SepConv + Attention)
+    "caformer_s18": [512, 320, 128, 64],
+    "caformer_s36": [512, 320, 128, 64],
+    "caformer_m36": [576, 384, 192, 96],
+    "caformer_b36": [768, 512, 256, 128],
 }
 
 

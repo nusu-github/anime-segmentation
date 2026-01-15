@@ -4,7 +4,7 @@ from timm.layers import ConvNormAct
 from torch import nn
 
 from .deform_conv import DeformableConv2d
-from .norms import group_norm
+from .norms import adaptive_group_norm_act, group_norm
 
 
 class ASPP(nn.Module):
@@ -32,7 +32,7 @@ class ASPP(nn.Module):
             case _:
                 raise NotImplementedError
 
-        norm_layer = group_norm
+        norm_layer = adaptive_group_norm_act
 
         self.aspp1 = ConvNormAct(
             in_channels,
@@ -140,7 +140,7 @@ class ASPPDeformable(nn.Module):
         if out_channels is None:
             out_channels = in_channels
         self.in_channelster = 256 // self.down_scale
-        norm_layer = group_norm
+        norm_layer = adaptive_group_norm_act
 
         if act_layer is None:
             act = nn.Identity

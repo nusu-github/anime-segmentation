@@ -123,3 +123,28 @@ def _make_dino_factory(timm_name: str, out_indices: tuple[int, ...]):
 
 for name, (timm_name, out_indices) in DINO_MODELS.items():
     BackboneRegistry.register(name)(_make_dino_factory(timm_name, out_indices))
+
+
+# =============================================================================
+# CAFormer Variants (MetaFormer with SepConv + Attention)
+# =============================================================================
+
+CAFORMER_MODELS = {
+    "caformer_s18": "caformer_s18",
+    "caformer_s36": "caformer_s36",
+    "caformer_m36": "caformer_m36",
+    "caformer_b36": "caformer_b36",
+}
+
+
+def _make_caformer_factory(timm_name: str):
+    """Create a factory function for a CAFormer variant."""
+
+    def factory(pretrained: bool = True, **kwargs):
+        return StandardWrapper(timm_name, pretrained=pretrained, **kwargs)
+
+    return factory
+
+
+for name, timm_name in CAFORMER_MODELS.items():
+    BackboneRegistry.register(name)(_make_caformer_factory(timm_name))

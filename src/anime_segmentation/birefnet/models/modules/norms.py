@@ -1,5 +1,8 @@
 """Normalization helpers for BiRefNet modules."""
 
+from typing import Any
+
+from timm.layers import GroupNormAct
 from torch import nn
 
 
@@ -48,3 +51,14 @@ def group_norm(num_channels: int) -> nn.GroupNorm:
         target_group_size=target,
     )
     return nn.GroupNorm(groups, num_channels)
+
+
+def adaptive_group_norm_act(num_channels: int, **kwargs: Any) -> GroupNormAct:
+    """GroupNormAct factory with adaptive group count based on channel size.
+
+    This function is compatible with timm's ConvNormAct, which expects
+    norm layers to accept apply_act, act_layer, act_kwargs, etc.
+    """
+    target = 4 if num_channels < 32 else 8
+    num_groups = _pick_group_count(num_channels, target_group_size=target)
+    return GroupNormAct(num_channels, num_groups=num_groups, **kwargs)

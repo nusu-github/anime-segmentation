@@ -51,6 +51,11 @@ BACKBONE_CHANNELS = {
     "dino_v3_l": [1024, 1024, 1024, 1024],
     "dino_v3_h_plus": [1280, 1280, 1280, 1280],
     "dino_v3_7b": [4096, 4096, 4096, 4096],
+    # CAFormer (MetaFormer with SepConv + Attention)
+    "caformer_s18": [64, 128, 320, 512],
+    "caformer_s36": [64, 128, 320, 512],
+    "caformer_m36": [96, 192, 384, 576],
+    "caformer_b36": [128, 256, 512, 768],
 }
 
 # Lateral channels used in BiRefNet (deepest to shallowest: x4, x3, x2, x1)
@@ -74,6 +79,7 @@ QUICK_TEST_BACKBONES = [
     "convnext_atto",
     "swin_v1_t",
     "pvt_v2_b0",
+    "caformer_s18",
 ]
 
 # All registered backbones
