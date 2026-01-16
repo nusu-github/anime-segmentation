@@ -130,9 +130,9 @@ class ResBlk(nn.Module):
         self.conv_resi = nn.Conv2d(in_channels, out_channels, 1, 1, 0)
 
     def forward(self, x):
-        _x = self.conv_resi(x)
+        x_ = self.conv_resi(x)
         x = self.conv_in(x)
         if hasattr(self, "dec_att"):
             x = self.dec_att(x)
         x = self.conv_out(x)
-        return x + _x
+        return x + x_

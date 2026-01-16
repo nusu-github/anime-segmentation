@@ -7,7 +7,7 @@ serving as a safety net for refactoring.
 import pytest
 import torch
 
-from anime_segmentation.birefnet.models.backbones.build_backbone import build_backbone
+from anime_segmentation.models.backbones.build_backbone import build_backbone
 
 from .conftest import BACKBONE_CHANNELS, QUICK_TEST_BACKBONES
 

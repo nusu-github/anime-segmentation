@@ -7,7 +7,7 @@ refactoring does not alter external behavior.
 import pytest
 import torch
 
-from anime_segmentation.birefnet.models.birefnet import BiRefNet
+from anime_segmentation.models.birefnet import BiRefNet
 
 from .conftest import QUICK_TEST_BACKBONES
 

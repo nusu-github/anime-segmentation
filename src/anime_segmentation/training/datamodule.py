@@ -1,93 +1,135 @@
-"""LightningDataModule for BiRefNet training.
-
-Supports BiRefNet-style dataset structure:
-    {data_root}/{dataset_name}/im/*.png  (images)
-    {data_root}/{dataset_name}/gt/*.png  (ground truth masks)
-"""
+"""LightningDataModule for anime segmentation training."""
 
 from __future__ import annotations
 
 import logging
 import random
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
 
+import kornia.augmentation as K
 import lightning as L
+import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from torchvision.io import ImageReadMode, read_image
 
-import datasets as hf_datasets
-
-if TYPE_CHECKING:
-    import torch
+from anime_segmentation.constants import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    VALID_IMAGE_EXTENSIONS,
+)
 
 logger = logging.getLogger(__name__)
 
 Image.MAX_IMAGE_PIXELS = None  # Remove DecompressionBombWarning
 
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
-VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"}
 
+def _load_image_fast(path: str, mode: ImageReadMode = ImageReadMode.RGB) -> Image.Image:
+    """Load image using fast torchvision.io decoder with PIL fallback.
 
-def _find_image_label_pairs(
-    data_root: str | Path,
-    dataset_names: list[str],
-) -> tuple[list[str], list[str]]:
-    """Find matching image and label pairs from BiRefNet-style datasets.
+    Uses torchvision.io.read_image for faster JPEG/PNG decoding (libjpeg-turbo),
+    falling back to PIL for unsupported formats.
 
     Args:
-        data_root: Root directory containing datasets.
-        dataset_names: List of dataset folder names to include.
+        path: Path to image file.
+        mode: ImageReadMode (RGB or GRAY).
 
     Returns:
-        Tuple of (image_paths, label_paths).
-
-    Raises:
-        FileNotFoundError: If data_root does not exist.
-        ValueError: If dataset_names is empty.
+        PIL Image in the requested mode.
 
     """
-    if not dataset_names:
-        msg = "dataset_names cannot be empty"
-        raise ValueError(msg)
+    try:
+        # Fast path: use torchvision.io (faster for JPEG due to libjpeg-turbo)
+        tensor = read_image(path, mode=mode)
+        # Convert tensor [C, H, W] uint8 -> PIL Image
+        if mode == ImageReadMode.GRAY:
+            return TF.to_pil_image(tensor, mode="L")
+        return TF.to_pil_image(tensor, mode="RGB")
+    except Exception:
+        # Fallback to PIL for unsupported formats or errors
+        if mode == ImageReadMode.GRAY:
+            return Image.open(path).convert("L")
+        return Image.open(path).convert("RGB")
 
-    data_root = Path(data_root)
-    if not data_root.exists():
-        msg = f"Data root directory does not exist: {data_root}"
-        raise FileNotFoundError(msg)
 
-    image_paths: list[str] = []
-    label_paths: list[str] = []
+class GPUAugmentation(torch.nn.Module):
+    """GPU-accelerated augmentation using kornia.
 
-    for dataset_name in dataset_names:
-        image_dir = data_root / dataset_name / "im"
-        label_dir = data_root / dataset_name / "gt"
+    Applies augmentations on GPU for better performance.
+    Processes image and mask pairs with synchronized geometric transforms.
+    """
 
-        if not image_dir.exists():
-            continue
+    def __init__(
+        self,
+        hflip_prob: float = 0.5,
+        rotation_degrees: float = 10.0,
+        color_jitter: bool = True,
+        color_jitter_brightness: float = 0.2,
+        color_jitter_contrast: float = 0.2,
+        color_jitter_saturation: float = 0.2,
+        color_jitter_hue: float = 0.1,
+    ) -> None:
+        """Initialize GPU augmentation.
 
-        # Optimize: Scan label directory once to build a lookup map
-        # key: stem, value: full_path
-        label_map = {}
-        if label_dir.exists():
-            for label_path in label_dir.iterdir():
-                if label_path.suffix in VALID_EXTENSIONS:
-                    label_map[label_path.stem] = str(label_path)
+        Args:
+            hflip_prob: Probability of horizontal flip.
+            rotation_degrees: Max rotation angle.
+            color_jitter: Whether to apply color jitter to image.
+            color_jitter_brightness: Brightness jitter range.
+            color_jitter_contrast: Contrast jitter range.
+            color_jitter_saturation: Saturation jitter range.
+            color_jitter_hue: Hue jitter range.
 
-        for img_path in image_dir.iterdir():
-            if img_path.suffix not in VALID_EXTENSIONS:
-                continue
+        """
+        super().__init__()
 
-            stem = img_path.stem
-            # Check if matching label exists in map
-            if stem in label_map:
-                image_paths.append(str(img_path))
-                label_paths.append(label_map[stem])
+        # Geometric augmentations (applied to both image and mask)
+        self.geometric = K.AugmentationSequential(
+            K.RandomHorizontalFlip(p=hflip_prob),
+            K.RandomRotation(degrees=rotation_degrees, p=1.0 if rotation_degrees > 0 else 0.0),
+            data_keys=["input", "mask"],
+            same_on_batch=False,
+        )
 
-    return image_paths, label_paths
+        # Color augmentations (applied only to image)
+        if color_jitter:
+            self.color = K.ColorJitter(
+                brightness=color_jitter_brightness,
+                contrast=color_jitter_contrast,
+                saturation=color_jitter_saturation,
+                hue=color_jitter_hue,
+                p=1.0,
+            )
+        else:
+            self.color = None
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        masks: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply augmentations to batch.
+
+        Args:
+            images: [B, 3, H, W] tensor, ImageNet normalized.
+            masks: [B, 1, H, W] tensor, 0-1 range.
+
+        Returns:
+            Tuple of (augmented_images, augmented_masks).
+
+        """
+        # Apply geometric transforms to both
+        augmented = self.geometric(images, masks)
+        images = augmented[0]
+        masks = augmented[1]
+
+        # Apply color jitter to images only
+        if self.color is not None:
+            images = self.color(images)
+
+        return images, masks
 
 
 class PairedTransform:
@@ -204,7 +246,7 @@ class PairedTransform:
 
 
 class SegmentationDataset(Dataset):
-    """Dataset for segmentation with BiRefNet-style structure."""
+    """Dataset for image segmentation with image-mask pairs."""
 
     def __init__(
         self,
@@ -244,9 +286,9 @@ class SegmentationDataset(Dataset):
                 - class_label: int (-1 if not using classification)
 
         """
-        # Load image and mask
-        image = Image.open(self.image_paths[index]).convert("RGB")
-        mask = Image.open(self.label_paths[index]).convert("L")
+        # Load image and mask using fast decoder
+        image = _load_image_fast(self.image_paths[index], ImageReadMode.RGB)
+        mask = _load_image_fast(self.label_paths[index], ImageReadMode.GRAY)
 
         # Apply transforms
         if self.transform is not None:
@@ -260,305 +302,62 @@ class SegmentationDataset(Dataset):
         return image, mask, self.class_label
 
 
-class BiRefNetDataModule(L.LightningDataModule):
-    """LightningDataModule for BiRefNet training."""
+def _find_anime_segmentation_pairs(
+    data_root: str | Path,
+) -> tuple[list[str], list[str]]:
+    """Find image-mask pairs for anime-segmentation dataset.
 
-    def __init__(
-        self,
-        data_root: str,
-        training_sets: list[str],
-        validation_sets: list[str] | None = None,
-        test_sets: list[str] | None = None,
-        batch_size: int = 8,
-        num_workers: int | None = None,
-        size: tuple[int, int] = (1024, 1024),
-        pin_memory: bool = True,
-        # Augmentation settings
-        hflip_prob: float = 0.5,
-        rotation_degrees: float = 10.0,
-        color_jitter: bool = True,
-        color_jitter_brightness: float = 0.2,
-        color_jitter_contrast: float = 0.2,
-        color_jitter_saturation: float = 0.2,
-        color_jitter_hue: float = 0.1,
-    ) -> None:
-        """Initialize DataModule.
+    Expects structure:
+        {data_root}/
+        ├── imgs/   # Images
+        └── masks/  # Masks
 
-        Args:
-            data_root: Root directory containing dataset folders.
-            training_sets: List of dataset names for training.
-            validation_sets: List of dataset names for validation.
-            test_sets: List of dataset names for testing.
-            batch_size: Batch size for all dataloaders.
-            num_workers: Number of workers for dataloaders. Defaults to 4.
-            size: Target image size (width, height).
-            pin_memory: Whether to pin memory in dataloaders.
-            hflip_prob: Probability of horizontal flip during training.
-            rotation_degrees: Max rotation angle during training.
-            color_jitter: Whether to apply color jitter during training.
-            color_jitter_brightness: Brightness jitter range (0.0-1.0).
-            color_jitter_contrast: Contrast jitter range (0.0-1.0).
-            color_jitter_saturation: Saturation jitter range (0.0-1.0).
-            color_jitter_hue: Hue jitter range (0.0-0.5).
+    Args:
+        data_root: Root directory containing imgs/ and masks/.
 
-        """
-        super().__init__()
-        self.save_hyperparameters()
+    Returns:
+        Tuple of (image_paths, mask_paths).
 
-        self.data_root = data_root
-        self.training_sets = training_sets
-        self.validation_sets = validation_sets or []
-        self.test_sets = test_sets or []
-        self.batch_size = batch_size
-        self.num_workers = num_workers if num_workers is not None else 4
-        self.size = size
-        self.pin_memory = pin_memory
+    Raises:
+        FileNotFoundError: If data_root or required directories don't exist.
+        ValueError: If no image-mask pairs found.
 
-        # Augmentation settings
-        self.hflip_prob = hflip_prob
-        self.rotation_degrees = rotation_degrees
-        self.color_jitter = color_jitter
-        self.color_jitter_brightness = color_jitter_brightness
-        self.color_jitter_contrast = color_jitter_contrast
-        self.color_jitter_saturation = color_jitter_saturation
-        self.color_jitter_hue = color_jitter_hue
-
-        # Will be set in setup()
-        self.train_dataset: SegmentationDataset | None = None
-        self.val_dataset: SegmentationDataset | None = None
-        self.test_dataset: SegmentationDataset | None = None
-
-    def setup(self, stage: str | None = None) -> None:
-        """Set up datasets for the given stage.
-
-        Args:
-            stage: 'fit', 'validate', 'test', or 'predict'.
-
-        Raises:
-            ValueError: If no training samples found for 'fit' stage.
-
-        """
-        match stage:
-            case "fit" | None:
-                self.train_dataset = self._setup_dataset(
-                    "train",
-                    self.training_sets,
-                    is_train=True,
-                    require_data=True,
-                )
-                self.val_dataset = self._setup_dataset("val", self.validation_sets, is_train=False)
-            case "validate":
-                self.val_dataset = self._setup_dataset("val", self.validation_sets, is_train=False)
-            case "test" | "predict":
-                self.test_dataset = self._setup_dataset("test", self.test_sets, is_train=False)
-
-    def _setup_dataset(
-        self,
-        dataset_type: Literal["train", "val", "test"],
-        dataset_sets: list[str],
-        *,
-        is_train: bool,
-        require_data: bool = False,
-    ) -> SegmentationDataset | None:
-        """Set up a dataset of the specified type.
-
-        Args:
-            dataset_type: Type of dataset ('train', 'val', or 'test').
-            dataset_sets: List of dataset folder names.
-            is_train: Whether to apply training augmentations.
-            require_data: If True, raise ValueError when no samples found.
-
-        Returns:
-            Configured SegmentationDataset or None if no samples found.
-
-        Raises:
-            ValueError: If require_data=True and no samples found.
-
-        """
-        if not dataset_sets:
-            return None
-
-        images, labels = _find_image_label_pairs(self.data_root, dataset_sets)
-
-        if not images:
-            if require_data:
-                msg = f"No {dataset_type} samples found in {self.data_root} for datasets: {dataset_sets}"
-                raise ValueError(msg)
-            logger.warning("No %s samples found for datasets: %s", dataset_type, dataset_sets)
-            return None
-
-        logger.info("Found %d %s samples", len(images), dataset_type)
-
-        if is_train:
-            transform = PairedTransform(
-                size=self.size,
-                is_train=True,
-                hflip_prob=self.hflip_prob,
-                rotation_degrees=self.rotation_degrees,
-                color_jitter=self.color_jitter,
-                color_jitter_brightness=self.color_jitter_brightness,
-                color_jitter_contrast=self.color_jitter_contrast,
-                color_jitter_saturation=self.color_jitter_saturation,
-                color_jitter_hue=self.color_jitter_hue,
-            )
-        else:
-            transform = PairedTransform(size=self.size, is_train=False)
-
-        return SegmentationDataset(images, labels, transform=transform)
-
-    def _create_dataloader(
-        self,
-        dataset: Dataset,
-        *,
-        shuffle: bool = False,
-        drop_last: bool = False,
-    ) -> DataLoader:
-        """Create a dataloader with common settings.
-
-        Args:
-            dataset: Dataset to wrap.
-            shuffle: Whether to shuffle the data.
-            drop_last: Whether to drop the last incomplete batch.
-
-        Returns:
-            Configured DataLoader instance.
-
-        """
-        return DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            drop_last=drop_last,
-            persistent_workers=self.num_workers > 0,
-        )
-
-    def train_dataloader(self) -> DataLoader:
-        """Return training dataloader."""
-        if self.train_dataset is None:
-            msg = "Training dataset not initialized. Call setup('fit') first."
-            raise RuntimeError(msg)
-
-        return self._create_dataloader(
-            self.train_dataset,
-            shuffle=True,
-            drop_last=True,
-        )
-
-    def val_dataloader(self) -> DataLoader:
-        """Return validation dataloader.
-
-        Raises:
-            RuntimeError: If validation dataset is not available.
-
-        """
-        if self.val_dataset is None:
-            if not self.validation_sets:
-                msg = "No validation_sets configured in DataModule."
-            else:
-                msg = "Validation dataset not initialized. Call setup('fit') first."
-            raise RuntimeError(msg)
-
-        return self._create_dataloader(self.val_dataset)
-
-    def test_dataloader(self) -> DataLoader:
-        """Return test dataloader.
-
-        Raises:
-            RuntimeError: If test dataset is not available.
-
-        """
-        if self.test_dataset is None:
-            if not self.test_sets:
-                msg = "No test_sets configured in DataModule."
-            else:
-                msg = "Test dataset not initialized. Call setup('test') first."
-            raise RuntimeError(msg)
-
-        return self._create_dataloader(self.test_dataset)
-
-    def predict_dataloader(self) -> DataLoader:
-        """Return predict dataloader (same as test).
-
-        Raises:
-            RuntimeError: If test dataset is not available.
-
-        """
-        return self.test_dataloader()
-
-
-class HuggingFaceSegmentationDataset(Dataset):
-    """PyTorch Dataset wrapping a Hugging Face datasets.Dataset for segmentation.
-
-    This class bridges Hugging Face datasets with the existing training pipeline,
-    providing the same interface as SegmentationDataset.
     """
+    data_root = Path(data_root)
+    if not data_root.exists():
+        msg = f"Data root does not exist: {data_root}"
+        raise FileNotFoundError(msg)
 
-    def __init__(
-        self,
-        hf_dataset: hf_datasets.Dataset,
-        image_column: str = "image",
-        mask_column: str = "mask",
-        transform: PairedTransform | None = None,
-        class_label: int = -1,
-    ) -> None:
-        """Initialize dataset.
+    imgs_dir = data_root / "imgs"
+    masks_dir = data_root / "masks"
 
-        Args:
-            hf_dataset: Hugging Face Dataset object.
-            image_column: Column name for images.
-            mask_column: Column name for masks.
-            transform: Transform to apply to image/mask pairs.
-            class_label: Class label for all samples (-1 if not using classification).
+    if not imgs_dir.exists() or not masks_dir.exists():
+        msg = f"Expected 'imgs/' and 'masks/' directories in {data_root}"
+        raise FileNotFoundError(msg)
 
-        """
-        self.dataset = hf_dataset
-        self.image_column = image_column
-        self.mask_column = mask_column
-        self.transform = transform
-        self.class_label = class_label
+    # Build mask lookup map for efficiency
+    mask_map: dict[str, Path] = {}
+    for mask_path in masks_dir.iterdir():
+        if mask_path.suffix.lower() in VALID_IMAGE_EXTENSIONS:
+            mask_map[mask_path.stem] = mask_path
 
-    def __len__(self) -> int:
-        return len(self.dataset)
+    image_paths: list[str] = []
+    mask_paths: list[str] = []
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, int]:
-        """Get a sample.
+    for img_path in sorted(imgs_dir.iterdir()):
+        if img_path.suffix.lower() not in VALID_IMAGE_EXTENSIONS:
+            continue
 
-        Returns:
-            Tuple of (image, mask, class_label):
-                - image: [3, H, W] tensor, ImageNet normalized
-                - mask: [1, H, W] tensor, 0-1 range
-                - class_label: int (-1 if not using classification)
+        stem = img_path.stem
+        if stem in mask_map:
+            image_paths.append(str(img_path))
+            mask_paths.append(str(mask_map[stem]))
 
-        """
-        sample = self.dataset[index]
+    if not image_paths:
+        msg = f"No image-mask pairs found in {data_root}"
+        raise ValueError(msg)
 
-        # HF datasets returns PIL Images when using Image feature
-        image = sample[self.image_column]
-        mask = sample[self.mask_column]
-
-        # Ensure correct format (handle both PIL Images and file paths)
-        if not isinstance(image, Image.Image):
-            image = Image.open(image).convert("RGB")
-        else:
-            image = image.convert("RGB")
-
-        if not isinstance(mask, Image.Image):
-            mask = Image.open(mask).convert("L")
-        else:
-            mask = mask.convert("L")
-
-        # Apply transforms
-        if self.transform is not None:
-            image, mask = self.transform(image, mask)
-        else:
-            # Default: just convert to tensor
-            image = TF.to_tensor(image)
-            image = TF.normalize(image, IMAGENET_MEAN, IMAGENET_STD)
-            mask = TF.to_tensor(mask)
-
-        return image, mask, self.class_label
+    return image_paths, mask_paths
 
 
 class AnimeSegmentationDataModule(L.LightningDataModule):
@@ -589,6 +388,8 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         num_workers: int | None = None,
         size: tuple[int, int] = (1024, 1024),
         pin_memory: bool = True,
+        prefetch_factor: int | None = None,
+        gpu_augmentation: bool = False,
         # Augmentation settings
         hflip_prob: float = 0.5,
         rotation_degrees: float = 10.0,
@@ -607,6 +408,7 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
             num_workers: Number of workers for dataloaders. Defaults to 4.
             size: Target image size (width, height).
             pin_memory: Whether to pin memory in dataloaders.
+            gpu_augmentation: If True, apply augmentations on GPU (faster).
             hflip_prob: Probability of horizontal flip during training.
             rotation_degrees: Max rotation angle during training.
             color_jitter: Whether to apply color jitter during training.
@@ -630,6 +432,8 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         self.num_workers = num_workers if num_workers is not None else 4
         self.size = size
         self.pin_memory = pin_memory
+        self.prefetch_factor = prefetch_factor
+        self.gpu_augmentation = gpu_augmentation
 
         # Augmentation settings
         self.hflip_prob = hflip_prob
@@ -640,154 +444,83 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         self.color_jitter_saturation = color_jitter_saturation
         self.color_jitter_hue = color_jitter_hue
 
+        # GPU augmentation module (initialized lazily)
+        self._gpu_augmentation: GPUAugmentation | None = None
+
         # Datasets (initialized in setup)
-        self.train_dataset: HuggingFaceSegmentationDataset | None = None
-        self.val_dataset: HuggingFaceSegmentationDataset | None = None
-        self.test_dataset: HuggingFaceSegmentationDataset | None = None
+        self.train_dataset: SegmentationDataset | None = None
+        self.val_dataset: SegmentationDataset | None = None
+        self.test_dataset: SegmentationDataset | None = None
 
-        # Raw HF datasets (for internal use)
-        self._hf_dataset: hf_datasets.DatasetDict | None = None
-        self._train_hf: hf_datasets.Dataset | None = None
-        self._val_hf: hf_datasets.Dataset | None = None
+        # Raw paths (loaded once, then split)
+        self._image_paths: list[str] | None = None
+        self._mask_paths: list[str] | None = None
+        self._train_indices: list[int] | None = None
+        self._val_indices: list[int] | None = None
 
-    def _load_dataset(self) -> hf_datasets.DatasetDict:
-        """Load dataset from local directory.
-
-        Expects structure:
-            {data_root}/
-            ├── imgs/   # Images
-            └── masks/  # Masks
-
-        Returns:
-            DatasetDict with train split.
+    def _load_and_split_paths(self) -> None:
+        """Load image-mask paths and create train/val splits.
 
         Raises:
             FileNotFoundError: If data_root or required directories don't exist.
+            ValueError: If no image-mask pairs found.
 
         """
-        data_root = Path(self.data_root)
-        if not data_root.exists():
-            msg = f"Data root does not exist: {data_root}"
-            raise FileNotFoundError(msg)
-
-        logger.info("Loading dataset from: %s", data_root)
+        logger.info("Loading dataset from: %s", self.data_root)
 
         # Find image-mask pairs
-        imgs_dir = data_root / "imgs"
-        masks_dir = data_root / "masks"
+        self._image_paths, self._mask_paths = _find_anime_segmentation_pairs(
+            self.data_root,
+        )
+        logger.info("Found %d image-mask pairs", len(self._image_paths))
 
-        if not imgs_dir.exists() or not masks_dir.exists():
-            msg = f"Expected 'imgs/' and 'masks/' directories in {data_root}"
-            raise FileNotFoundError(msg)
+        # Create train/val split indices
+        n_samples = len(self._image_paths)
+        indices = list(range(n_samples))
 
-        # Build pairs
-        image_paths: list[str] = []
-        mask_paths: list[str] = []
+        # Shuffle with fixed seed for reproducibility
+        rng = random.Random(42)
+        rng.shuffle(indices)
 
-        # Build mask lookup map for efficiency
-        mask_map: dict[str, Path] = {}
-        for mask_path in masks_dir.iterdir():
-            if mask_path.suffix.lower() in VALID_EXTENSIONS:
-                mask_map[mask_path.stem] = mask_path
+        # Split
+        n_val = int(n_samples * self.val_ratio)
+        self._val_indices = indices[:n_val]
+        self._train_indices = indices[n_val:]
 
-        for img_path in sorted(imgs_dir.iterdir()):
-            if img_path.suffix.lower() not in VALID_EXTENSIONS:
-                continue
-
-            # Find matching mask
-            stem = img_path.stem
-            if stem in mask_map:
-                image_paths.append(str(img_path))
-                mask_paths.append(str(mask_map[stem]))
-
-        if not image_paths:
-            msg = f"No image-mask pairs found in {data_root}"
-            raise ValueError(msg)
-
-        logger.info("Found %d image-mask pairs", len(image_paths))
-
-        # Create HF Dataset with Image feature for automatic loading
-        dataset = hf_datasets.Dataset.from_dict(
-            {
-                "image": image_paths,
-                "mask": mask_paths,
-            },
+        logger.info(
+            "Split: %d train, %d validation samples",
+            len(self._train_indices),
+            len(self._val_indices),
         )
 
-        # Cast to Image type for automatic PIL Image loading
-        dataset = dataset.cast_column("image", hf_datasets.Image())
-        dataset = dataset.cast_column("mask", hf_datasets.Image())
-
-        return hf_datasets.DatasetDict({"train": dataset})
-
-    def _create_splits(
+    def _create_dataset(
         self,
-        dataset: hf_datasets.DatasetDict,
-    ) -> tuple[hf_datasets.Dataset | None, hf_datasets.Dataset | None]:
-        """Create train/val splits from loaded dataset.
-
-        Args:
-            dataset: Loaded DatasetDict.
-
-        Returns:
-            Tuple of (train_dataset, val_dataset).
-
-        """
-        train_ds: hf_datasets.Dataset | None = None
-        val_ds: hf_datasets.Dataset | None = None
-
-        # Get train split
-        if "train" in dataset:
-            train_ds = dataset["train"]
-        else:
-            # Use first available split
-            first_split = next(iter(dataset.keys()))
-            train_ds = dataset[first_split]
-            logger.warning("Using '%s' as training split", first_split)
-
-        # Handle validation split
-        if "validation" in dataset:
-            val_ds = dataset["validation"]
-        elif "test" in dataset:
-            # Use test as validation if no validation split
-            val_ds = dataset["test"]
-            logger.info("Using 'test' split as validation")
-        elif self.val_ratio > 0 and train_ds is not None:
-            # Auto-split from training data
-            split = train_ds.train_test_split(
-                test_size=self.val_ratio,
-                seed=42,
-            )
-            train_ds = split["train"]
-            val_ds = split["test"]
-            logger.info(
-                "Auto-split: %d train, %d validation samples",
-                len(train_ds),
-                len(val_ds),
-            )
-
-        return train_ds, val_ds
-
-    def _create_torch_dataset(
-        self,
-        hf_dataset: hf_datasets.Dataset | None,
+        indices: list[int],
         *,
         is_train: bool,
-    ) -> HuggingFaceSegmentationDataset | None:
-        """Create PyTorch dataset from HF dataset.
+    ) -> SegmentationDataset:
+        """Create SegmentationDataset from indices.
 
         Args:
-            hf_dataset: Hugging Face dataset.
+            indices: List of indices to include.
             is_train: Whether to apply training augmentations.
 
         Returns:
-            Wrapped PyTorch dataset or None.
+            Configured SegmentationDataset.
 
         """
-        if hf_dataset is None:
-            return None
+        assert self._image_paths is not None
+        assert self._mask_paths is not None
 
-        if is_train:
+        image_paths = [self._image_paths[i] for i in indices]
+        mask_paths = [self._mask_paths[i] for i in indices]
+
+        # When gpu_augmentation is enabled, skip CPU augmentation for training
+        # (augmentation will be applied in on_after_batch_transfer)
+        if is_train and self.gpu_augmentation:
+            # Only resize and normalize, no augmentation
+            transform = PairedTransform(size=self.size, is_train=False)
+        elif is_train:
             transform = PairedTransform(
                 size=self.size,
                 is_train=True,
@@ -802,12 +535,47 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         else:
             transform = PairedTransform(size=self.size, is_train=False)
 
-        return HuggingFaceSegmentationDataset(
-            hf_dataset=hf_dataset,
-            image_column="image",
-            mask_column="mask",
-            transform=transform,
-        )
+        return SegmentationDataset(image_paths, mask_paths, transform=transform)
+
+    def on_after_batch_transfer(
+        self,
+        batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        dataloader_idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply GPU augmentation after batch transfer.
+
+        This hook is called after the batch is moved to the device.
+        When gpu_augmentation is enabled, applies kornia-based augmentations.
+
+        Args:
+            batch: Tuple of (images, masks, class_labels).
+            dataloader_idx: Index of the dataloader.
+
+        Returns:
+            Augmented batch.
+
+        """
+        images, masks, class_labels = batch
+
+        # Only apply GPU augmentation during training
+        if self.trainer is not None and self.trainer.training and self.gpu_augmentation:
+            # Lazy initialization of GPU augmentation module
+            if self._gpu_augmentation is None:
+                self._gpu_augmentation = GPUAugmentation(
+                    hflip_prob=self.hflip_prob,
+                    rotation_degrees=self.rotation_degrees,
+                    color_jitter=self.color_jitter,
+                    color_jitter_brightness=self.color_jitter_brightness,
+                    color_jitter_contrast=self.color_jitter_contrast,
+                    color_jitter_saturation=self.color_jitter_saturation,
+                    color_jitter_hue=self.color_jitter_hue,
+                )
+                # Move to same device as batch
+                self._gpu_augmentation = self._gpu_augmentation.to(images.device)
+
+            images, masks = self._gpu_augmentation(images, masks)
+
+        return images, masks, class_labels
 
     def setup(self, stage: str | None = None) -> None:
         """Set up datasets for the given stage.
@@ -816,32 +584,31 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
             stage: 'fit', 'validate', 'test', or 'predict'.
 
         """
-        if self._hf_dataset is None:
-            # Load dataset from local directory
-            self._hf_dataset = self._load_dataset()
+        if self._image_paths is None:
+            self._load_and_split_paths()
 
-            # Create splits
-            self._train_hf, self._val_hf = self._create_splits(self._hf_dataset)
+        assert self._train_indices is not None
+        assert self._val_indices is not None
 
         match stage:
             case "fit" | None:
-                self.train_dataset = self._create_torch_dataset(
-                    self._train_hf,
+                self.train_dataset = self._create_dataset(
+                    self._train_indices,
                     is_train=True,
                 )
-                self.val_dataset = self._create_torch_dataset(
-                    self._val_hf,
+                self.val_dataset = self._create_dataset(
+                    self._val_indices,
                     is_train=False,
                 )
             case "validate":
-                self.val_dataset = self._create_torch_dataset(
-                    self._val_hf,
+                self.val_dataset = self._create_dataset(
+                    self._val_indices,
                     is_train=False,
                 )
             case "test" | "predict":
                 # Use validation as test if no separate test set
-                self.test_dataset = self._create_torch_dataset(
-                    self._val_hf,
+                self.test_dataset = self._create_dataset(
+                    self._val_indices,
                     is_train=False,
                 )
 
@@ -863,6 +630,9 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
             Configured DataLoader instance.
 
         """
+        # prefetch_factor requires num_workers > 0
+        prefetch = self.prefetch_factor if self.num_workers > 0 else None
+
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
@@ -871,6 +641,7 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
             pin_memory=self.pin_memory,
             drop_last=drop_last,
             persistent_workers=self.num_workers > 0,
+            prefetch_factor=prefetch,
         )
 
     def train_dataloader(self) -> DataLoader:

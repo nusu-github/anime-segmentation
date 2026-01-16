@@ -12,7 +12,7 @@ from safetensors.torch import load_model as load_model_as_safetensor
 from safetensors.torch import save_model as save_model_as_safetensor
 from torch import nn
 
-from anime_segmentation.birefnet import BiRefNet
+from anime_segmentation.models import BiRefNet
 
 from .loss import ClsLoss, PixLoss
 from .metrics import SegmentationMetrics
@@ -595,8 +595,8 @@ class BiRefNetLightning(
             backbone_name=self.hparams.get("bb_name"),
             ms_supervision=self.hparams.get("ms_supervision", True),
             out_ref=self.hparams.get("out_ref", True),
-            training_config=training_config if training_config else None,
-            metrics=metrics if metrics else None,
+            training_config=training_config or None,
+            metrics=metrics or None,
             **kwargs,
         )
 

@@ -30,28 +30,14 @@ import os
 
 import lightning as L
 import torch
-from lightning.pytorch.callbacks import (
-    DeviceStatsMonitor,
-    EarlyStopping,
-    GradientAccumulationScheduler,
-    LearningRateMonitor,
-    ModelCheckpoint,
-    OnExceptionCheckpoint,
-    SpikeDetection,
-)
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
 
-from .callbacks import (
-    BackboneFreezeCallback,
-    FinetuneCallback,
-    ScheduleFreeCallback,
-    VisualizationCallback,
-)
-from .datamodule import AnimeSegmentationDataModule, BiRefNetDataModule
+from .callbacks import ScheduleFreeCallback
+from .datamodule import AnimeSegmentationDataModule
 from .lightning_module import BiRefNetLightning
 
 # Register AnimeSegmentationDataModule for CLI discovery
-__all__ = ["AnimeSegmentationDataModule", "BiRefNetDataModule", "BiRefNetLightning"]
+__all__ = ["AnimeSegmentationDataModule", "BiRefNetLightning"]
 
 # Enable expandable segments for CUDA memory allocation (PyTorch 2.5+)
 if tuple(map(int, torch.__version__.split("+")[0].split(".")[:3])) >= (2, 5, 0):
@@ -62,103 +48,51 @@ class BiRefNetCLI(LightningCLI):
     """Custom LightningCLI for BiRefNet training."""
 
     def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
-        """Add custom arguments and link arguments between components.
+        """Add callback arguments to the parser.
+
+        Only transparent callbacks that have no effect when unused are registered here.
+        Other callbacks should be configured via trainer.callbacks in config files.
 
         Args:
             parser: Lightning argument parser.
 
         """
-        # Set default trainer arguments for better debugging/profiling
-        parser.set_defaults(
-            {
-                "trainer.num_sanity_val_steps": 2,
-                "trainer.log_every_n_steps": 10,
-                "trainer.precision": "16-mixed",
-            },
-        )
-
-        # Add default callbacks
-        parser.add_lightning_class_args(ModelCheckpoint, "checkpoint")
-        parser.set_defaults(
-            {
-                "checkpoint.dirpath": "ckpts/",
-                "checkpoint.filename": "birefnet-epoch={epoch:03d}-val_loss={val/loss:.4f}",
-                "checkpoint.auto_insert_metric_name": False,
-                "checkpoint.save_top_k": 3,
-                "checkpoint.monitor": "val/loss",
-                "checkpoint.mode": "min",
-                "checkpoint.save_last": True,
-            },
-        )
-
-        parser.add_lightning_class_args(LearningRateMonitor, "lr_monitor")
-        parser.set_defaults(
-            {
-                "lr_monitor.logging_interval": "epoch",
-            },
-        )
-
-        parser.add_lightning_class_args(FinetuneCallback, "finetune")
-        parser.set_defaults(
-            {
-                "finetune.finetune_last_epochs": -40,
-            },
-        )
-
-        parser.add_lightning_class_args(EarlyStopping, "early_stopping")
-        parser.set_defaults(
-            {
-                "early_stopping.monitor": "val/loss",
-                "early_stopping.patience": 20,
-                "early_stopping.mode": "min",
-            },
-        )
-
-        parser.add_lightning_class_args(VisualizationCallback, "visualization")
-        parser.set_defaults(
-            {
-                "visualization.num_samples": 4,
-                "visualization.log_every_n_epochs": 1,
-            },
-        )
-
-        parser.add_lightning_class_args(BackboneFreezeCallback, "backbone_freeze")
-        # Default to disabled (unfreeze at epoch 0)
-        parser.set_defaults(
-            {
-                "backbone_freeze.unfreeze_at_epoch": 0,
-            },
-        )
-
-        parser.add_lightning_class_args(GradientAccumulationScheduler, "accumulate_grad")
-
         parser.add_lightning_class_args(ScheduleFreeCallback, "schedule_free")
 
-        # Reliability callbacks
-        parser.add_lightning_class_args(OnExceptionCheckpoint, "on_exception_checkpoint")
-        parser.set_defaults(
-            {
-                "on_exception_checkpoint.dirpath": "ckpts/",
-                "on_exception_checkpoint.filename": "on_exception",
-            },
-        )
 
-        # Optional monitoring callbacks (disabled by default)
-        parser.add_lightning_class_args(SpikeDetection, "spike_detection")
-        parser.add_lightning_class_args(DeviceStatsMonitor, "device_stats_monitor")
+def _configure_cuda_backends() -> None:
+    """Configure CUDA backends for optimal performance and memory efficiency.
 
-    def before_instantiate_classes(self) -> None:
-        """Hook called before instantiating classes."""
-        # Set random seed if specified
-        config = self.config[self.subcommand]  # ty:ignore[invalid-argument-type]
-        if hasattr(config, "seed_everything") and config.seed_everything is not None:
-            L.seed_everything(config.seed_everything, workers=True)
+    Settings applied:
+    - TF32 for faster matrix operations on Ampere+ GPUs
+    - cuDNN benchmark mode for optimized convolution algorithms
+    - SDPA backends optimized for memory efficiency (flash/mem_efficient preferred)
+    - BF16 reduced precision for mixed-precision training
+    """
+    # Float32 matrix multiplication precision
+    torch.set_float32_matmul_precision("high")
+
+    # TF32 for Ampere+ GPUs (faster matmul with minimal precision loss)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    # cuDNN optimization (beneficial for fixed input sizes)
+    torch.backends.cudnn.benchmark = True
+
+    # SDPA (Scaled Dot-Product Attention) memory optimization
+    # Prioritize memory-efficient backends, disable math backend (highest VRAM usage)
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_cudnn_sdp(True)
+    torch.backends.cuda.enable_math_sdp(False)
+
+    # Allow reduced precision accumulation for BF16/FP16 mixed precision training
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 
 
 def main() -> None:
     """Main entry point for CLI."""
-    # Set float32 matrix multiplication precision for better performance on Ampere+ GPUs
-    torch.set_float32_matmul_precision("high")
+    _configure_cuda_backends()
 
     _cli = BiRefNetCLI(
         BiRefNetLightning,
@@ -168,6 +102,7 @@ def main() -> None:
         subclass_mode_data=True,
         parser_kwargs={
             "default_env": True,
+            "default_config_files": ["configs/default.yaml"],
         },
     )
 

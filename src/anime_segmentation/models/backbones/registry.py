@@ -7,7 +7,7 @@ consolidating what was previously spread across multiple files.
 from .base import BackboneRegistry, NHWCWrapper, StandardWrapper
 
 # =============================================================================
-# ConvNeXt v2 Variants
+# ConvNeXt Variants
 # =============================================================================
 
 CONVNEXT_MODELS = {

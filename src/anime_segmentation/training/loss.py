@@ -224,7 +224,7 @@ class ClsLoss(nn.Module):
             if pred_lvl is None:
                 continue
             for criterion_name, criterion in self.criterions_last.items():
-                loss = loss + criterion(pred_lvl, gt) * self.lambdas_cls[criterion_name]
+                loss += criterion(pred_lvl, gt) * self.lambdas_cls[criterion_name]
         return loss
 
 
@@ -328,15 +328,15 @@ class PixLoss(nn.Module):
             for name, crit in self.loss_prob.items():
                 w = self.lambdas[name] * pix_loss_lambda
                 loss_val = crit(probs, gt) * w
-                total = total + loss_val
-                log_accum[name] = log_accum[name] + (loss_val.detach() / n)
+                total += loss_val
+                log_accum[name] += loss_val.detach() / n
 
             # Logit-based losses
             for name, crit in self.loss_logit.items():
                 w = self.lambdas[name] * pix_loss_lambda
                 loss_val = crit(logits, gt) * w
-                total = total + loss_val
-                log_accum[name] = log_accum[name] + (loss_val.detach() / n)
+                total += loss_val
+                log_accum[name] += loss_val.detach() / n
 
         loss_dict = {k: v.item() for k, v in log_accum.items() if k in self.lambdas}
         return total, loss_dict

@@ -14,7 +14,8 @@ from huggingface_hub import HfApi
 from lightning.pytorch.callbacks import BaseFinetuning
 from lightning.pytorch.trainer.states import TrainerFn
 
-from .datamodule import IMAGENET_MEAN, IMAGENET_STD
+from anime_segmentation.constants import IMAGENET_MEAN, IMAGENET_STD
+
 from .protocols import Finetunable, HasBackbone
 
 if TYPE_CHECKING:

@@ -1,5 +1,7 @@
 """BiRefNet training module with PyTorch Lightning."""
 
+from anime_segmentation.constants import IMAGENET_MEAN, IMAGENET_STD
+
 from .callbacks import (
     BackboneFreezeCallback,
     FinetuneCallback,
@@ -8,9 +10,7 @@ from .callbacks import (
     VisualizationCallback,
 )
 from .datamodule import (
-    IMAGENET_MEAN,
-    IMAGENET_STD,
-    BiRefNetDataModule,
+    AnimeSegmentationDataModule,
     PairedTransform,
     SegmentationDataset,
 )
@@ -32,12 +32,12 @@ __all__ = [
     "IMAGENET_MEAN",
     "IMAGENET_STD",
     "MODEL_CARD_TEMPLATE",
+    # Data
+    "AnimeSegmentationDataModule",
     # Callbacks
     "BackboneFreezeCallback",
     # Loss
     "BaseLoss",
-    # Data
-    "BiRefNetDataModule",
     # Core Module
     "BiRefNetLightning",
     "ClsLoss",

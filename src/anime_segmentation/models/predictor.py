@@ -2,7 +2,9 @@ import torch
 from PIL import Image
 from torchvision import transforms
 
-from .models.birefnet import BiRefNet
+from anime_segmentation.constants import IMAGENET_MEAN, IMAGENET_STD
+
+from .birefnet import BiRefNet
 
 
 class BiRefNetPredictor:
@@ -24,7 +26,7 @@ class BiRefNetPredictor:
         self.transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+                transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
             ],
         )
 
