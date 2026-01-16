@@ -66,6 +66,7 @@ BiRefNet uses a hierarchical encoder-decoder structure with:
 | Swin Transformer | `swin_v1_t`, `swin_v1_s`, `swin_v1_b`, `swin_v1_l`                                                  |
 | PVT v2           | `pvt_v2_b0`, `pvt_v2_b1`, `pvt_v2_b2`, `pvt_v2_b5`                                                  |
 | DINOv3           | `dino_v3_s`, `dino_v3_b`, `dino_v3_l`, `dino_v3_h_plus`, `dino_v3_7b`                               |
+| CAFormer         | `caformer_s18`, `caformer_s36`, `caformer_m36`, `caformer_b36`                                      |
 
 ## Dataset Format
 
@@ -175,7 +176,7 @@ The training pipeline includes BiRefNet-style metrics:
 ### Load Pretrained Model
 
 ```python
-from anime_segmentation.birefnet.models import BiRefNet
+from anime_segmentation import BiRefNet
 
 model = BiRefNet.from_pretrained("ZhengPeng7/BiRefNet")
 ```
@@ -191,13 +192,13 @@ model.push_to_hub("your-username/your-model")
 ```text
 anime-segmentation/
 ├── src/anime_segmentation/
-│   ├── birefnet/
-│   │   ├── models/           # BiRefNet architecture
-│   │   │   ├── birefnet.py
-│   │   │   ├── backbones/    # Encoder implementations
-│   │   │   └── modules/      # Decoder components
+│   ├── models/               # BiRefNet architecture
+│   │   ├── birefnet.py       # Main model
 │   │   ├── predictor.py      # Inference wrapper
-│   │   └── image_proc.py     # Foreground refinement
+│   │   ├── backbones/        # Encoder implementations
+│   │   └── modules/          # Decoder components
+│   ├── inference/
+│   │   └── foreground.py     # Foreground refinement
 │   └── training/
 │       ├── train.py          # LightningCLI entry point
 │       ├── lightning_module.py
@@ -206,7 +207,9 @@ anime-segmentation/
 │       ├── metrics.py        # TorchMetrics implementations
 │       └── callbacks.py      # Training callbacks
 ├── configs/
-│   └── birefnet_default.yaml
+│   ├── default.yaml          # Base defaults
+│   ├── birefnet_default.yaml # Full training config
+│   └── anime_segmentation.yaml
 └── pyproject.toml
 ```
 
@@ -225,6 +228,8 @@ anime-segmentation/
 This project integrates [BiRefNet](https://github.com/ZhengPeng7/BiRefNet) with significant custom modifications:
 
 - Added ConvNeXt backbone family (atto, femto, pico, nano, tiny)
+- Added CAFormer backbone family
+- Changed normalization from Batch Normalization to Group Normalization
 - Refactored backbone interface and feature extraction
 - Modified decoder architecture and loss computation
 - Restructured training pipeline with LightningCLI
