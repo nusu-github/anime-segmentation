@@ -32,6 +32,69 @@ trainer:
       save_dir: ckpts/
       name: logs
 
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: ckpts/
+        filename: "epoch_{epoch}"
+        save_top_k: 3
+        monitor: val/loss
+        mode: min
+        save_last: true
+
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+
+    - class_path: anime_segmentation.training.callbacks.FinetuneCallback
+      init_args:
+        finetune_last_epochs: -40  # Start fine-tuning 40 epochs before end
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 30
+        mode: min
+
+    - class_path: anime_segmentation.training.callbacks.VisualizationCallback
+      init_args:
+        num_samples: 4
+        log_every_n_epochs: 1
+        max_resolution: 512  # Max resolution for visualization (null to keep original)
+
+    # Backbone freezing - only recommended for DINO backbones
+    # - class_path: anime_segmentation.training.callbacks.BackboneFreezeCallback
+    #   init_args:
+    #     unfreeze_at_epoch: 10
+    #     backbone_lr_scale: 0.1
+
+    - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
+      init_args:
+        scheduling:
+          0: 4   # Accumulate 4 steps for first 10 epochs
+          10: 1  # No accumulation after epoch 10
+
+    - class_path: lightning.pytorch.callbacks.OnExceptionCheckpoint
+      init_args:
+        dirpath: ckpts/
+        filename: on_exception
+
+    # Spike detection - skip batches with loss spikes to stabilize training
+    # Useful when dataset may contain corrupted or mislabeled samples
+    # - class_path: anime_segmentation.training.callbacks.SpikeDetectionCallback
+    #   init_args:
+    #     mode: min                    # 'min' or 'max' - direction to detect spikes
+    #     window: 10                   # Window size for running statistics
+    #     warmup: 1                    # Warmup batches before detection starts
+    #     rtol: 2.0                    # Relative tolerance (skip if loss > rtol * running_mean)
+    #     finite_only: true            # Also skip NaN/Inf losses
+
+    # Device stats monitor - log GPU/CPU memory usage
+    # Useful for debugging memory issues and optimizing batch size
+    # - class_path: lightning.pytorch.callbacks.DeviceStatsMonitor
+    #   init_args:
+    #     cpu_stats: null              # null=auto, true=always log CPU, false=never
+
 # =============================================================================
 # Model Configuration
 # =============================================================================
@@ -132,70 +195,3 @@ data:
     color_jitter_contrast: 0.2
     color_jitter_saturation: 0.2
     color_jitter_hue: 0.1
-
-# =============================================================================
-# Callbacks
-# =============================================================================
-trainer:
-  callbacks:
-    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
-      init_args:
-        dirpath: ckpts/
-        filename: "epoch_{epoch}"
-        save_top_k: 3
-        monitor: val/loss
-        mode: min
-        save_last: true
-
-    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
-      init_args:
-        logging_interval: epoch
-
-    - class_path: anime_segmentation.training.callbacks.FinetuneCallback
-      init_args:
-        finetune_last_epochs: -40  # Start fine-tuning 40 epochs before end
-
-    - class_path: lightning.pytorch.callbacks.EarlyStopping
-      init_args:
-        monitor: val/loss
-        patience: 30
-        mode: min
-
-    - class_path: anime_segmentation.training.callbacks.VisualizationCallback
-      init_args:
-        num_samples: 4
-        log_every_n_epochs: 1
-        max_resolution: 512  # Max resolution for visualization (null to keep original)
-
-    # Backbone freezing - only recommended for DINO backbones
-    # - class_path: anime_segmentation.training.callbacks.BackboneFreezeCallback
-    #   init_args:
-    #     unfreeze_at_epoch: 10
-    #     backbone_lr_scale: 0.1
-
-    - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
-      init_args:
-        scheduling:
-          0: 4   # Accumulate 4 steps for first 10 epochs
-          10: 1  # No accumulation after epoch 10
-
-    - class_path: lightning.pytorch.callbacks.OnExceptionCheckpoint
-      init_args:
-        dirpath: ckpts/
-        filename: on_exception
-
-    # Spike detection - skip batches with loss spikes to stabilize training
-    # Useful when dataset may contain corrupted or mislabeled samples
-    # - class_path: anime_segmentation.training.callbacks.SpikeDetectionCallback
-    #   init_args:
-    #     mode: min                    # 'min' or 'max' - direction to detect spikes
-    #     window: 10                   # Window size for running statistics
-    #     warmup: 1                    # Warmup batches before detection starts
-    #     rtol: 2.0                    # Relative tolerance (skip if loss > rtol * running_mean)
-    #     finite_only: true            # Also skip NaN/Inf losses
-
-    # Device stats monitor - log GPU/CPU memory usage
-    # Useful for debugging memory issues and optimizing batch size
-    # - class_path: lightning.pytorch.callbacks.DeviceStatsMonitor
-    #   init_args:
-    #     cpu_stats: null              # null=auto, true=always log CPU, false=never

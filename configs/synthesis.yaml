@@ -6,7 +6,7 @@ data:
   enable_synthesis: true
 
   # Ratio of synthetic samples in training (0.0 = all real, 1.0 = all synthetic)
-  synthesis_ratio: 0.9
+  synthesis_ratio: 0.3
 
   # Number of synthetic samples per epoch
   synthesis_length: 10000
@@ -28,9 +28,8 @@ data:
 
   # Blending strategy probabilities
   synthesis_blending_probs:
-    hard: 0.30      # Simple alpha compositing
-    feather: 0.45   # Soft edges via Gaussian blur
-    seamless: 0.25  # OpenCV seamless cloning
+    hard: 0.40      # Simple alpha compositing
+    feather: 0.60   # Soft edges via Gaussian blur
 
   # Consistency processing
   enable_consistency: true
