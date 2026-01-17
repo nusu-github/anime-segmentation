@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
+import kornia.filters as KF
+import kornia.morphology as KM
 import torch
-import torch.nn.functional as F
 
 if TYPE_CHECKING:
     from torch import Generator, Tensor
@@ -142,15 +143,16 @@ class LightWrap:
         """Create soft edge mask for light wrap application."""
         # Dilate mask
         kernel_size = 2 * self.wrap_radius + 1
-        kernel = torch.ones(1, 1, kernel_size, kernel_size, device=mask.device)
-        kernel /= kernel.sum()
-
-        padded = F.pad(
-            mask.unsqueeze(0),
-            (self.wrap_radius, self.wrap_radius, self.wrap_radius, self.wrap_radius),
-            mode="replicate",
+        kernel = torch.ones(
+            1,
+            1,
+            kernel_size,
+            kernel_size,
+            device=mask.device,
+            dtype=mask.dtype,
         )
-        dilated = F.conv2d(padded, kernel).squeeze(0)
+
+        dilated = KM.dilation(mask.unsqueeze(0), kernel).squeeze(0)
 
         # Edge zone = dilated - original
         return torch.clamp(dilated - mask, 0, 1)
@@ -178,23 +180,12 @@ class LightWrap:
         kernel_size = self.wrap_radius * 2 + 1
         sigma = self.wrap_radius / 2.0
 
-        # Create Gaussian kernel
-        x = torch.arange(kernel_size, device=bg.device, dtype=torch.float32)
-        x -= kernel_size // 2
-        gauss_1d = torch.exp(-(x**2) / (2 * sigma**2))
-        gauss_1d /= gauss_1d.sum()
-
-        # Separable convolution
-        kernel_h = gauss_1d.view(1, 1, kernel_size, 1).expand(3, 1, -1, -1)
-        kernel_w = gauss_1d.view(1, 1, 1, kernel_size).expand(3, 1, -1, -1)
-
-        bg_padded = F.pad(
+        bg_blurred = KF.gaussian_blur2d(
             bg.unsqueeze(0),
-            (self.wrap_radius, self.wrap_radius, self.wrap_radius, self.wrap_radius),
-            mode="replicate",
-        )
-        bg_blurred = F.conv2d(bg_padded, kernel_h, groups=3, padding=0)
-        bg_blurred = F.conv2d(bg_blurred, kernel_w, groups=3, padding=0).squeeze(0)
+            kernel_size=(kernel_size, kernel_size),
+            sigma=(sigma, sigma),
+            border_type="replicate",
+        ).squeeze(0)
 
         # Apply light wrap in edge zone
         wrap_strength = edge_mask * self.intensity
@@ -244,22 +235,12 @@ class SimpleShadow:
         kernel_size = 2 * self.blur_radius + 1
         sigma = self.blur_radius / 2.0
 
-        x = torch.arange(kernel_size, device=mask.device, dtype=torch.float32)
-        x -= kernel_size // 2
-        gauss_1d = torch.exp(-(x**2) / (2 * sigma**2))
-        gauss_1d /= gauss_1d.sum()
-
-        kernel_h = gauss_1d.view(1, 1, kernel_size, 1)
-        kernel_w = gauss_1d.view(1, 1, 1, kernel_size)
-
-        padded = F.pad(
+        blurred = KF.gaussian_blur2d(
             mask.unsqueeze(0),
-            (self.blur_radius, self.blur_radius, self.blur_radius, self.blur_radius),
-            mode="constant",
-            value=0,
+            kernel_size=(kernel_size, kernel_size),
+            sigma=(sigma, sigma),
+            border_type="constant",
         )
-        blurred = F.conv2d(padded, kernel_h, padding=0)
-        blurred = F.conv2d(blurred, kernel_w, padding=0)
 
         return blurred.squeeze(0)
 

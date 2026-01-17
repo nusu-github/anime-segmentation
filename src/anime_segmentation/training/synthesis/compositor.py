@@ -17,7 +17,6 @@ from anime_segmentation.training.synthesis.blending import (
     BlendingStrategy,
     FeatherBlending,
     HardPasteBlending,
-    SeamlessBlending,
 )
 from anime_segmentation.training.synthesis.transforms import (
     InstanceTransform,
@@ -66,9 +65,8 @@ class CompositorConfig:
 
     blending_probs: dict[str, float] = field(
         default_factory=lambda: {
-            "hard": 0.30,
-            "feather": 0.45,
-            "seamless": 0.25,
+            "hard": 0.40,
+            "feather": 0.60,
         },
     )
 
@@ -131,7 +129,6 @@ class CopyPasteCompositor:
         self._blenders: dict[str, BlendingStrategy] = {
             "hard": HardPasteBlending(),
             "feather": FeatherBlending(),
-            "seamless": SeamlessBlending(),
         }
 
     def _sample_k(self, rng: Generator | None = None) -> int:

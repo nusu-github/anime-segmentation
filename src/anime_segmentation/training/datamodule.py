@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import logging
-import random
 from pathlib import Path
 
 import kornia.augmentation as K
 import lightning as L
 import torch
+import torch.nn.functional as F
 import torchvision.transforms.functional as TF
-from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from torchvision.io import ImageReadMode, read_image
@@ -23,35 +22,22 @@ from anime_segmentation.constants import (
 
 logger = logging.getLogger(__name__)
 
-Image.MAX_IMAGE_PIXELS = None  # Remove DecompressionBombWarning
 
-
-def _load_image_fast(path: str, mode: ImageReadMode = ImageReadMode.RGB) -> Image.Image:
+def _load_image_fast(path: str, mode: ImageReadMode = ImageReadMode.RGB) -> torch.Tensor:
     """Load image using fast torchvision.io decoder with PIL fallback.
 
-    Uses torchvision.io.read_image for faster JPEG/PNG decoding (libjpeg-turbo),
-    falling back to PIL for unsupported formats.
+    Uses torchvision.io.read_image for faster JPEG/PNG decoding (libjpeg-turbo).
 
     Args:
         path: Path to image file.
         mode: ImageReadMode (RGB or GRAY).
 
     Returns:
-        PIL Image in the requested mode.
+        Tensor [C, H, W] in uint8.
 
     """
-    try:
-        # Fast path: use torchvision.io (faster for JPEG due to libjpeg-turbo)
-        tensor = read_image(path, mode=mode)
-        # Convert tensor [C, H, W] uint8 -> PIL Image
-        if mode == ImageReadMode.GRAY:
-            return TF.to_pil_image(tensor, mode="L")
-        return TF.to_pil_image(tensor, mode="RGB")
-    except Exception:
-        # Fallback to PIL for unsupported formats or errors
-        if mode == ImageReadMode.GRAY:
-            return Image.open(path).convert("L")
-        return Image.open(path).convert("RGB")
+    # Fast path: use torchvision.io (faster for JPEG due to libjpeg-turbo)
+    return read_image(path, mode=mode)
 
 
 class GPUAugmentation(torch.nn.Module):
@@ -138,27 +124,11 @@ class PairedTransform:
     def __init__(
         self,
         size: tuple[int, int] | None = None,
-        is_train: bool = True,
-        hflip_prob: float = 0.5,
-        rotation_degrees: float = 10.0,
-        color_jitter: bool = True,
-        color_jitter_brightness: float = 0.2,
-        color_jitter_contrast: float = 0.2,
-        color_jitter_saturation: float = 0.2,
-        color_jitter_hue: float = 0.1,
     ) -> None:
         """Initialize transforms.
 
         Args:
             size: Target size (width, height). None for original size.
-            is_train: Whether this is for training (enables augmentation).
-            hflip_prob: Probability of horizontal flip.
-            rotation_degrees: Max rotation angle.
-            color_jitter: Whether to apply color jitter to image.
-            color_jitter_brightness: Brightness jitter range.
-            color_jitter_contrast: Contrast jitter range.
-            color_jitter_saturation: Saturation jitter range.
-            color_jitter_hue: Hue jitter range.
 
         Raises:
             ValueError: If parameters are invalid.
@@ -172,37 +142,16 @@ class PairedTransform:
             if size[0] <= 0 or size[1] <= 0:
                 msg = f"size dimensions must be positive, got {size}"
                 raise ValueError(msg)
-        if not 0.0 <= hflip_prob <= 1.0:
-            msg = f"hflip_prob must be in [0, 1], got {hflip_prob}"
-            raise ValueError(msg)
-        if rotation_degrees < 0:
-            msg = f"rotation_degrees must be non-negative, got {rotation_degrees}"
-            raise ValueError(msg)
 
         self.size = size
-        self.is_train = is_train
-        self.hflip_prob = hflip_prob
-        self.rotation_degrees = rotation_degrees
-        self.color_jitter = color_jitter
 
         # Image normalization (applied after ToTensor)
         self.normalize = transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)
 
-        # Color jitter for image only
-        if color_jitter and is_train:
-            self.jitter = transforms.ColorJitter(
-                brightness=color_jitter_brightness,
-                contrast=color_jitter_contrast,
-                saturation=color_jitter_saturation,
-                hue=color_jitter_hue,
-            )
-        else:
-            self.jitter = None
-
     def __call__(
         self,
-        image: Image.Image,
-        mask: Image.Image,
+        image: torch.Tensor,
+        mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply transforms to image and mask.
 
@@ -212,32 +161,26 @@ class PairedTransform:
 
         Returns:
             Tuple of (image_tensor, mask_tensor).
-
+            image: Tensor [3, H, W] uint8.
+            mask: Tensor [1, H, W] uint8.
         """
-        # Resize if size is specified
+        image_tensor = image.float() / 255.0
+        mask_tensor = mask.float() / 255.0
+
+        # Resize if size is specified (size is width, height)
         if self.size is not None:
-            image = image.resize(self.size, resample=Image.Resampling.BILINEAR)
-            mask = mask.resize(self.size, resample=Image.Resampling.NEAREST)
-
-        if self.is_train:
-            # Random horizontal flip
-            if random.random() < self.hflip_prob:
-                image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-                mask = mask.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-
-            # Random rotation
-            if self.rotation_degrees > 0:
-                angle = random.uniform(-self.rotation_degrees, self.rotation_degrees)
-                image = image.rotate(angle)
-                mask = mask.rotate(angle)
-
-            # Color jitter (image only)
-            if self.jitter is not None:
-                image = self.jitter(image)
-
-        # Convert to tensor
-        image_tensor = TF.to_tensor(image)  # [3, H, W], 0-1
-        mask_tensor = TF.to_tensor(mask)  # [1, H, W], 0-1
+            target_h, target_w = self.size[1], self.size[0]
+            image_tensor = F.interpolate(
+                image_tensor.unsqueeze(0),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+            mask_tensor = F.interpolate(
+                mask_tensor.unsqueeze(0),
+                size=(target_h, target_w),
+                mode="nearest",
+            ).squeeze(0)
 
         # Normalize image
         image_tensor = self.normalize(image_tensor)
@@ -295,9 +238,9 @@ class SegmentationDataset(Dataset):
             image, mask = self.transform(image, mask)
         else:
             # Default: just convert to tensor
-            image = TF.to_tensor(image)
+            image = image.float() / 255.0
             image = TF.normalize(image, IMAGENET_MEAN, IMAGENET_STD)
-            mask = TF.to_tensor(mask)
+            mask = mask.float() / 255.0
 
         return image, mask, self.class_label
 
@@ -432,9 +375,9 @@ class MixedDataset(Dataset):
             Tuple of (image, mask, class_label).
 
         """
-        if random.random() < self.synthesis_ratio:
+        if torch.rand(1).item() < self.synthesis_ratio:
             # Synthetic sample (random index)
-            synth_index = random.randint(0, len(self.synth_dataset) - 1)
+            synth_index = int(torch.randint(0, len(self.synth_dataset), (1,)).item())
             return self.synth_dataset[synth_index]
         # Real sample
         return self.real_dataset[index]
@@ -527,7 +470,7 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         size: tuple[int, int] = (1024, 1024),
         pin_memory: bool = True,
         prefetch_factor: int | None = None,
-        gpu_augmentation: bool = False,
+        gpu_augmentation: bool = True,
         # Augmentation settings
         hflip_prob: float = 0.5,
         rotation_degrees: float = 10.0,
@@ -690,11 +633,9 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
 
         # Create train/val split indices
         n_samples = len(self._image_paths)
-        indices = list(range(n_samples))
-
         # Shuffle with fixed seed for reproducibility
-        rng = random.Random(42)
-        rng.shuffle(indices)
+        generator = torch.Generator().manual_seed(42)
+        indices = torch.randperm(n_samples, generator=generator).tolist()
 
         # Split
         n_val = int(n_samples * self.val_ratio)
@@ -729,25 +670,9 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         image_paths = [self._image_paths[i] for i in indices]
         mask_paths = [self._mask_paths[i] for i in indices]
 
-        # When gpu_augmentation is enabled, skip CPU augmentation for training
-        # (augmentation will be applied in on_after_batch_transfer)
-        if is_train and self.gpu_augmentation:
-            # Only resize and normalize, no augmentation
-            transform = PairedTransform(size=self.size, is_train=False)
-        elif is_train:
-            transform = PairedTransform(
-                size=self.size,
-                is_train=True,
-                hflip_prob=self.hflip_prob,
-                rotation_degrees=self.rotation_degrees,
-                color_jitter=self.color_jitter,
-                color_jitter_brightness=self.color_jitter_brightness,
-                color_jitter_contrast=self.color_jitter_contrast,
-                color_jitter_saturation=self.color_jitter_saturation,
-                color_jitter_hue=self.color_jitter_hue,
-            )
-        else:
-            transform = PairedTransform(size=self.size, is_train=False)
+        # CPU augmentations are disabled; GPU augmentations are applied
+        # in on_after_batch_transfer when enabled.
+        transform = PairedTransform(size=self.size)
 
         return SegmentationDataset(image_paths, mask_paths, transform=transform)
 

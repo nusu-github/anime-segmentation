@@ -87,11 +87,11 @@ def adaptive_group_norm_act(num_channels: int, **kwargs: Any) -> GroupNormAct:
     target = 4 if num_channels < 32 else 8
     num_groups = _pick_group_count(num_channels, target_group_size=target)
     if "act_layer" not in kwargs:
-        act_kwargs = kwargs.get("act_kwargs", None)
+        act_kwargs = kwargs.get("act_kwargs")
         if isinstance(act_kwargs, dict) and "approximate" in act_kwargs:
             kwargs["act_layer"] = nn.GELU
 
     act_layer = kwargs.get("act_layer", nn.ReLU)
-    act_kwargs = kwargs.get("act_kwargs", None)
+    act_kwargs = kwargs.get("act_kwargs")
     kwargs["act_kwargs"] = _filter_act_kwargs(act_layer, act_kwargs)
     return GroupNormAct(num_channels, num_groups=num_groups, **kwargs)

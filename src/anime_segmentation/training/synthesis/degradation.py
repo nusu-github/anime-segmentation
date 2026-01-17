@@ -7,12 +7,11 @@ conditions.
 
 from __future__ import annotations
 
-import io
 from typing import TYPE_CHECKING
 
+import kornia.augmentation as K
+import kornia.filters as KF
 import torch
-import torch.nn.functional as F
-from PIL import Image
 from torch import nn
 
 if TYPE_CHECKING:
@@ -94,24 +93,9 @@ class QualityDegradation(nn.Module):
             JPEG-compressed image [3, H, W].
 
         """
-        device = image.device
-
-        # Convert to PIL
-        img_np = (image.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
-        img_pil = Image.fromarray(img_np, mode="RGB")
-
-        # Compress to JPEG in memory
-        buffer = io.BytesIO()
-        img_pil.save(buffer, format="JPEG", quality=quality)
-        buffer.seek(0)
-
-        # Decompress
-        img_compressed = Image.open(buffer).convert("RGB")
-        import numpy as np
-
-        img_array = torch.from_numpy(np.array(img_compressed)).float() / 255.0
-
-        return img_array.permute(2, 0, 1).to(device)
+        jpeg = K.RandomJPEG(quality=(quality, quality), p=1.0, same_on_batch=True)
+        result = jpeg(image.unsqueeze(0))
+        return result.squeeze(0)
 
     def _apply_gaussian_blur(
         self,
@@ -133,23 +117,12 @@ class QualityDegradation(nn.Module):
             kernel_size += 1
 
         sigma = kernel_size / 6.0  # Reasonable default
-
-        # Create Gaussian kernel
-        x = torch.arange(kernel_size, device=image.device, dtype=torch.float32)
-        x -= kernel_size // 2
-        gauss_1d = torch.exp(-(x**2) / (2 * sigma**2))
-        gauss_1d /= gauss_1d.sum()
-
-        # 2D separable kernel
-        kernel_h = gauss_1d.view(1, 1, kernel_size, 1).expand(3, 1, -1, -1)
-        kernel_w = gauss_1d.view(1, 1, 1, kernel_size).expand(3, 1, -1, -1)
-
-        padding = kernel_size // 2
-        padded = F.pad(image.unsqueeze(0), (padding, padding, padding, padding), mode="replicate")
-
-        blurred = F.conv2d(padded, kernel_h, groups=3, padding=0)
-        blurred = F.conv2d(blurred, kernel_w, groups=3, padding=0)
-
+        blurred = KF.gaussian_blur2d(
+            image.unsqueeze(0),
+            kernel_size=(kernel_size, kernel_size),
+            sigma=(sigma, sigma),
+            border_type="replicate",
+        )
         return blurred.squeeze(0)
 
     def _apply_gaussian_noise(

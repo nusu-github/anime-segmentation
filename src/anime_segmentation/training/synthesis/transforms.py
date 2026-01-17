@@ -8,9 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import kornia.augmentation as K
 import torch
-import torch.nn.functional as F
-from torchvision.transforms import functional as TF
 
 if TYPE_CHECKING:
     from torch import Generator, Tensor
@@ -62,22 +61,15 @@ class InstanceTransform:
         self.rotation_range = rotation_range
         self.scale_range = scale_range
 
-    def _random_uniform(
-        self,
-        low: float,
-        high: float,
-        rng: Generator | None = None,
-    ) -> float:
-        """Sample uniform random value."""
-        if rng is not None:
-            return low + (high - low) * torch.rand(1, generator=rng).item()
-        return low + (high - low) * torch.rand(1).item()
-
-    def _random_bool(self, prob: float, rng: Generator | None = None) -> bool:
-        """Sample boolean with given probability."""
-        if rng is not None:
-            return torch.rand(1, generator=rng).item() < prob
-        return torch.rand(1).item() < prob
+        self._augment = K.AugmentationSequential(
+            K.RandomHorizontalFlip(p=hflip_prob),
+            K.RandomAffine(
+                degrees=rotation_range,
+                scale=scale_range,
+                p=1.0,
+            ),
+            data_keys=["input", "mask"],
+        )
 
     def __call__(
         self,
@@ -96,37 +88,16 @@ class InstanceTransform:
             Tuple of (transformed_rgb, transformed_mask) with same shapes.
 
         """
-        # Horizontal flip
-        if self._random_bool(self.hflip_prob, rng):
-            fg_rgb = TF.hflip(fg_rgb)
-            fg_mask = TF.hflip(fg_mask)
+        if rng is not None:
+            seed = int(torch.randint(0, 2**31 - 1, (1,), generator=rng).item())
+            with torch.random.fork_rng():
+                torch.manual_seed(seed)
+                fg_rgb, fg_mask = self._augment(fg_rgb.unsqueeze(0), fg_mask.unsqueeze(0))
+        else:
+            fg_rgb, fg_mask = self._augment(fg_rgb.unsqueeze(0), fg_mask.unsqueeze(0))
 
-        # Random rotation
-        angle = self._random_uniform(*self.rotation_range, rng)
-        if abs(angle) > 0.1:  # Skip if angle is negligible
-            fg_rgb = TF.rotate(fg_rgb, angle, interpolation=TF.InterpolationMode.BILINEAR)
-            fg_mask = TF.rotate(fg_mask, angle, interpolation=TF.InterpolationMode.NEAREST)
-            # Re-binarize mask after rotation
-            fg_mask = (fg_mask > 0.5).float()
-
-        # Random scale
-        scale = self._random_uniform(*self.scale_range, rng)
-        if abs(scale - 1.0) > 0.01:  # Skip if scale is close to 1
-            _, h, w = fg_rgb.shape
-            new_h, new_w = int(h * scale), int(w * scale)
-
-            if new_h > 0 and new_w > 0:
-                fg_rgb = F.interpolate(
-                    fg_rgb.unsqueeze(0),
-                    size=(new_h, new_w),
-                    mode="bilinear",
-                    align_corners=False,
-                ).squeeze(0)
-                fg_mask = F.interpolate(
-                    fg_mask.unsqueeze(0),
-                    size=(new_h, new_w),
-                    mode="nearest",
-                ).squeeze(0)
+        fg_rgb = fg_rgb.squeeze(0)
+        fg_mask = (fg_mask.squeeze(0) > 0.5).float()
 
         return fg_rgb, fg_mask
 
