@@ -442,6 +442,185 @@ class EMeasureMetric(Metric):
         return self.em_sum / (self.count + 1e-8)
 
 
+class BoundaryFScoreMetric(Metric):
+    """Boundary F-score metric for edge quality evaluation.
+
+    Measures how well the predicted boundaries match the ground truth boundaries.
+    Uses morphological operations to extract boundaries.
+    """
+
+    is_differentiable: bool = False
+    higher_is_better: bool = True
+    full_state_update: bool = False
+
+    def __init__(
+        self,
+        boundary_width: int = 2,
+        beta: float = 1.0,
+        threshold: float = 0.5,
+    ) -> None:
+        """Initialize boundary F-score metric.
+
+        Args:
+            boundary_width: Width of boundary zone in pixels.
+            beta: F-score beta parameter (1.0 for F1).
+            threshold: Threshold for binarizing predictions.
+
+        """
+        super().__init__()
+        self.boundary_width = boundary_width
+        self.beta = beta
+        self.threshold = threshold
+
+        self.add_state("tp", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("fp", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("fn", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+    def _extract_boundary(self, mask: Tensor) -> Tensor:
+        """Extract boundary from binary mask using dilation/erosion.
+
+        Args:
+            mask: Binary mask [B, H, W] or [H, W].
+
+        Returns:
+            Boundary mask of same shape.
+
+        """
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0)
+
+        # Kernel size for morphological operations
+        k = 2 * self.boundary_width + 1
+
+        # Pad for valid convolution
+        padded = torch.nn.functional.pad(
+            mask.unsqueeze(1).float(),
+            (self.boundary_width, self.boundary_width, self.boundary_width, self.boundary_width),
+            mode="replicate",
+        )
+
+        # Dilation (max pooling approximation)
+        dilated = torch.nn.functional.max_pool2d(padded, k, stride=1)
+
+        # Erosion (min pooling = neg max neg)
+        eroded = -torch.nn.functional.max_pool2d(-padded, k, stride=1)
+
+        # Boundary = dilated - eroded
+        boundary = (dilated - eroded).squeeze(1)
+
+        return (boundary > 0).float()
+
+    def update(self, preds: Tensor, target: Tensor) -> None:
+        """Update metric state.
+
+        Args:
+            preds: Predictions [B, 1, H, W] or [B, H, W], values in [0, 1].
+            target: Ground truth [B, 1, H, W] or [B, H, W], values in [0, 1].
+
+        """
+        preds, target = _normalize_tensors(preds, target)
+
+        # Binarize predictions
+        pred_bin = (preds >= self.threshold).float()
+
+        # Extract boundaries
+        pred_boundary = self._extract_boundary(pred_bin)
+        gt_boundary = self._extract_boundary(target)
+
+        # Compute TP, FP, FN
+        tp = (pred_boundary * gt_boundary).sum()
+        fp = (pred_boundary * (1 - gt_boundary)).sum()
+        fn = ((1 - pred_boundary) * gt_boundary).sum()
+
+        self.tp += tp
+        self.fp += fp
+        self.fn += fn
+
+    def compute(self) -> Tensor:
+        """Compute boundary F-score."""
+        precision = self.tp / (self.tp + self.fp + 1e-8)
+        recall = self.tp / (self.tp + self.fn + 1e-8)
+
+        beta_sq = self.beta**2
+        return (1 + beta_sq) * precision * recall / (beta_sq * precision + recall + 1e-8)
+
+
+class NegativeFPRateMetric(Metric):
+    """False positive rate metric for negative examples.
+
+    Measures the rate of false positive predictions on images
+    that should have no foreground (negative examples).
+    """
+
+    is_differentiable: bool = False
+    higher_is_better: bool = False  # Lower is better
+    full_state_update: bool = False
+
+    def __init__(
+        self,
+        threshold: float = 0.5,
+        area_threshold: float = 0.01,
+    ) -> None:
+        """Initialize negative FP rate metric.
+
+        Args:
+            threshold: Threshold for binarizing predictions.
+            area_threshold: Minimum area ratio to count as false positive.
+
+        """
+        super().__init__()
+        self.threshold = threshold
+        self.area_threshold = area_threshold
+
+        self.add_state("fp_count", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("total_negatives", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(
+        self,
+        preds: Tensor,
+        target: Tensor,
+        is_negative: Tensor | None = None,
+    ) -> None:
+        """Update metric state.
+
+        Args:
+            preds: Predictions [B, 1, H, W] or [B, H, W], values in [0, 1].
+            target: Ground truth [B, 1, H, W] or [B, H, W], values in [0, 1].
+            is_negative: Optional boolean tensor [B] indicating negative samples.
+                If None, infers from target (empty masks are negative).
+
+        """
+        preds, target = _normalize_tensors(preds, target)
+
+        # Infer negative samples if not provided
+        if is_negative is None:
+            # Samples with no foreground in GT are negative
+            is_negative = target.sum(dim=(1, 2)) == 0
+
+        if not is_negative.any():
+            return
+
+        # Filter to negative samples only
+        neg_preds = preds[is_negative]
+
+        # Binarize predictions
+        pred_bin = (neg_preds >= self.threshold).float()
+
+        # Check for false positives (any prediction on negative samples)
+        pred_area = pred_bin.sum(dim=(1, 2)) / (pred_bin.shape[1] * pred_bin.shape[2])
+        fp_samples = (pred_area > self.area_threshold).sum()
+
+        self.fp_count += fp_samples
+        self.total_negatives += is_negative.sum()
+
+    def compute(self) -> Tensor:
+        """Compute false positive rate on negative samples."""
+        if self.total_negatives == 0:
+            return torch.tensor(0.0, device=self.fp_count.device)
+
+        return self.fp_count.float() / self.total_negatives.float()
+
+
 class SegmentationMetrics(MetricCollection):
     """Collection of all segmentation metrics.
 
@@ -452,20 +631,23 @@ class SegmentationMetrics(MetricCollection):
 
     """
 
-    def __init__(self, prefix: str = "") -> None:
+    def __init__(self, prefix: str = "", include_boundary: bool = False) -> None:
         """Initialize metric collection.
 
         Args:
             prefix: Prefix for metric names (e.g., "val_" or "test_").
+            include_boundary: Whether to include boundary F-score metric.
 
         """
-        super().__init__(
-            {
-                "iou": IoUMetric(),
-                "mae": MAEMetric(),
-                "fm_adp": FMeasureMetric(beta=0.3),
-                "sm": SMeasureMetric(alpha=0.5),
-                "em_adp": EMeasureMetric(),
-            },
-            prefix=prefix,
-        )
+        metrics_dict = {
+            "iou": IoUMetric(),
+            "mae": MAEMetric(),
+            "fm_adp": FMeasureMetric(beta=0.3),
+            "sm": SMeasureMetric(alpha=0.5),
+            "em_adp": EMeasureMetric(),
+        }
+
+        if include_boundary:
+            metrics_dict["boundary_f"] = BoundaryFScoreMetric()
+
+        super().__init__(metrics_dict, prefix=prefix)

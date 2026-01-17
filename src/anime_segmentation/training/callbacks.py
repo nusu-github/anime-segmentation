@@ -664,3 +664,148 @@ class HubUploadCallback(L.Callback):
         commit_message = f"Final model (epoch {trainer.current_epoch})"
         self._upload_model(trainer, pl_module, commit_message)
         logger.info("Uploaded final model")
+
+
+class SynthesisDebugCallback(L.Callback):
+    """Debug callback for visualizing synthesis pipeline outputs.
+
+    Generates and saves sample synthetic images at regular intervals
+    for visual inspection of the synthesis pipeline quality.
+    """
+
+    def __init__(
+        self,
+        output_dir: str = "debug_synthesis",
+        num_samples: int = 16,
+        fixed_seed: int = 42,
+        log_every_n_epochs: int = 5,
+    ) -> None:
+        """Initialize synthesis debug callback.
+
+        Args:
+            output_dir: Directory for saving debug outputs.
+            num_samples: Number of samples to generate per epoch.
+            fixed_seed: Fixed seed for reproducible samples.
+            log_every_n_epochs: Generate samples every N epochs.
+
+        """
+        super().__init__()
+        self.output_dir = Path(output_dir)
+        self.num_samples = num_samples
+        self.fixed_seed = fixed_seed
+        self.log_every_n_epochs = log_every_n_epochs
+
+    def _should_log(self, trainer: L.Trainer) -> bool:
+        """Check if debug output should be generated this epoch."""
+        return trainer.current_epoch % self.log_every_n_epochs == 0
+
+    def on_train_epoch_start(
+        self,
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
+    ) -> None:
+        """Generate debug samples at the start of selected epochs.
+
+        Args:
+            trainer: Lightning trainer.
+            pl_module: Lightning module.
+
+        """
+        if not self._should_log(trainer):
+            return
+
+        # Check if datamodule has synthesis capability
+        datamodule = trainer.datamodule
+        if datamodule is None:
+            return
+
+        # Check for compositor attribute
+        if not hasattr(datamodule, "_compositor") or datamodule._compositor is None:
+            return
+
+        self._generate_debug_samples(trainer, datamodule)
+
+    def _generate_debug_samples(
+        self,
+        trainer: L.Trainer,
+        datamodule,
+    ) -> None:
+        """Generate and save debug samples."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        compositor = datamodule._compositor
+        target_size = datamodule.size
+
+        # Use fixed seed for reproducibility
+        rng = torch.Generator()
+        rng.manual_seed(self.fixed_seed)
+
+        samples = []
+        for i in range(self.num_samples):
+            image, mask, k = compositor.synthesize(target_size, rng)
+            samples.append((image, mask, k))
+
+        # Create visualization grid
+        epoch_dir = self.output_dir / f"epoch_{trainer.current_epoch:04d}"
+        epoch_dir.mkdir(parents=True, exist_ok=True)
+
+        for i, (image, mask, k) in enumerate(samples):
+            # Save individual samples
+            self._save_sample(epoch_dir / f"sample_{i:02d}_k{k}.png", image, mask)
+
+        # Save grid visualization
+        self._save_grid(epoch_dir / "grid.png", samples)
+
+        logger.info(
+            "Saved %d synthesis debug samples to %s",
+            len(samples),
+            epoch_dir,
+        )
+
+    def _save_sample(
+        self,
+        path: Path,
+        image: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> None:
+        """Save a single sample image with mask overlay."""
+        # Combine image and mask side by side
+        mask_rgb = mask.expand(3, -1, -1)
+        combined = torch.cat([image, mask_rgb], dim=2)
+
+        # Convert to PIL and save
+        combined_np = (combined.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+
+        try:
+            from PIL import Image
+
+            img = Image.fromarray(combined_np)
+            img.save(path)
+        except ImportError:
+            logger.warning("PIL not available for saving debug images")
+
+    def _save_grid(
+        self,
+        path: Path,
+        samples: list[tuple[torch.Tensor, torch.Tensor, int]],
+    ) -> None:
+        """Save a grid of all samples."""
+        images = []
+        for image, mask, _ in samples:
+            mask_rgb = mask.expand(3, -1, -1)
+            combined = torch.cat([image, mask_rgb], dim=2)
+            images.append(combined)
+
+        # Create grid
+        grid = vutils.make_grid(images, nrow=4, padding=4, normalize=False)
+
+        # Convert to PIL and save
+        grid_np = (grid.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+
+        try:
+            from PIL import Image
+
+            img = Image.fromarray(grid_np)
+            img.save(path)
+        except ImportError:
+            logger.warning("PIL not available for saving debug grid")
