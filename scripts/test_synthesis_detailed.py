@@ -431,7 +431,7 @@ def run_detailed_test(
 
     # Default blending methods
     if blending_methods is None:
-        blending_methods = ["hard", "feather", "seamless", "seamless_mixed"]
+        blending_methods = ["hard", "feather"]
 
     # Initialize pools
     logger.info("ForegroundPool: %s", fg_dir)

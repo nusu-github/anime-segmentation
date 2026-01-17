@@ -174,7 +174,7 @@ def test_synthesis(
         max_area_ratio=0.50,
         max_total_coverage=0.80,
         max_iou_overlap=0.25,
-        blending_probs={"hard": 0.33, "feather": 0.34, "seamless": 0.33},
+        blending_probs={"hard": 0.4, "feather": 0.6},
     )
 
     instance_transform = InstanceTransform(

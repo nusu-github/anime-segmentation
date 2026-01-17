@@ -74,7 +74,11 @@ class GPUAugmentation(torch.nn.Module):
         # Geometric augmentations (applied to both image and mask)
         self.geometric = K.AugmentationSequential(
             K.RandomHorizontalFlip(p=hflip_prob),
-            K.RandomRotation(degrees=rotation_degrees, p=1.0 if rotation_degrees > 0 else 0.0),
+            K.RandomRotation(
+                degrees=rotation_degrees,
+                p=1.0 if rotation_degrees > 0 else 0.0,
+                align_corners=False,
+            ),
             data_keys=["input", "mask"],
             same_on_batch=False,
         )

@@ -66,6 +66,7 @@ class InstanceTransform:
             K.RandomAffine(
                 degrees=rotation_range,
                 scale=scale_range,
+                align_corners=False,
                 p=1.0,
             ),
             data_keys=["input", "mask"],
@@ -92,7 +93,10 @@ class InstanceTransform:
             seed = int(torch.randint(0, 2**31 - 1, (1,), generator=rng).item())
             with torch.random.fork_rng():
                 torch.manual_seed(seed)
-                fg_rgb, fg_mask = self._augment(fg_rgb.unsqueeze(0), fg_mask.unsqueeze(0))
+                fg_rgb, fg_mask = self._augment(
+                    fg_rgb.unsqueeze(0),
+                    fg_mask.unsqueeze(0),
+                )
         else:
             fg_rgb, fg_mask = self._augment(fg_rgb.unsqueeze(0), fg_mask.unsqueeze(0))
 
