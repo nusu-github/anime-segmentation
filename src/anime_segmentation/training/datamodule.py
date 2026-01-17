@@ -376,6 +376,10 @@ class SynthesisDataset(Dataset):
         if self.degradation is not None:
             image, mask = self.degradation(image, mask)
 
+        # Ensure value range is valid before validation/normalization
+        image = torch.clamp(image, 0.0, 1.0)
+        mask = torch.clamp(mask, 0.0, 1.0)
+
         # Validate if validator is provided
         if self.validator is not None:
             result = self.validator.validate(image, mask)

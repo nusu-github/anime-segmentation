@@ -1,3 +1,6 @@
+import inspect
+import warnings
+
 import torch
 import torch.nn.functional as F
 from einops import rearrange
@@ -19,6 +22,30 @@ _ACT_LAYER_MAP: dict[str, type[nn.Module]] = {
 }
 
 
+def _filter_act_kwargs(act_layer: type[nn.Module], act_kwargs: dict | None) -> dict | None:
+    if act_kwargs is None:
+        return None
+    if not isinstance(act_kwargs, dict):
+        msg = f"act_kwargs must be a dict when using {act_layer.__name__}, got {type(act_kwargs).__name__}"
+        raise TypeError(msg)
+
+    try:
+        signature = inspect.signature(act_layer)
+        valid_keys = {name for name in signature.parameters if name != "self"}
+    except (TypeError, ValueError):
+        # If signature is unavailable (e.g., C++/PyTorch builtin), keep as-is.
+        return act_kwargs
+
+    filtered = {k: v for k, v in act_kwargs.items() if k in valid_keys}
+    removed = sorted(set(act_kwargs) - set(filtered))
+    if removed:
+        warnings.warn(
+            f"Ignoring unsupported act_kwargs for {act_layer.__name__}: {', '.join(removed)}",
+            stacklevel=2,
+        )
+    return filtered
+
+
 def _resolve_act_layer(act_layer: str | None = None, act_kwargs=None):
     if act_layer is None:
         act_layer = "relu"
@@ -34,6 +61,13 @@ def _resolve_act_layer(act_layer: str | None = None, act_kwargs=None):
                 act_kwargs = {"inplace": True}
             case nn.GELU:
                 act_kwargs = {"approximate": "tanh"}
+    else:
+        act_kwargs = dict(act_kwargs)
+
+    if act_layer is nn.GELU and "approximate" not in act_kwargs:
+        act_kwargs = {**act_kwargs, "approximate": "tanh"}
+
+    act_kwargs = _filter_act_kwargs(act_layer, act_kwargs)
     return act_layer, act_kwargs
 
 

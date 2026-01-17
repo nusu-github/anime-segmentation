@@ -213,6 +213,23 @@ class TestBiRefNetConfiguration:
 
         assert outputs[-1].shape[1] == 1
 
+    def test_gelu_activation_ignores_inplace_kwargs(self, sample_input_small) -> None:
+        """GELU should ignore unsupported act_kwargs like inplace."""
+        model = BiRefNet(
+            bb_name="convnext_atto",
+            bb_pretrained=False,
+            act_layer="gelu",
+            act_kwargs={"inplace": True},
+            ms_supervision=False,
+            out_ref=False,
+        )
+        model.eval()
+
+        with torch.no_grad():
+            outputs = model(sample_input_small)
+
+        assert outputs[-1].shape[1] == 1
+
     def test_unknown_backbone_raises(self) -> None:
         """Unknown backbone should raise error."""
         # build_backbone raises NotImplementedError first

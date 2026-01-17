@@ -1,9 +1,34 @@
 """Normalization helpers for BiRefNet modules."""
 
+import inspect
+import warnings
 from typing import Any
 
 from timm.layers import GroupNormAct
 from torch import nn
+
+
+def _filter_act_kwargs(act_layer: type[nn.Module], act_kwargs: dict | None) -> dict | None:
+    if act_kwargs is None:
+        return None
+    if not isinstance(act_kwargs, dict):
+        msg = f"act_kwargs must be a dict when using {act_layer.__name__}, got {type(act_kwargs).__name__}"
+        raise TypeError(msg)
+
+    try:
+        signature = inspect.signature(act_layer)
+        valid_keys = {name for name in signature.parameters if name != "self"}
+    except (TypeError, ValueError):
+        return act_kwargs
+
+    filtered = {k: v for k, v in act_kwargs.items() if k in valid_keys}
+    removed = sorted(set(act_kwargs) - set(filtered))
+    if removed:
+        warnings.warn(
+            f"Ignoring unsupported act_kwargs for {act_layer.__name__}: {', '.join(removed)}",
+            stacklevel=2,
+        )
+    return filtered
 
 
 def _pick_group_count(
@@ -61,4 +86,12 @@ def adaptive_group_norm_act(num_channels: int, **kwargs: Any) -> GroupNormAct:
     """
     target = 4 if num_channels < 32 else 8
     num_groups = _pick_group_count(num_channels, target_group_size=target)
+    if "act_layer" not in kwargs:
+        act_kwargs = kwargs.get("act_kwargs", None)
+        if isinstance(act_kwargs, dict) and "approximate" in act_kwargs:
+            kwargs["act_layer"] = nn.GELU
+
+    act_layer = kwargs.get("act_layer", nn.ReLU)
+    act_kwargs = kwargs.get("act_kwargs", None)
+    kwargs["act_kwargs"] = _filter_act_kwargs(act_layer, act_kwargs)
     return GroupNormAct(num_channels, num_groups=num_groups, **kwargs)
