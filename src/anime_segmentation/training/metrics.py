@@ -13,14 +13,12 @@ from torchmetrics import Metric, MetricCollection
 def _normalize_tensors(
     preds: Tensor,
     target: Tensor,
-    binarize_target: bool = True,
 ) -> tuple[Tensor, Tensor]:
     """Normalize prediction and target tensors for metric computation.
 
     Args:
         preds: Predictions [B, 1, H, W] or [B, H, W], values in [0, 1].
-        target: Ground truth [B, 1, H, W] or [B, H, W], values in [0, 1].
-        binarize_target: Whether to binarize target with threshold 0.5.
+        target: Ground truth [B, 1, H, W] or [B, H, W], values in {0, 1}.
 
     Returns:
         Tuple of normalized (preds, target) tensors with shape [B, H, W].
@@ -34,10 +32,6 @@ def _normalize_tensors(
         preds = preds.squeeze(1)
     if target.ndim == 4:
         target = target.squeeze(1)
-
-    # Binarize target if requested
-    if binarize_target:
-        target = (target > 0.5).float()
 
     return preds, target
 
@@ -158,7 +152,7 @@ class FMeasureMetric(Metric):
 
         """
         preds, target_bin = _normalize_tensors(preds, target)
-        target_bin = target_bin > 0.5  # Convert back to bool
+        target_bin = target_bin.bool()
 
         # Adaptive threshold per sample: [B]
         adaptive_thresh = torch.clamp(2 * preds.mean(dim=(1, 2)), max=1.0)
@@ -257,7 +251,7 @@ class SMeasureMetric(Metric):
 
     def _s_object(self, pred: Tensor, gt: Tensor) -> Tensor:
         """Compute object similarity component."""
-        mask = gt > 0.5
+        mask = gt.bool()
         mask_sum = mask.sum()
 
         # Safe indexing with fallback

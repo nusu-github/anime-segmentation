@@ -190,6 +190,9 @@ class PairedTransform:
                 mode="nearest",
             ).squeeze(0)
 
+        # Ensure masks are strictly binary once at load time.
+        mask_tensor = (mask_tensor > 0.5).float()
+
         # Normalize image
         if self.normalize:
             image_tensor = self._normalize(image_tensor)
@@ -250,6 +253,7 @@ class SegmentationDataset(Dataset):
             image = image.float() / 255.0
             image = TF.normalize(image, IMAGENET_MEAN, IMAGENET_STD)
             mask = mask.float() / 255.0
+            mask = (mask > 0.5).float()
 
         return image, mask, self.class_label
 

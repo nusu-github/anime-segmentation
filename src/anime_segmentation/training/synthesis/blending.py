@@ -351,5 +351,5 @@ class SeamlessCloneBlending:
         except Exception:
             return self._fallback.blend(fg_rgb, fg_mask, bg_rgb, position, rng)
 
-        blended = blended_bgr[:, :, ::-1]
+        blended = np.ascontiguousarray(blended_bgr[:, :, ::-1])
         return torch.from_numpy(blended).permute(2, 0, 1).float().to(bg_rgb.device) / 255.0
