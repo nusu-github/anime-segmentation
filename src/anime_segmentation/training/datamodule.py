@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 import kornia.augmentation as K
@@ -128,11 +129,13 @@ class PairedTransform:
     def __init__(
         self,
         size: tuple[int, int] | None = None,
+        normalize: bool = True,
     ) -> None:
         """Initialize transforms.
 
         Args:
             size: Target size (width, height). None for original size.
+            normalize: Whether to apply ImageNet normalization.
 
         Raises:
             ValueError: If parameters are invalid.
@@ -148,9 +151,10 @@ class PairedTransform:
                 raise ValueError(msg)
 
         self.size = size
+        self.normalize = normalize
 
         # Image normalization (applied after ToTensor)
-        self.normalize = transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)
+        self._normalize = transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)
 
     def __call__(
         self,
@@ -165,8 +169,8 @@ class PairedTransform:
 
         Returns:
             Tuple of (image_tensor, mask_tensor).
-            image: Tensor [3, H, W] uint8.
-            mask: Tensor [1, H, W] uint8.
+            image: Tensor [3, H, W] float32.
+            mask: Tensor [1, H, W] float32.
         """
         image_tensor = image.float() / 255.0
         mask_tensor = mask.float() / 255.0
@@ -187,7 +191,8 @@ class PairedTransform:
             ).squeeze(0)
 
         # Normalize image
-        image_tensor = self.normalize(image_tensor)
+        if self.normalize:
+            image_tensor = self._normalize(image_tensor)
 
         return image_tensor, mask_tensor
 
@@ -306,12 +311,14 @@ class SynthesisDataset(Dataset):
 
         """
         # Generate synthetic image
-        image, mask, k = self.compositor.synthesize(self.size)
+        if self.consistency_pipeline is not None:
+            image, mask, k, bg = self.compositor.synthesize(self.size, return_background=True)
+        else:
+            image, mask, k = self.compositor.synthesize(self.size)
+            bg = None
 
         # Apply consistency processing
-        if self.consistency_pipeline is not None and k > 0:
-            # Get the background from the compositor for color matching
-            bg = self.compositor.bg_pool.sample(self.size)
+        if self.consistency_pipeline is not None and k > 0 and bg is not None:
             image = self.consistency_pipeline.apply(
                 fg=image,
                 bg=bg,
@@ -369,8 +376,12 @@ class MixedDataset(Dataset):
         self.synthesis_ratio = synthesis_ratio
 
     def __len__(self) -> int:
-        # Length matches real dataset for epoch management
-        return len(self.real_dataset)
+        if self.synthesis_ratio <= 0.0:
+            return len(self.real_dataset)
+        if self.synthesis_ratio >= 1.0:
+            return len(self.synth_dataset)
+        # Keep expected real samples per epoch roughly constant
+        return math.ceil(len(self.real_dataset) / (1.0 - self.synthesis_ratio))
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, int]:
         """Get a sample from either real or synthetic dataset.
@@ -384,7 +395,8 @@ class MixedDataset(Dataset):
             synth_index = int(torch.randint(0, len(self.synth_dataset), (1,)).item())
             return self.synth_dataset[synth_index]
         # Real sample
-        return self.real_dataset[index]
+        real_index = index % len(self.real_dataset)
+        return self.real_dataset[real_index]
 
 
 def _find_anime_segmentation_pairs(
@@ -494,6 +506,9 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         synthesis_max_coverage: float = 0.85,
         synthesis_max_overlap: float = 0.30,
         synthesis_blending_probs: dict[str, float] | None = None,
+        synthesis_boundary_randomize_prob: float = 0.3,
+        synthesis_boundary_randomize_width: int = 3,
+        synthesis_boundary_randomize_noise_std: float = 0.05,
         # Consistency settings
         enable_consistency: bool = True,
         consistency_color_prob: float = 0.5,
@@ -534,6 +549,9 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
             synthesis_max_coverage: Maximum total coverage.
             synthesis_max_overlap: Maximum IoU overlap between characters.
             synthesis_blending_probs: Blending strategy probabilities.
+            synthesis_boundary_randomize_prob: Probability of boundary RGB randomization.
+            synthesis_boundary_randomize_width: Boundary width for randomization.
+            synthesis_boundary_randomize_noise_std: Noise std for boundary randomization.
             enable_consistency: Enable consistency processing.
             consistency_color_prob: Color matching probability.
             consistency_light_wrap_prob: Light wrap probability.
@@ -582,6 +600,9 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         self.synthesis_max_coverage = synthesis_max_coverage
         self.synthesis_max_overlap = synthesis_max_overlap
         self.synthesis_blending_probs = synthesis_blending_probs
+        self.synthesis_boundary_randomize_prob = synthesis_boundary_randomize_prob
+        self.synthesis_boundary_randomize_width = synthesis_boundary_randomize_width
+        self.synthesis_boundary_randomize_noise_std = synthesis_boundary_randomize_noise_std
 
         # Consistency settings
         self.enable_consistency = enable_consistency
@@ -676,15 +697,16 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
 
         # CPU augmentations are disabled; GPU augmentations are applied
         # in on_after_batch_transfer when enabled.
-        transform = PairedTransform(size=self.size)
+        normalize = not (is_train and self.gpu_augmentation)
+        transform = PairedTransform(size=self.size, normalize=normalize)
 
         return SegmentationDataset(image_paths, mask_paths, transform=transform)
 
     def on_after_batch_transfer(
         self,
-        batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | torch.Tensor,
         dataloader_idx: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | torch.Tensor:
         """Apply GPU augmentation after batch transfer.
 
         This hook is called after the batch is moved to the device.
@@ -698,6 +720,9 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
             Augmented batch.
 
         """
+        if not isinstance(batch, (tuple, list)) or len(batch) != 3:
+            return batch
+
         images, masks, class_labels = batch
 
         # Only apply GPU augmentation during training
@@ -717,6 +742,7 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
                 self._gpu_augmentation = self._gpu_augmentation.to(images.device)
 
             images, masks = self._gpu_augmentation(images, masks)
+            images = TF.normalize(images, IMAGENET_MEAN, IMAGENET_STD)
 
         return images, masks, class_labels
 
@@ -760,6 +786,9 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
             "max_area_ratio": self.synthesis_max_area,
             "max_total_coverage": self.synthesis_max_coverage,
             "max_iou_overlap": self.synthesis_max_overlap,
+            "boundary_randomize_prob": self.synthesis_boundary_randomize_prob,
+            "boundary_randomize_width": self.synthesis_boundary_randomize_width,
+            "boundary_randomize_noise_std": self.synthesis_boundary_randomize_noise_std,
         }
         if self.synthesis_k_probs is not None:
             config_kwargs["k_probs"] = self.synthesis_k_probs
@@ -843,7 +872,7 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
                         consistency_pipeline=self._consistency_pipeline,
                         degradation=self._degradation,
                         validator=self._validator,
-                        normalize=True,
+                        normalize=not self.gpu_augmentation,
                     )
                     self.train_dataset = MixedDataset(
                         real_dataset=real_train_dataset,

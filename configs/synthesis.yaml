@@ -28,8 +28,14 @@ data:
 
   # Blending strategy probabilities
   synthesis_blending_probs:
-    hard: 0.40      # Simple alpha compositing
-    feather: 0.60   # Soft edges via Gaussian blur
+    hard: 0.35       # Simple alpha compositing
+    feather: 0.55    # Soft edges via Gaussian blur
+    seamless: 0.10   # Poisson seamless clone (high quality, low prob)
+
+  # Boundary RGB randomization (seam shortcut suppression)
+  synthesis_boundary_randomize_prob: 0.3
+  synthesis_boundary_randomize_width: 3
+  synthesis_boundary_randomize_noise_std: 0.05
 
   # Consistency processing
   enable_consistency: true

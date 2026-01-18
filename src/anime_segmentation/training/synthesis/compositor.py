@@ -15,8 +15,10 @@ import torch.nn.functional as F
 
 from anime_segmentation.training.synthesis.blending import (
     BlendingStrategy,
+    BoundaryRGBRandomizer,
     FeatherBlending,
     HardPasteBlending,
+    SeamlessCloneBlending,
 )
 from anime_segmentation.training.synthesis.transforms import (
     InstanceTransform,
@@ -44,6 +46,9 @@ class CompositorConfig:
         max_total_coverage: Maximum total coverage of all characters.
         max_iou_overlap: Maximum IoU overlap allowed between characters.
         blending_probs: Probability distribution for blending strategies.
+        boundary_randomize_prob: Probability of boundary RGB randomization.
+        boundary_randomize_width: Boundary width in pixels.
+        boundary_randomize_noise_std: Noise std for boundary randomization.
 
     """
 
@@ -65,10 +70,15 @@ class CompositorConfig:
 
     blending_probs: dict[str, float] = field(
         default_factory=lambda: {
-            "hard": 0.40,
-            "feather": 0.60,
+            "hard": 0.35,
+            "feather": 0.55,
+            "seamless": 0.10,
         },
     )
+
+    boundary_randomize_prob: float = 0.3
+    boundary_randomize_width: int = 3
+    boundary_randomize_noise_std: float = 0.05
 
     def __post_init__(self) -> None:
         """Validate configuration values."""
@@ -93,6 +103,15 @@ class CompositorConfig:
             raise ValueError(msg)
         if not 0 <= self.max_iou_overlap <= 1:
             msg = "Invalid max_iou_overlap"
+            raise ValueError(msg)
+        if not 0.0 <= self.boundary_randomize_prob <= 1.0:
+            msg = "Invalid boundary_randomize_prob"
+            raise ValueError(msg)
+        if self.boundary_randomize_width < 1:
+            msg = "boundary_randomize_width must be >= 1"
+            raise ValueError(msg)
+        if self.boundary_randomize_noise_std < 0:
+            msg = "boundary_randomize_noise_std must be >= 0"
             raise ValueError(msg)
 
 
@@ -129,7 +148,17 @@ class CopyPasteCompositor:
         self._blenders: dict[str, BlendingStrategy] = {
             "hard": HardPasteBlending(),
             "feather": FeatherBlending(),
+            "seamless": SeamlessCloneBlending(),
         }
+        if not set(self.config.blending_probs).issubset(self._blenders.keys()):
+            unknown = sorted(set(self.config.blending_probs) - set(self._blenders.keys()))
+            msg = f"Unknown blending strategy(s): {unknown}"
+            raise ValueError(msg)
+
+        self._boundary_randomizer = BoundaryRGBRandomizer(
+            boundary_width=self.config.boundary_randomize_width,
+            noise_std=self.config.boundary_randomize_noise_std,
+        )
 
     def _sample_k(self, rng: Generator | None = None) -> int:
         """Sample number of characters from k_probs distribution.
@@ -173,6 +202,12 @@ class CopyPasteCompositor:
 
         name = names[int(idx)]
         return self._blenders[name]
+
+    def _should_apply(self, prob: float, rng: Generator | None = None) -> bool:
+        """Check if processing should be applied based on probability."""
+        if rng is not None:
+            return torch.rand(1, generator=rng).item() < prob
+        return torch.rand(1).item() < prob
 
     def _scale_foreground_to_target_area(
         self,
@@ -296,7 +331,9 @@ class CopyPasteCompositor:
         self,
         target_size: tuple[int, int],
         rng: Generator | None = None,
-    ) -> tuple[Tensor, Tensor, int]:
+        *,
+        return_background: bool = False,
+    ) -> tuple[Tensor, Tensor, int] | tuple[Tensor, Tensor, int, Tensor]:
         """Synthesize a training image with ground truth mask.
 
         Args:
@@ -308,6 +345,7 @@ class CopyPasteCompositor:
                 - image: Composited RGB in [0, 1] range
                 - mask: Binary GT mask (union of all foregrounds)
                 - k: Number of characters placed
+            If return_background is True, also returns background [3, H, W].
 
         """
         h, w = target_size
@@ -317,15 +355,19 @@ class CopyPasteCompositor:
         k = self._sample_k(rng)
 
         # Get background
-        canvas = self.bg_pool.sample(target_size, rng)
-        device = canvas.device
+        background = self.bg_pool.sample(target_size, rng)
+        device = background.device
 
         # Initialize composite mask
         composite_mask = torch.zeros(1, h, w, device=device)
 
         # Handle negative examples (k=0)
         if k == 0:
-            return canvas, composite_mask, k
+            if return_background:
+                return background, composite_mask, k, background
+            return background, composite_mask, k
+
+        canvas = background.clone()
 
         # Place characters
         placed_count = 0
@@ -417,4 +459,10 @@ class CopyPasteCompositor:
         # Binarize final mask
         composite_mask = (composite_mask > 0.5).float()
 
+        # Randomize boundary RGB to suppress seam shortcuts
+        if self._should_apply(self.config.boundary_randomize_prob, rng):
+            canvas = self._boundary_randomizer.apply(canvas, composite_mask, rng)
+
+        if return_background:
+            return canvas, composite_mask, placed_count, background
         return canvas, composite_mask, placed_count

@@ -93,7 +93,7 @@ class QualityDegradation(nn.Module):
             JPEG-compressed image [3, H, W].
 
         """
-        jpeg = K.RandomJPEG(quality=(quality, quality), p=1.0, same_on_batch=True)
+        jpeg = K.RandomJPEG(jpeg_quality=(quality, quality), p=1.0, same_on_batch=True)
         result = jpeg(image.unsqueeze(0))
         return result.squeeze(0)
 

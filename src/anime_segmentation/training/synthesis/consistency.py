@@ -144,8 +144,6 @@ class LightWrap:
         # Dilate mask
         kernel_size = 2 * self.wrap_radius + 1
         kernel = torch.ones(
-            1,
-            1,
             kernel_size,
             kernel_size,
             device=mask.device,

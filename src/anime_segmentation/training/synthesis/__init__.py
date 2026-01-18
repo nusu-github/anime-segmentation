@@ -9,6 +9,7 @@ from anime_segmentation.training.synthesis.blending import (
     BoundaryRGBRandomizer,
     FeatherBlending,
     HardPasteBlending,
+    SeamlessCloneBlending,
 )
 from anime_segmentation.training.synthesis.compositor import (
     CompositorConfig,
@@ -50,6 +51,7 @@ __all__ = [
     "NoiseGrainConsistency",
     # Degradation
     "QualityDegradation",
+    "SeamlessCloneBlending",
     "SimpleShadow",
     "ValidationResult",
 ]

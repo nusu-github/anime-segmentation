@@ -27,6 +27,7 @@ Usage:
 """
 
 import os
+import warnings
 
 import lightning as L
 import torch
@@ -90,9 +91,42 @@ def _configure_cuda_backends() -> None:
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 
 
+def _configure_warning_filters() -> None:
+    """Filter noisy, non-actionable warnings during training."""
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*grid_sample and affine_grid behavior has changed.*align_corners=False.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*torch\.meshgrid:.*required to pass the indexing argument.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*`weights_only` was not set, defaulting to `False`.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*Precision bf16-mixed is not supported by the model summary.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*Checkpoint directory .* exists and is not empty.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*\.fit\(ckpt_path=None\) was called without a model.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*resuming from a checkpoint that ended before the epoch ended.*",
+    )
+
+
 def main() -> None:
     """Main entry point for CLI."""
     _configure_cuda_backends()
+    _configure_warning_filters()
 
     _cli = BiRefNetCLI(
         BiRefNetLightning,

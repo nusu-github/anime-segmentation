@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import kornia.filters as KF
 import kornia.morphology as KM
+import numpy as np
 import torch
 
 if TYPE_CHECKING:
@@ -229,8 +230,6 @@ class BoundaryRGBRandomizer:
         binary_mask = (mask > 0.5).float()
         kernel_size = 2 * self.boundary_width + 1
         kernel = torch.ones(
-            1,
-            1,
             kernel_size,
             kernel_size,
             device=mask.device,
@@ -272,3 +271,85 @@ class BoundaryRGBRandomizer:
 
         # Clamp to valid range
         return torch.clamp(result, 0, 1)
+
+
+class SeamlessCloneBlending:
+    """Blend using OpenCV seamlessClone for high-quality composites.
+
+    Falls back to HardPasteBlending if OpenCV is unavailable or if cloning fails.
+    """
+
+    def __init__(self, mode: str = "normal") -> None:
+        """Initialize seamless clone blending.
+
+        Args:
+            mode: "normal" or "mixed" clone mode.
+
+        """
+        if mode not in {"normal", "mixed"}:
+            msg = f"Unknown seamless clone mode: {mode}"
+            raise ValueError(msg)
+        self.mode = mode
+        self._fallback = HardPasteBlending()
+
+    def blend(
+        self,
+        fg_rgb: Tensor,
+        fg_mask: Tensor,
+        bg_rgb: Tensor,
+        position: tuple[int, int],
+        rng: Generator | None = None,
+    ) -> Tensor:
+        """Blend using Poisson-based seamless cloning."""
+        try:
+            import cv2  # type: ignore[import-not-found]
+        except Exception:
+            return self._fallback.blend(fg_rgb, fg_mask, bg_rgb, position, rng)
+
+        y, x = position
+        _, fh, fw = fg_rgb.shape
+        _, bh, bw = bg_rgb.shape
+
+        # Compute valid region (handle out-of-bounds)
+        y1 = max(0, y)
+        x1 = max(0, x)
+        y2 = min(bh, y + fh)
+        x2 = min(bw, x + fw)
+
+        fy1 = y1 - y
+        fx1 = x1 - x
+        fy2 = fy1 + (y2 - y1)
+        fx2 = fx1 + (x2 - x1)
+
+        if y2 <= y1 or x2 <= x1:
+            return bg_rgb
+
+        # Prepare full-size source and mask
+        bg_np = (bg_rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+        src_np = bg_np.copy()
+        mask_np = (fg_mask.squeeze(0).clamp(0, 1).cpu().numpy() * 255).astype("uint8")
+
+        # Insert foreground into source and mask
+        fg_np = (fg_rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+        src_np[y1:y2, x1:x2] = fg_np[fy1:fy2, fx1:fx2]
+
+        full_mask = np.zeros((bh, bw), dtype=np.uint8)
+        full_mask[y1:y2, x1:x2] = mask_np[fy1:fy2, fx1:fx2]
+
+        if full_mask.sum() == 0:
+            return bg_rgb
+
+        # OpenCV uses BGR
+        src_bgr = src_np[:, :, ::-1]
+        bg_bgr = bg_np[:, :, ::-1]
+
+        center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
+        clone_flag = cv2.NORMAL_CLONE if self.mode == "normal" else cv2.MIXED_CLONE
+
+        try:
+            blended_bgr = cv2.seamlessClone(src_bgr, bg_bgr, full_mask, center, clone_flag)
+        except Exception:
+            return self._fallback.blend(fg_rgb, fg_mask, bg_rgb, position, rng)
+
+        blended = blended_bgr[:, :, ::-1]
+        return torch.from_numpy(blended).permute(2, 0, 1).float().to(bg_rgb.device) / 255.0
