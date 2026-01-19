@@ -29,6 +29,7 @@ class TrainingOutput(NamedTuple):
     scaled_preds: list[torch.Tensor] | tuple
     class_preds: list[torch.Tensor | None]
 
+
 _ACT_LAYER_MAP: dict[str, type[nn.Module]] = {
     "relu": nn.ReLU,
     "gelu": nn.GELU,
@@ -413,18 +414,20 @@ class Decoder(nn.Module):
                 inter_channels=ic,
             )
 
-        if self.use_pyramid_neck:
-            bb_neck_out_channels = list(self.manually_controlled_decoder_in_channels)
-        else:
-            bb_neck_out_channels = channels.copy()
+        bb_neck_out_channels = (
+            list(self.manually_controlled_decoder_in_channels)
+            if self.use_pyramid_neck
+            else channels.copy()
+        )
         dec_blk_out_channels = [*list(bb_neck_out_channels[1:]), bb_neck_out_channels[-1] // 2]
-        if self.dec_ipt:
-            dec_blk_in_channels = [
+        dec_blk_in_channels = (
+            [
                 bb_neck_out_channels[i] + ipt_blk_out_channels[max(0, i - 1)]
                 for i in range(len(bb_neck_out_channels))
             ]
-        else:
-            dec_blk_in_channels = bb_neck_out_channels
+            if self.dec_ipt
+            else bb_neck_out_channels
+        )
 
         self.decoder_block4 = DecoderBlock(
             dec_blk_in_channels[0],
@@ -598,10 +601,8 @@ class Decoder(nn.Module):
             if self.training:
                 m4_dia = m4
                 if m4_dia is None:
-                    raise RuntimeError(
-                        "Gradient refinement (out_ref=True) requires multi-scale supervision "
-                        "(ms_supervision=True) during training, but m4 is None"
-                    )
+                    msg = "Gradient refinement (out_ref=True) requires multi-scale supervision (ms_supervision=True) during training, but m4 is None"
+                    raise RuntimeError(msg)
                 gdt_label_main_4 = gdt_gt * F.interpolate(
                     m4_dia,
                     size=gdt_gt.shape[2:],
@@ -647,10 +648,8 @@ class Decoder(nn.Module):
             if self.training:
                 m3_dia = m3
                 if m3_dia is None:
-                    raise RuntimeError(
-                        "Gradient refinement (out_ref=True) requires multi-scale supervision "
-                        "(ms_supervision=True) during training, but m3 is None"
-                    )
+                    msg = "Gradient refinement (out_ref=True) requires multi-scale supervision (ms_supervision=True) during training, but m3 is None"
+                    raise RuntimeError(msg)
                 gdt_label_main_3 = gdt_gt * F.interpolate(
                     m3_dia,
                     size=gdt_gt.shape[2:],
@@ -696,10 +695,8 @@ class Decoder(nn.Module):
             if self.training:
                 m2_dia = m2
                 if m2_dia is None:
-                    raise RuntimeError(
-                        "Gradient refinement (out_ref=True) requires multi-scale supervision "
-                        "(ms_supervision=True) during training, but m2 is None"
-                    )
+                    msg = "Gradient refinement (out_ref=True) requires multi-scale supervision (ms_supervision=True) during training, but m2 is None"
+                    raise RuntimeError(msg)
                 gdt_label_main_2 = gdt_gt * F.interpolate(
                     m2_dia,
                     size=gdt_gt.shape[2:],

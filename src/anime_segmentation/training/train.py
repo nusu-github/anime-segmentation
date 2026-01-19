@@ -1,35 +1,19 @@
 """LightningCLI for BiRefNet training.
 
 Usage:
-    # Train with config file
-    python -m anime_segmentation.training.train fit --config configs/birefnet.yaml
+    python -m anime_segmentation.training.train fit --config configs/train.yaml
 
-    # Train with command line overrides
+Advanced:
     python -m anime_segmentation.training.train fit \
-        --config configs/birefnet.yaml \
+        --config configs/train.yaml \
+        --config configs/custom_compositor.yaml \
         --trainer.max_epochs 200 \
-        --data.batch_size 16
-
-    # Validate
-    python -m anime_segmentation.training.train validate \
-        --config configs/birefnet.yaml \
-        --ckpt_path path/to/checkpoint.ckpt
-
-    # Test
-    python -m anime_segmentation.training.train test \
-        --config configs/birefnet.yaml \
-        --ckpt_path path/to/checkpoint.ckpt
-
-    # Predict
-    python -m anime_segmentation.training.train predict \
-        --config configs/birefnet.yaml \
-        --ckpt_path path/to/checkpoint.ckpt
+        --data.synthesis.enabled=true
 """
 
 import os
 import warnings
 
-import lightning as L
 import torch
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
 
@@ -130,10 +114,9 @@ def main() -> None:
 
     _cli = BiRefNetCLI(
         BiRefNetLightning,
-        L.LightningDataModule,
+        AnimeSegmentationDataModule,
         seed_everything_default=7,
         auto_configure_optimizers=False,
-        subclass_mode_data=True,
         parser_kwargs={
             "default_env": True,
             "default_config_files": ["configs/default.yaml"],

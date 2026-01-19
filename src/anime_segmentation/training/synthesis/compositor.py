@@ -12,6 +12,13 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
+from anime_segmentation.training.config import CompositorConfig
+from anime_segmentation.training.synthesis.base import (
+    BaseBackgroundPool,
+    BaseCompositor,
+    BaseForegroundPool,
+    BaseInstanceTransform,
+)
 from anime_segmentation.training.synthesis.blending import (
     BlendingStrategy,
     BoundaryRGBRandomizer,
@@ -19,9 +26,7 @@ from anime_segmentation.training.synthesis.blending import (
     HardPasteBlending,
     SeamlessCloneBlending,
 )
-from anime_segmentation.training.synthesis.config import CompositorConfig
 from anime_segmentation.training.synthesis.transforms import (
-    InstanceTransform,
     compute_mask_area_ratio,
     compute_mask_iou,
     crop_to_content,
@@ -30,15 +35,13 @@ from anime_segmentation.training.synthesis.transforms import (
 if TYPE_CHECKING:
     from torch import Generator, Tensor
 
-    from anime_segmentation.data.pools import BackgroundPool, ForegroundPool
-
 logger = logging.getLogger(__name__)
 
 # Re-export CompositorConfig for backward compatibility
-__all__ = ["CopyPasteCompositor", "CompositorConfig"]
+__all__ = ["CompositorConfig", "CopyPasteCompositor"]
 
 
-class CopyPasteCompositor:
+class CopyPasteCompositor(BaseCompositor):
     """Multi-character Copy-Paste compositor.
 
     Generates synthetic training images by compositing multiple foreground
@@ -48,10 +51,10 @@ class CopyPasteCompositor:
 
     def __init__(
         self,
-        fg_pool: ForegroundPool,
-        bg_pool: BackgroundPool,
+        fg_pool: BaseForegroundPool,
+        bg_pool: BaseBackgroundPool,
         config: CompositorConfig | None = None,
-        instance_transform: InstanceTransform | None = None,
+        instance_transform: BaseInstanceTransform | None = None,
     ) -> None:
         """Initialize compositor.
 
@@ -97,10 +100,11 @@ class CopyPasteCompositor:
         probs = list(self.config.k_probs.values())
         probs_tensor = torch.tensor(probs)
 
-        if rng is not None:
-            idx = torch.multinomial(probs_tensor, 1, generator=rng).item()
-        else:
-            idx = torch.multinomial(probs_tensor, 1).item()
+        idx = (
+            torch.multinomial(probs_tensor, 1, generator=rng).item()
+            if rng is not None
+            else torch.multinomial(probs_tensor, 1).item()
+        )
 
         return ks[int(idx)]
 
@@ -118,10 +122,11 @@ class CopyPasteCompositor:
         probs = list(self.config.blending_probs.values())
         probs_tensor = torch.tensor(probs)
 
-        if rng is not None:
-            idx = torch.multinomial(probs_tensor, 1, generator=rng).item()
-        else:
-            idx = torch.multinomial(probs_tensor, 1).item()
+        idx = (
+            torch.multinomial(probs_tensor, 1, generator=rng).item()
+            if rng is not None
+            else torch.multinomial(probs_tensor, 1).item()
+        )
 
         name = names[int(idx)]
         return self._blenders[name]
@@ -320,16 +325,13 @@ class CopyPasteCompositor:
             if max_area < self.config.min_area_ratio:
                 break
 
-            if rng is not None:
-                target_area = (
-                    self.config.min_area_ratio
-                    + (max_area - self.config.min_area_ratio) * torch.rand(1, generator=rng).item()
-                )
-            else:
-                target_area = (
-                    self.config.min_area_ratio
-                    + (max_area - self.config.min_area_ratio) * torch.rand(1).item()
-                )
+            target_area = (
+                self.config.min_area_ratio
+                + (max_area - self.config.min_area_ratio) * torch.rand(1, generator=rng).item()
+                if rng is not None
+                else self.config.min_area_ratio
+                + (max_area - self.config.min_area_ratio) * torch.rand(1).item()
+            )
 
             # Scale foreground
             fg_rgb, fg_mask = self._scale_foreground_to_target_area(

@@ -11,33 +11,29 @@ from .birefnet import BiRefNet
 def _validate_image(image: Image.Image | None) -> Image.Image:
     """Validate that image is a valid PIL Image."""
     if image is None:
-        raise InvalidInputError("image cannot be None")
+        msg = "image cannot be None"
+        raise InvalidInputError(msg)
     if not isinstance(image, Image.Image):
-        raise InvalidInputError(
-            f"Expected PIL.Image.Image, got {type(image).__name__}"
-        )
+        msg = f"Expected PIL.Image.Image, got {type(image).__name__}"
+        raise InvalidInputError(msg)
     return image
 
 
 def _validate_target_size(target_size: tuple[int, int]) -> tuple[int, int]:
     """Validate that target_size is a valid (width, height) tuple."""
     if not isinstance(target_size, tuple):
-        raise InvalidTargetSizeError(
-            f"target_size must be a tuple, got {type(target_size).__name__}"
-        )
+        msg = f"target_size must be a tuple, got {type(target_size).__name__}"
+        raise InvalidTargetSizeError(msg)
     if len(target_size) != 2:
-        raise InvalidTargetSizeError(
-            f"target_size must be (width, height), got {target_size}"
-        )
+        msg = f"target_size must be (width, height), got {target_size}"
+        raise InvalidTargetSizeError(msg)
     width, height = target_size
     if not isinstance(width, int) or not isinstance(height, int):
-        raise InvalidTargetSizeError(
-            f"target_size dimensions must be integers, got ({type(width).__name__}, {type(height).__name__})"
-        )
+        msg = f"target_size dimensions must be integers, got ({type(width).__name__}, {type(height).__name__})"
+        raise InvalidTargetSizeError(msg)
     if width <= 0 or height <= 0:
-        raise InvalidTargetSizeError(
-            f"target_size dimensions must be positive, got {target_size}"
-        )
+        msg = f"target_size dimensions must be positive, got {target_size}"
+        raise InvalidTargetSizeError(msg)
     return target_size
 
 
@@ -65,7 +61,9 @@ class BiRefNetPredictor:
         )
 
     def preprocess(
-        self, image: Image.Image, target_size: tuple[int, int] = (1024, 1024)
+        self,
+        image: Image.Image,
+        target_size: tuple[int, int] = (1024, 1024),
     ) -> tuple[torch.Tensor, tuple[int, int]]:
         """Preprocess image for model input.
 
@@ -91,7 +89,9 @@ class BiRefNetPredictor:
         return input_tensor, (w, h)
 
     def predict(
-        self, image: Image.Image, target_size: tuple[int, int] = (1024, 1024)
+        self,
+        image: Image.Image,
+        target_size: tuple[int, int] = (1024, 1024),
     ) -> Image.Image:
         """Predict segmentation mask for the given image.
 
@@ -111,11 +111,11 @@ class BiRefNetPredictor:
         with torch.inference_mode():
             preds = self.model(input_tensor)
             if not isinstance(preds, (list, tuple)):
-                raise InvalidInputError(
-                    f"Model returned unexpected type: {type(preds).__name__}, expected list or tuple"
-                )
+                msg = f"Model returned unexpected type: {type(preds).__name__}, expected list or tuple"
+                raise InvalidInputError(msg)
             if len(preds) == 0:
-                raise InvalidInputError("Model returned empty predictions")
+                msg = "Model returned empty predictions"
+                raise InvalidInputError(msg)
             pred = preds[-1]  # finest scale
             pred = pred.sigmoid().cpu()
             pred = torch.nn.functional.interpolate(

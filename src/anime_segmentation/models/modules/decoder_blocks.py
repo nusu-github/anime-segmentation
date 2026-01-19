@@ -52,7 +52,8 @@ class DecoderBlockRegistry:
         """
         if name not in cls._registry:
             available = ", ".join(sorted(cls._registry.keys()))
-            raise ValueError(f"Unknown decoder block type '{name}'. Available: {available}")
+            msg = f"Unknown decoder block type '{name}'. Available: {available}"
+            raise ValueError(msg)
         return cls._registry[name]
 
     @classmethod

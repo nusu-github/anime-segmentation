@@ -12,6 +12,8 @@ import kornia.filters as KF
 import kornia.morphology as KM
 import torch
 
+from anime_segmentation.training.synthesis.base import BaseConsistencyPipeline
+
 if TYPE_CHECKING:
     from torch import Generator, Tensor
 
@@ -335,10 +337,11 @@ class NoiseGrainConsistency:
             return image
 
         # Generate noise
-        if rng is not None:
-            noise = torch.randn(image.shape, generator=rng, device=image.device)
-        else:
-            noise = torch.randn_like(image)
+        noise = (
+            torch.randn(image.shape, generator=rng, device=image.device)
+            if rng is not None
+            else torch.randn_like(image)
+        )
 
         noise *= self.noise_std
 
@@ -348,7 +351,7 @@ class NoiseGrainConsistency:
         return torch.clamp(result, 0, 1)
 
 
-class ConsistencyPipeline:
+class ConsistencyPipeline(BaseConsistencyPipeline):
     """Pipeline combining multiple consistency processing steps.
 
     Applies color/tone matching, light wrap, shadow, and noise

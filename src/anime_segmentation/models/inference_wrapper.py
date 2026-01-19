@@ -57,10 +57,11 @@ class BiRefNetInference(nn.Module):
                 if hasattr(outputs, "scaled_preds"):
                     # TrainingOutput namedtuple
                     scaled_preds = outputs.scaled_preds
-                    if isinstance(scaled_preds, (list, tuple)):
-                        final_pred = scaled_preds[-1]
-                    else:
-                        final_pred = scaled_preds
+                    final_pred = (
+                        scaled_preds[-1]
+                        if isinstance(scaled_preds, (list, tuple))
+                        else scaled_preds
+                    )
                 else:
                     # Regular list/tuple
                     final_pred = outputs[-1]

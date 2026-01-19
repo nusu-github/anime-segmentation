@@ -14,6 +14,12 @@ from torch import nn
 
 from anime_segmentation.models import BiRefNet
 
+from .config import (
+    BackboneConfig,
+    ClassificationLossConfig,
+    DecoderConfig,
+    LossConfig,
+)
 from .loss import ClsLoss, PixLoss
 from .metrics import SegmentationMetrics
 from .model_card_template import MODEL_CARD_TEMPLATE
@@ -31,20 +37,6 @@ CompileMode = Literal[
     "max-autotune-no-cudagraphs",
 ]
 
-# Default loss weights
-DEFAULT_LAMBDAS_PIX = {
-    "bce": 30.0,
-    "iou": 0.5,
-    "iou_patch": 0.0,
-    "mae": 0.0,
-    "mse": 0.0,
-    "reg": 0.0,
-    "ssim": 10.0,
-    "cnt": 0.0,
-    "structure": 0.0,
-}
-DEFAULT_LAMBDAS_CLS = {"ce": 5.0}
-
 
 class BiRefNetLightning(
     L.LightningModule,
@@ -58,68 +50,60 @@ class BiRefNetLightning(
 ):
     def __init__(
         self,
-        # Model parameters - backbone
-        bb_name: str = "swin_v1_t",
-        bb_pretrained: bool = True,
-        # Model parameters - decoder architecture
-        out_ref: bool = True,
-        ms_supervision: bool = True,
-        dec_ipt: bool = True,
-        dec_ipt_split: bool = True,
-        cxt_num: int = 3,
-        mul_scl_ipt: Literal["", "add", "cat"] = "cat",
-        dec_att: Literal["", "ASPP", "ASPPDeformable"] = "ASPPDeformable",
-        squeeze_block: str = "BasicDecBlk_x1",
-        dec_blk: Literal["BasicDecBlk", "ResBlk"] = "BasicDecBlk",
-        lat_blk: Literal["BasicLatBlk"] = "BasicLatBlk",
-        dec_channels_inter: Literal["fixed", "adap"] = "fixed",
-        use_norm: bool = True,
-        # Model parameters - auxiliary classification
+        backbone: BackboneConfig | None = None,
+        decoder: DecoderConfig | None = None,
+        loss: LossConfig | None = None,
+        cls_loss: ClassificationLossConfig | None = None,
         auxiliary_classification: bool = False,
         num_classes: int | None = None,
-        # Model parameters - activation
-        act_layer: str = "relu",
-        act_kwargs: dict[str, Any] | None = None,
-        # Loading
         strict_loading: bool = True,
-        # Optimizer and scheduler
+        compile: bool = False,
+        compile_mode: CompileMode = "default",
         optimizer: OptimizerCallable = torch.optim.AdamW,
         scheduler: LRSchedulerCallable | None = None,
         scheduler_interval: Literal["epoch", "step"] = "epoch",
-        # Loss weights
-        lambdas_pix: dict[str, float] | None = None,
-        lambdas_cls: dict[str, float] | None = None,
-        # torch.compile parameters
-        compile: bool = False,
-        compile_mode: CompileMode = "default",
-        compile_fullgraph: bool = False,
-        compile_dynamic: bool | None = None,
-        compile_backend: str = "inductor",
-        compile_disable: bool = False,
     ) -> None:
+        """Initialize the BiRefNet Lightning module."""
         super().__init__()
         self.save_hyperparameters(ignore=["optimizer", "scheduler"])
-
-        # Store optimizer and scheduler callables
         self.optimizer_callable = optimizer
         self.scheduler_callable = scheduler
 
-        # Model is initialized in configure_model for better efficiency and FSDP support
-        self.model = None
-        self.example_input_array = None
+        self.backbone_cfg = backbone if backbone is not None else BackboneConfig()
+        self.decoder_cfg = decoder if decoder is not None else DecoderConfig()
+        self.loss_cfg = loss if loss is not None else LossConfig()
+        self.cls_loss_cfg = cls_loss if cls_loss is not None else ClassificationLossConfig()
+        self.auxiliary_classification = auxiliary_classification
+        self.num_classes = num_classes
         self.strict_loading = strict_loading
+        self._compile = compile
+        self._compile_mode = compile_mode
 
-        # Merge default loss weights with user provided ones
-        self.lambdas_pix = {**DEFAULT_LAMBDAS_PIX, **(lambdas_pix or {})}
-        self.lambdas_cls = {**DEFAULT_LAMBDAS_CLS, **(lambdas_cls or {})}
+        self.model: BiRefNet | None = None
+        self.example_input_array: torch.Tensor | None = None
 
-        # Loss functions
-        self.pix_loss = PixLoss(loss_weights=self.lambdas_pix)
-        self.cls_loss = ClsLoss(lambdas_cls=self.lambdas_cls)
-        if self.hparams["out_ref"]:
-            self.criterion_gdt = nn.BCEWithLogitsLoss()
+        pix_weights = {
+            "bce": self.loss_cfg.bce,
+            "iou": self.loss_cfg.iou,
+            "iou_patch": self.loss_cfg.iou_patch,
+            "mae": self.loss_cfg.mae,
+            "mse": self.loss_cfg.mse,
+            "reg": self.loss_cfg.reg,
+            "ssim": self.loss_cfg.ssim,
+            "cnt": self.loss_cfg.cnt,
+            "structure": self.loss_cfg.structure,
+        }
+        self.lambdas_pix = pix_weights
+        self.pix_loss = PixLoss(loss_weights=pix_weights)
 
-        # Metrics for validation and test
+        cls_weights = {"ce": self.cls_loss_cfg.ce}
+        self.lambdas_cls = cls_weights
+        self.cls_loss = ClsLoss(lambdas_cls=cls_weights)
+
+        self.criterion_gdt: nn.BCEWithLogitsLoss | None = (
+            nn.BCEWithLogitsLoss() if self.decoder_cfg.out_ref else None
+        )
+
         self.val_metrics = SegmentationMetrics(prefix="val/")
         self.test_metrics = SegmentationMetrics(prefix="test/")
 
@@ -161,12 +145,12 @@ class BiRefNetLightning(
     @property
     def out_ref(self) -> bool:
         """Whether output refinement is enabled."""
-        return bool(self.hparams.get("out_ref", True))
+        return self.decoder_cfg.out_ref
 
     @property
     def ms_supervision(self) -> bool:
         """Whether multi-scale supervision is enabled."""
-        return bool(self.hparams.get("ms_supervision", True))
+        return self.decoder_cfg.ms_supervision
 
     # =========================================================================
     # Core methods
@@ -186,50 +170,33 @@ class BiRefNetLightning(
             self.pix_loss.lambdas["mae"] *= 0.9
 
     def configure_model(self) -> None:
-        """Initialize and optionally compile the model.
-
-        This hook is called before training starts and allows for:
-        1. Efficient model initialization (e.g. on meta device for FSDP)
-        2. Application of torch.compile before DDP wrapping
-        """
+        """Initialize and optionally compile the model."""
         if self.model is not None:
             return
 
         self.model = BiRefNet(
-            # Backbone
-            bb_name=self.hparams["bb_name"],
-            bb_pretrained=self.hparams["bb_pretrained"],
-            # Decoder architecture
-            ms_supervision=self.hparams["ms_supervision"],
-            out_ref=self.hparams["out_ref"],
-            dec_ipt=self.hparams.get("dec_ipt", True),
-            dec_ipt_split=self.hparams.get("dec_ipt_split", True),
-            cxt_num=self.hparams.get("cxt_num", 3),
-            mul_scl_ipt=self.hparams.get("mul_scl_ipt", "cat"),
-            dec_att=self.hparams.get("dec_att", "ASPPDeformable"),
-            squeeze_block=self.hparams.get("squeeze_block", "BasicDecBlk_x1"),
-            dec_blk=self.hparams.get("dec_blk", "BasicDecBlk"),
-            lat_blk=self.hparams.get("lat_blk", "BasicLatBlk"),
-            dec_channels_inter=self.hparams.get("dec_channels_inter", "fixed"),
-            use_norm=self.hparams.get("use_norm", True),
-            # Auxiliary classification
-            auxiliary_classification=self.hparams.get("auxiliary_classification", False),
-            num_classes=self.hparams.get("num_classes", None),
-            # Activation
-            act_layer=self.hparams.get("act_layer", "relu"),
-            act_kwargs=self.hparams.get("act_kwargs", None),
+            bb_name=self.backbone_cfg.name,
+            bb_pretrained=self.backbone_cfg.pretrained,
+            ms_supervision=self.decoder_cfg.ms_supervision,
+            out_ref=self.decoder_cfg.out_ref,
+            dec_ipt=self.decoder_cfg.dec_ipt,
+            dec_ipt_split=self.decoder_cfg.dec_ipt_split,
+            cxt_num=self.decoder_cfg.cxt_num,
+            mul_scl_ipt=self.decoder_cfg.mul_scl_ipt,
+            dec_att=self.decoder_cfg.dec_att,
+            squeeze_block=self.decoder_cfg.squeeze_block,
+            dec_blk=self.decoder_cfg.dec_blk,
+            lat_blk=self.decoder_cfg.lat_blk,
+            dec_channels_inter=self.decoder_cfg.dec_channels_inter,
+            use_norm=self.decoder_cfg.use_norm,
+            auxiliary_classification=self.auxiliary_classification,
+            num_classes=self.num_classes,
         )
 
-        if self.hparams.get("compile", False):
-            self.model.compile(
-                mode=self.hparams.get("compile_mode", "default"),
-                fullgraph=self.hparams.get("compile_fullgraph", False),
-                dynamic=self.hparams.get("compile_dynamic", None),
-                backend=self.hparams.get("compile_backend", "inductor"),
-                disable=self.hparams.get("compile_disable", False),
-            )
+        if self._compile:
+            self.model = torch.compile(self.model, mode=self._compile_mode)
 
-        self.example_input_array = torch.randn(1, 3, 1024, 1024)  # for Lightning model summary
+        self.example_input_array = torch.randn(1, 3, 1024, 1024)
 
     def forward(self, x):
         return self._require_model()(x)
@@ -521,10 +488,10 @@ class BiRefNetLightning(
         instance.configure_model()
 
         # Determine model file path
-        if os.path.isdir(model_id):
-            model_file = os.path.join(model_id, constants.SAFETENSORS_SINGLE_FILE)
-        else:
-            model_file = hf_hub_download(
+        model_file = (
+            os.path.join(model_id, constants.SAFETENSORS_SINGLE_FILE)
+            if os.path.isdir(model_id)
+            else hf_hub_download(
                 repo_id=model_id,
                 filename=constants.SAFETENSORS_SINGLE_FILE,
                 revision=revision,
@@ -533,6 +500,7 @@ class BiRefNetLightning(
                 token=token,
                 local_files_only=local_files_only,
             )
+        )
 
         # Load weights into the inner BiRefNet model
         # Use _require_model() for type safety
@@ -564,9 +532,9 @@ class BiRefNetLightning(
         """
         # Build training config dict from hyperparameters
         training_config: dict[str, Any] = {
-            "Backbone": self.hparams.get("bb_name", "unknown"),
-            "Multi-scale Supervision": self.hparams.get("ms_supervision", True),
-            "Output Refinement": self.hparams.get("out_ref", True),
+            "Backbone": self.backbone_cfg.name,
+            "Multi-scale Supervision": self.decoder_cfg.ms_supervision,
+            "Output Refinement": self.decoder_cfg.out_ref,
         }
 
         # Add loss weights if available
@@ -592,9 +560,9 @@ class BiRefNetLightning(
             paper_url=self._hub_mixin_info.paper_url or "https://arxiv.org/abs/2401.03407",
             docs_url=self._hub_mixin_info.docs_url,
             # Custom template variables
-            backbone_name=self.hparams.get("bb_name"),
-            ms_supervision=self.hparams.get("ms_supervision", True),
-            out_ref=self.hparams.get("out_ref", True),
+            backbone_name=self.backbone_cfg.name,
+            ms_supervision=self.decoder_cfg.ms_supervision,
+            out_ref=self.decoder_cfg.out_ref,
             training_config=training_config or None,
             metrics=metrics or None,
             **kwargs,

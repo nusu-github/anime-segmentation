@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import kornia.augmentation as K
 import lightning as L
@@ -21,6 +22,22 @@ from anime_segmentation.constants import (
     VALID_IMAGE_EXTENSIONS,
 )
 from anime_segmentation.exceptions import SynthesisValidationError
+from anime_segmentation.training.config import (
+    AugmentationConfig,
+    DataLoaderConfig,
+    SynthesisConfig,
+)
+
+if TYPE_CHECKING:
+    from anime_segmentation.training.synthesis.base import (
+        BaseBackgroundPool,
+        BaseCompositor,
+        BaseConsistencyPipeline,
+        BaseDegradation,
+        BaseForegroundPool,
+        BaseInstanceTransform,
+        BaseValidator,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -49,49 +66,34 @@ class GPUAugmentation(torch.nn.Module):
     Processes image and mask pairs with synchronized geometric transforms.
     """
 
-    def __init__(
-        self,
-        hflip_prob: float = 0.5,
-        rotation_degrees: float = 10.0,
-        color_jitter: bool = True,
-        color_jitter_brightness: float = 0.2,
-        color_jitter_contrast: float = 0.2,
-        color_jitter_saturation: float = 0.2,
-        color_jitter_hue: float = 0.1,
-    ) -> None:
+    def __init__(self, config: AugmentationConfig) -> None:
         """Initialize GPU augmentation.
 
         Args:
-            hflip_prob: Probability of horizontal flip.
-            rotation_degrees: Max rotation angle.
-            color_jitter: Whether to apply color jitter to image.
-            color_jitter_brightness: Brightness jitter range.
-            color_jitter_contrast: Contrast jitter range.
-            color_jitter_saturation: Saturation jitter range.
-            color_jitter_hue: Hue jitter range.
+            config: AugmentationConfig
 
         """
         super().__init__()
+        self._config = config
 
         # Geometric augmentations (applied to both image and mask)
         self.geometric = K.AugmentationSequential(
-            K.RandomHorizontalFlip(p=hflip_prob),
+            K.RandomHorizontalFlip(p=config.hflip_prob),
             K.RandomRotation(
-                degrees=rotation_degrees,
-                p=1.0 if rotation_degrees > 0 else 0.0,
+                degrees=config.rotation_degrees,
+                p=1.0 if config.rotation_degrees > 0 else 0.0,
                 align_corners=False,
             ),
             data_keys=["input", "mask"],
             same_on_batch=False,
         )
 
-        # Color augmentations (applied only to image)
-        if color_jitter:
+        if config.color_jitter:
             self.color = K.ColorJitter(
-                brightness=color_jitter_brightness,
-                contrast=color_jitter_contrast,
-                saturation=color_jitter_saturation,
-                hue=color_jitter_hue,
+                brightness=config.brightness,
+                contrast=config.contrast,
+                saturation=config.saturation,
+                hue=config.hue,
                 p=1.0,
             )
         else:
@@ -268,12 +270,12 @@ class SynthesisDataset(Dataset):
 
     def __init__(
         self,
-        compositor,  # CopyPasteCompositor
+        compositor: BaseCompositor,
         size: tuple[int, int],
         length: int,
-        consistency_pipeline=None,  # ConsistencyPipeline
-        degradation=None,  # QualityDegradation
-        validator=None,  # DataValidator
+        consistency_pipeline: BaseConsistencyPipeline | None = None,
+        degradation: BaseDegradation | None = None,
+        validator: BaseValidator | None = None,
         normalize: bool = True,
         strict_validation: bool = False,
     ) -> None:
@@ -348,9 +350,8 @@ class SynthesisDataset(Dataset):
             result = self.validator.validate(image, mask)
             if not result.is_valid:
                 if self.strict_validation:
-                    raise SynthesisValidationError(
-                        f"Synthesis validation failed: {result.errors}"
-                    )
+                    msg = f"Synthesis validation failed: {result.errors}"
+                    raise SynthesisValidationError(msg)
                 logger.warning("Synthesis validation failed: %s", result.errors)
 
         # Normalize image
@@ -471,211 +472,88 @@ def _find_anime_segmentation_pairs(
 
 
 class AnimeSegmentationDataModule(L.LightningDataModule):
-    """LightningDataModule for anime-segmentation dataset.
+    """LightningDataModule for anime-segmentation training.
 
-    Loads dataset from local files. Use scripts/download_anime_segmentation.py
-    to download the dataset from Hugging Face Hub first.
-
-    Dataset structure:
-        {data_root}/
-        ├── bg/       # Background images (8,057 JPG) - for future Copy-Paste mode
-        ├── fg/       # Character cutouts (11,802 PNG with alpha) - for future Copy-Paste mode
-        ├── imgs/     # Pre-composed images (1,111 JPG)
-        └── masks/    # Segmentation masks (1,111 JPG)
-
-    Currently implements Path A (Pre-composed mode) using imgs/ + masks/.
-    Path B (Copy-Paste mode using bg/ + fg/) is planned for future implementation.
+    Loads the local dataset layout (imgs/, masks/, fg/, bg/) and resolves
+    synthesis components via dependency injection for testability and reuse.
     """
 
     def __init__(
         self,
-        # Data source
         data_root: str = "datasets/anime-segmentation",
-        # Split configuration
-        val_ratio: float = 0.1,
-        # DataLoader settings
-        batch_size: int = 8,
-        num_workers: int | None = None,
         size: tuple[int, int] = (1024, 1024),
-        pin_memory: bool = True,
-        prefetch_factor: int | None = None,
-        gpu_augmentation: bool = True,
-        # Augmentation settings
-        hflip_prob: float = 0.5,
-        rotation_degrees: float = 10.0,
-        color_jitter: bool = True,
-        color_jitter_brightness: float = 0.2,
-        color_jitter_contrast: float = 0.2,
-        color_jitter_saturation: float = 0.2,
-        color_jitter_hue: float = 0.1,
-        # Route B (Synthesis) settings
-        enable_synthesis: bool = False,
-        synthesis_ratio: float = 0.5,
-        synthesis_length: int = 1000,
-        # Synthesis compositor settings
-        synthesis_k_probs: dict[int, float] | None = None,
-        synthesis_min_area: float = 0.02,
-        synthesis_max_area: float = 0.60,
-        synthesis_max_coverage: float = 0.85,
-        synthesis_max_overlap: float = 0.30,
-        synthesis_blending_probs: dict[str, float] | None = None,
-        synthesis_boundary_randomize_prob: float = 0.3,
-        synthesis_boundary_randomize_width: int = 3,
-        synthesis_boundary_randomize_noise_std: float = 0.05,
-        # Consistency settings
-        enable_consistency: bool = True,
-        consistency_color_prob: float = 0.5,
-        consistency_light_wrap_prob: float = 0.3,
-        consistency_shadow_prob: float = 0.3,
-        consistency_noise_prob: float = 0.3,
-        # Degradation settings
-        enable_degradation: bool = True,
-        degradation_jpeg_prob: float = 0.3,
-        degradation_blur_prob: float = 0.1,
-        degradation_noise_prob: float = 0.1,
-        # Validation settings
-        enable_validation: bool = True,
+        val_ratio: float = 0.1,
+        loader: DataLoaderConfig | None = None,
+        augmentation: AugmentationConfig | None = None,
+        synthesis: SynthesisConfig | None = None,
+        fg_pool: BaseForegroundPool | None = None,
+        bg_pool: BaseBackgroundPool | None = None,
+        compositor: BaseCompositor | None = None,
+        instance_transform: BaseInstanceTransform | None = None,
+        consistency_pipeline: BaseConsistencyPipeline | None = None,
+        degradation: BaseDegradation | None = None,
+        validator: BaseValidator | None = None,
     ) -> None:
-        """Initialize AnimeSegmentationDataModule.
-
-        Args:
-            data_root: Path to local dataset directory containing imgs/ and masks/.
-            val_ratio: Ratio for validation split when auto-splitting (0.0-1.0).
-            batch_size: Batch size for all dataloaders.
-            num_workers: Number of workers for dataloaders. Defaults to 4.
-            size: Target image size (width, height).
-            pin_memory: Whether to pin memory in dataloaders.
-            gpu_augmentation: If True, apply augmentations on GPU (faster).
-            hflip_prob: Probability of horizontal flip during training.
-            rotation_degrees: Max rotation angle during training.
-            color_jitter: Whether to apply color jitter during training.
-            color_jitter_brightness: Brightness jitter range (0.0-1.0).
-            color_jitter_contrast: Contrast jitter range (0.0-1.0).
-            color_jitter_saturation: Saturation jitter range (0.0-1.0).
-            color_jitter_hue: Hue jitter range (0.0-0.5).
-            enable_synthesis: Enable Route B (Copy-Paste synthesis).
-            synthesis_ratio: Ratio of synthetic samples in training.
-            synthesis_length: Number of synthetic samples per epoch.
-            synthesis_k_probs: Probability distribution for character count.
-            synthesis_min_area: Minimum character area ratio.
-            synthesis_max_area: Maximum character area ratio.
-            synthesis_max_coverage: Maximum total coverage.
-            synthesis_max_overlap: Maximum IoU overlap between characters.
-            synthesis_blending_probs: Blending strategy probabilities.
-            synthesis_boundary_randomize_prob: Probability of boundary RGB randomization.
-            synthesis_boundary_randomize_width: Boundary width for randomization.
-            synthesis_boundary_randomize_noise_std: Noise std for boundary randomization.
-            enable_consistency: Enable consistency processing.
-            consistency_color_prob: Color matching probability.
-            consistency_light_wrap_prob: Light wrap probability.
-            consistency_shadow_prob: Shadow probability.
-            consistency_noise_prob: Noise consistency probability.
-            enable_degradation: Enable quality degradation.
-            degradation_jpeg_prob: JPEG compression probability.
-            degradation_blur_prob: Blur probability.
-            degradation_noise_prob: Noise probability.
-            enable_validation: Enable data validation.
-
-        """
+        """Initialize the DataModule."""
         super().__init__()
-        self.save_hyperparameters()
-
-        # Data source configuration
         self.data_root = data_root
-
-        # Split configuration
-        self.val_ratio = val_ratio
-
-        # DataLoader settings
-        self.batch_size = batch_size
-        self.num_workers = num_workers if num_workers is not None else 4
         self.size = size
-        self.pin_memory = pin_memory
-        self.prefetch_factor = prefetch_factor
-        self.gpu_augmentation = gpu_augmentation
+        self.val_ratio = val_ratio
+        self.loader = loader if loader is not None else DataLoaderConfig()
+        self.augmentation = augmentation if augmentation is not None else AugmentationConfig()
+        self.synthesis = synthesis if synthesis is not None else SynthesisConfig()
 
-        # Augmentation settings
-        self.hflip_prob = hflip_prob
-        self.rotation_degrees = rotation_degrees
-        self.color_jitter = color_jitter
-        self.color_jitter_brightness = color_jitter_brightness
-        self.color_jitter_contrast = color_jitter_contrast
-        self.color_jitter_saturation = color_jitter_saturation
-        self.color_jitter_hue = color_jitter_hue
+        self._injected_fg_pool = fg_pool
+        self._injected_bg_pool = bg_pool
+        self._injected_compositor = compositor
+        self._injected_instance_transform = instance_transform
+        self._injected_consistency = consistency_pipeline
+        self._injected_degradation = degradation
+        self._injected_validator = validator
 
-        # Synthesis settings
-        self.enable_synthesis = enable_synthesis
-        self.synthesis_ratio = synthesis_ratio
-        self.synthesis_length = synthesis_length
-        self.synthesis_k_probs = synthesis_k_probs
-        self.synthesis_min_area = synthesis_min_area
-        self.synthesis_max_area = synthesis_max_area
-        self.synthesis_max_coverage = synthesis_max_coverage
-        self.synthesis_max_overlap = synthesis_max_overlap
-        self.synthesis_blending_probs = synthesis_blending_probs
-        self.synthesis_boundary_randomize_prob = synthesis_boundary_randomize_prob
-        self.synthesis_boundary_randomize_width = synthesis_boundary_randomize_width
-        self.synthesis_boundary_randomize_noise_std = synthesis_boundary_randomize_noise_std
+        self._fg_pool: BaseForegroundPool | None = None
+        self._bg_pool: BaseBackgroundPool | None = None
+        self._compositor: BaseCompositor | None = None
+        self._instance_transform: BaseInstanceTransform | None = None
+        self._consistency_pipeline: BaseConsistencyPipeline | None = None
+        self._degradation: BaseDegradation | None = None
+        self._validator: BaseValidator | None = None
 
-        # Consistency settings
-        self.enable_consistency = enable_consistency
-        self.consistency_color_prob = consistency_color_prob
-        self.consistency_light_wrap_prob = consistency_light_wrap_prob
-        self.consistency_shadow_prob = consistency_shadow_prob
-        self.consistency_noise_prob = consistency_noise_prob
-
-        # Degradation settings
-        self.enable_degradation = enable_degradation
-        self.degradation_jpeg_prob = degradation_jpeg_prob
-        self.degradation_blur_prob = degradation_blur_prob
-        self.degradation_noise_prob = degradation_noise_prob
-
-        # Validation settings
-        self.enable_validation = enable_validation
-
-        # GPU augmentation module (initialized lazily)
         self._gpu_augmentation: GPUAugmentation | None = None
 
-        # Synthesis components (initialized in setup)
-        self._compositor = None
-        self._consistency_pipeline = None
-        self._degradation = None
-        self._validator = None
+        self.train_dataset: Dataset | MixedDataset | None = None
+        self.val_dataset: Dataset | None = None
+        self.test_dataset: Dataset | None = None
 
-        # Datasets (initialized in setup)
-        self.train_dataset: SegmentationDataset | MixedDataset | None = None
-        self.val_dataset: SegmentationDataset | None = None
-        self.test_dataset: SegmentationDataset | None = None
-
-        # Raw paths (loaded once, then split)
         self._image_paths: list[str] | None = None
         self._mask_paths: list[str] | None = None
         self._train_indices: list[int] | None = None
         self._val_indices: list[int] | None = None
 
+        self.save_hyperparameters(
+            ignore=[
+                "fg_pool",
+                "bg_pool",
+                "compositor",
+                "instance_transform",
+                "consistency_pipeline",
+                "degradation",
+                "validator",
+            ],
+        )
+
     def _load_and_split_paths(self) -> None:
-        """Load image-mask paths and create train/val splits.
-
-        Raises:
-            FileNotFoundError: If data_root or required directories don't exist.
-            ValueError: If no image-mask pairs found.
-
-        """
+        """Load image-mask pairs and split them deterministically."""
         logger.info("Loading dataset from: %s", self.data_root)
-
-        # Find image-mask pairs
         self._image_paths, self._mask_paths = _find_anime_segmentation_pairs(
             self.data_root,
         )
         logger.info("Found %d image-mask pairs", len(self._image_paths))
 
-        # Create train/val split indices
         n_samples = len(self._image_paths)
-        # Shuffle with fixed seed for reproducibility
         generator = torch.Generator().manual_seed(42)
         indices = torch.randperm(n_samples, generator=generator).tolist()
 
-        # Split
         n_val = int(n_samples * self.val_ratio)
         self._val_indices = indices[:n_val]
         self._train_indices = indices[n_val:]
@@ -692,25 +570,13 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         *,
         is_train: bool,
     ) -> SegmentationDataset:
-        """Create SegmentationDataset from indices.
-
-        Args:
-            indices: List of indices to include.
-            is_train: Whether to apply training augmentations.
-
-        Returns:
-            Configured SegmentationDataset.
-
-        """
         assert self._image_paths is not None
         assert self._mask_paths is not None
 
         image_paths = [self._image_paths[i] for i in indices]
         mask_paths = [self._mask_paths[i] for i in indices]
 
-        # CPU augmentations are disabled; GPU augmentations are applied
-        # in on_after_batch_transfer when enabled.
-        normalize = not (is_train and self.gpu_augmentation)
+        normalize = not (is_train and self.augmentation.enabled)
         transform = PairedTransform(size=self.size, normalize=normalize)
 
         return SegmentationDataset(image_paths, mask_paths, transform=transform)
@@ -720,153 +586,167 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | torch.Tensor,
         dataloader_idx: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | torch.Tensor:
-        """Apply GPU augmentation after batch transfer.
-
-        This hook is called after the batch is moved to the device.
-        When gpu_augmentation is enabled, applies kornia-based augmentations.
-
-        Args:
-            batch: Tuple of (images, masks, class_labels).
-            dataloader_idx: Index of the dataloader.
-
-        Returns:
-            Augmented batch.
-
-        """
         if not isinstance(batch, (tuple, list)) or len(batch) != 3:
             return batch
 
         images, masks, class_labels = batch
 
-        # Only apply GPU augmentation during training
-        if self.trainer is not None and self.trainer.training and self.gpu_augmentation:
-            # Lazy initialization of GPU augmentation module
-            if self._gpu_augmentation is None:
-                self._gpu_augmentation = GPUAugmentation(
-                    hflip_prob=self.hflip_prob,
-                    rotation_degrees=self.rotation_degrees,
-                    color_jitter=self.color_jitter,
-                    color_jitter_brightness=self.color_jitter_brightness,
-                    color_jitter_contrast=self.color_jitter_contrast,
-                    color_jitter_saturation=self.color_jitter_saturation,
-                    color_jitter_hue=self.color_jitter_hue,
-                )
-                # Move to same device as batch
-                self._gpu_augmentation = self._gpu_augmentation.to(images.device)
-
-            images, masks = self._gpu_augmentation(images, masks)
+        if self.trainer is not None and self.trainer.training and self.augmentation.enabled:
+            augmentor = self._ensure_gpu_augmentation(images.device)
+            images, masks = augmentor(images, masks)
             images = TF.normalize(images, IMAGENET_MEAN, IMAGENET_STD)
 
         return images, masks, class_labels
 
-    def _setup_synthesis_components(self) -> None:
-        """Initialize synthesis pipeline components."""
-        if not self.enable_synthesis:
-            return
+    def _ensure_gpu_augmentation(self, device: torch.device) -> GPUAugmentation:
+        if self._gpu_augmentation is None:
+            self._gpu_augmentation = GPUAugmentation(self.augmentation)
+        self._gpu_augmentation = self._gpu_augmentation.to(device)
+        return self._gpu_augmentation
 
-        data_root = Path(self.data_root)
-        fg_dir = data_root / "fg"
-        bg_dir = data_root / "bg"
+    def _resolve_pools(self, fg_root: Path, bg_root: Path) -> None:
+        if self._fg_pool is None:
+            if self._injected_fg_pool is not None:
+                self._fg_pool = self._injected_fg_pool
+            else:
+                self._fg_pool = self._build_default_fg_pool(fg_root)
+        if self._bg_pool is None:
+            if self._injected_bg_pool is not None:
+                self._bg_pool = self._injected_bg_pool
+            else:
+                self._bg_pool = self._build_default_bg_pool(bg_root)
 
-        # Check if fg/ and bg/ directories exist
-        if not fg_dir.exists() or not bg_dir.exists():
-            logger.warning(
-                "Synthesis enabled but fg/ or bg/ directories not found in %s. "
-                "Disabling synthesis.",
-                self.data_root,
-            )
-            self.enable_synthesis = False
-            return
+    def _resolve_instance_transform(self) -> None:
+        if self._instance_transform is None:
+            if self._injected_instance_transform is not None:
+                self._instance_transform = self._injected_instance_transform
+            else:
+                self._instance_transform = self._build_default_instance_transform()
 
-        # Import synthesis modules
-        from anime_segmentation.data.pools import BackgroundPool, ForegroundPool
-        from anime_segmentation.training.synthesis.compositor import (
-            CompositorConfig,
-            CopyPasteCompositor,
+    def _resolve_compositor(self) -> None:
+        if self._compositor is None:
+            if self._injected_compositor is not None:
+                self._compositor = self._injected_compositor
+            else:
+                self._compositor = self._build_default_compositor()
+
+    def _resolve_consistency(self) -> None:
+        if self._consistency_pipeline is None and self.synthesis.consistency.enabled:
+            if self._injected_consistency is not None:
+                self._consistency_pipeline = self._injected_consistency
+            else:
+                self._consistency_pipeline = self._build_default_consistency()
+
+    def _resolve_degradation(self) -> None:
+        if self._degradation is None and self.synthesis.degradation.enabled:
+            if self._injected_degradation is not None:
+                self._degradation = self._injected_degradation
+            else:
+                self._degradation = self._build_default_degradation()
+
+    def _resolve_validator(self) -> None:
+        if self._validator is None:
+            if self._injected_validator is not None:
+                self._validator = self._injected_validator
+            else:
+                self._validator = self._build_default_validator()
+
+    def _build_default_fg_pool(self, fg_root: Path) -> BaseForegroundPool:
+        from anime_segmentation.data.pools import ForegroundPool
+
+        return ForegroundPool(fg_root)
+
+    def _build_default_bg_pool(self, bg_root: Path) -> BaseBackgroundPool:
+        from anime_segmentation.data.pools import BackgroundPool
+
+        return BackgroundPool(bg_root)
+
+    def _build_default_compositor(self) -> BaseCompositor:
+        from .synthesis.compositor import CopyPasteCompositor
+
+        if self._fg_pool is None or self._bg_pool is None:
+            msg = "Pools must be resolved before building compositor"
+            raise RuntimeError(msg)
+
+        return CopyPasteCompositor(
+            fg_pool=self._fg_pool,
+            bg_pool=self._bg_pool,
+            config=self.synthesis.compositor,
+            instance_transform=self._instance_transform,
         )
-        from anime_segmentation.training.synthesis.consistency import ConsistencyPipeline
-        from anime_segmentation.training.synthesis.degradation import QualityDegradation
-        from anime_segmentation.training.synthesis.transforms import InstanceTransform
-        from anime_segmentation.training.synthesis.validation import DataValidator
 
-        # Initialize pools
-        fg_pool = ForegroundPool(fg_dir)
-        bg_pool = BackgroundPool(bg_dir)
+    def _build_default_instance_transform(self) -> BaseInstanceTransform:
+        from .synthesis.transforms import InstanceTransform
 
-        # Build compositor config
-        config_kwargs: dict = {
-            "min_area_ratio": self.synthesis_min_area,
-            "max_area_ratio": self.synthesis_max_area,
-            "max_total_coverage": self.synthesis_max_coverage,
-            "max_iou_overlap": self.synthesis_max_overlap,
-            "boundary_randomize_prob": self.synthesis_boundary_randomize_prob,
-            "boundary_randomize_width": self.synthesis_boundary_randomize_width,
-            "boundary_randomize_noise_std": self.synthesis_boundary_randomize_noise_std,
-        }
-        if self.synthesis_k_probs is not None:
-            config_kwargs["k_probs"] = self.synthesis_k_probs
-        if self.synthesis_blending_probs is not None:
-            config_kwargs["blending_probs"] = self.synthesis_blending_probs
-
-        compositor_config = CompositorConfig(**config_kwargs)
-
-        # Instance transform
-        instance_transform = InstanceTransform(
-            hflip_prob=self.hflip_prob,
-            rotation_range=(-self.rotation_degrees, self.rotation_degrees),
+        cfg = self.augmentation
+        return InstanceTransform(
+            hflip_prob=cfg.hflip_prob,
+            rotation_range=(-cfg.rotation_degrees, cfg.rotation_degrees),
             scale_range=(0.5, 1.5),
         )
 
-        # Create compositor
-        self._compositor = CopyPasteCompositor(
-            fg_pool=fg_pool,
-            bg_pool=bg_pool,
-            config=compositor_config,
-            instance_transform=instance_transform,
+    def _build_default_consistency(self) -> BaseConsistencyPipeline:
+        from .synthesis.consistency import ConsistencyPipeline
+
+        cfg = self.synthesis.consistency
+        return ConsistencyPipeline(
+            color_tone_prob=cfg.color_prob,
+            light_wrap_prob=cfg.light_wrap_prob,
+            shadow_prob=cfg.shadow_prob,
+            noise_grain_prob=cfg.noise_prob,
         )
 
-        # Consistency pipeline
-        if self.enable_consistency:
-            self._consistency_pipeline = ConsistencyPipeline(
-                color_tone_prob=self.consistency_color_prob,
-                light_wrap_prob=self.consistency_light_wrap_prob,
-                shadow_prob=self.consistency_shadow_prob,
-                noise_grain_prob=self.consistency_noise_prob,
-            )
+    def _build_default_degradation(self) -> BaseDegradation:
+        from .synthesis.degradation import QualityDegradation
 
-        # Degradation
-        if self.enable_degradation:
-            self._degradation = QualityDegradation(
-                jpeg_prob=self.degradation_jpeg_prob,
-                blur_prob=self.degradation_blur_prob,
-                noise_prob=self.degradation_noise_prob,
-            )
+        cfg = self.synthesis.degradation
+        return QualityDegradation(
+            jpeg_prob=cfg.jpeg_prob,
+            blur_prob=cfg.blur_prob,
+            noise_prob=cfg.noise_prob,
+        )
 
-        # Validator
-        if self.enable_validation:
-            self._validator = DataValidator()
+    def _build_default_validator(self) -> BaseValidator:
+        from .synthesis.validation import DataValidator
+
+        return DataValidator()
+
+    def _setup_synthesis_components(self) -> None:
+        if not self.synthesis.enabled:
+            return
+
+        fg_root = Path(self.data_root) / "fg"
+        bg_root = Path(self.data_root) / "bg"
+
+        if not fg_root.exists() or not bg_root.exists():
+            logger.warning(
+                "Synthesis enabled but fg/ or bg/ directories missing in %s. Disabling synthesis.",
+                self.data_root,
+            )
+            self.synthesis.enabled = False
+            return
+
+        self._resolve_pools(fg_root, bg_root)
+        self._resolve_instance_transform()
+        self._resolve_compositor()
+        self._resolve_consistency()
+        self._resolve_degradation()
+        self._resolve_validator()
 
         logger.info(
-            "Synthesis pipeline initialized: %d fg, %d bg images",
-            len(fg_pool),
-            len(bg_pool),
+            "Synthesis pipeline initialized: fg=%d, bg=%d",
+            len(self._fg_pool),
+            len(self._bg_pool),
         )
 
     def setup(self, stage: str | None = None) -> None:
-        """Set up datasets for the given stage.
-
-        Args:
-            stage: 'fit', 'validate', 'test', or 'predict'.
-
-        """
         if self._image_paths is None:
             self._load_and_split_paths()
 
         assert self._train_indices is not None
         assert self._val_indices is not None
 
-        # Initialize synthesis components if needed
-        if self.enable_synthesis and self._compositor is None:
+        if self.synthesis.enabled and self._compositor is None:
             self._setup_synthesis_components()
 
         match stage:
@@ -876,27 +756,27 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
                     is_train=True,
                 )
 
-                # Create mixed dataset if synthesis is enabled
-                if self.enable_synthesis and self._compositor is not None:
+                if self.synthesis.enabled and self._compositor is not None:
                     synth_dataset = SynthesisDataset(
                         compositor=self._compositor,
                         size=self.size,
-                        length=self.synthesis_length,
+                        length=self.synthesis.length,
                         consistency_pipeline=self._consistency_pipeline,
                         degradation=self._degradation,
                         validator=self._validator,
-                        normalize=not self.gpu_augmentation,
+                        normalize=not self.augmentation.enabled,
+                        strict_validation=self.synthesis.strict_validation,
                     )
                     self.train_dataset = MixedDataset(
                         real_dataset=real_train_dataset,
                         synth_dataset=synth_dataset,
-                        synthesis_ratio=self.synthesis_ratio,
+                        synthesis_ratio=self.synthesis.ratio,
                     )
                     logger.info(
                         "Mixed dataset created: real=%d, synth=%d, ratio=%.2f",
                         len(real_train_dataset),
                         len(synth_dataset),
-                        self.synthesis_ratio,
+                        self.synthesis.ratio,
                     )
                 else:
                     self.train_dataset = real_train_dataset
@@ -911,7 +791,6 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
                     is_train=False,
                 )
             case "test" | "predict":
-                # Use validation as test if no separate test set
                 self.test_dataset = self._create_dataset(
                     self._val_indices,
                     is_train=False,
@@ -924,37 +803,24 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         shuffle: bool = False,
         drop_last: bool = False,
     ) -> DataLoader:
-        """Create a dataloader with common settings.
-
-        Args:
-            dataset: Dataset to wrap.
-            shuffle: Whether to shuffle the data.
-            drop_last: Whether to drop the last incomplete batch.
-
-        Returns:
-            Configured DataLoader instance.
-
-        """
-        # prefetch_factor requires num_workers > 0
-        prefetch = self.prefetch_factor if self.num_workers > 0 else None
+        num_workers = self.loader.num_workers
+        prefetch = self.loader.prefetch_factor if num_workers > 0 else None
 
         return DataLoader(
             dataset,
-            batch_size=self.batch_size,
+            batch_size=self.loader.batch_size,
             shuffle=shuffle,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
+            num_workers=num_workers,
+            pin_memory=self.loader.pin_memory,
             drop_last=drop_last,
-            persistent_workers=self.num_workers > 0,
+            persistent_workers=num_workers > 0,
             prefetch_factor=prefetch,
         )
 
     def train_dataloader(self) -> DataLoader:
-        """Return training dataloader."""
         if self.train_dataset is None:
             msg = "Training dataset not initialized. Call setup('fit') first."
             raise RuntimeError(msg)
-
         return self._create_dataloader(
             self.train_dataset,
             shuffle=True,
@@ -962,36 +828,16 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         )
 
     def val_dataloader(self) -> DataLoader:
-        """Return validation dataloader.
-
-        Raises:
-            RuntimeError: If validation dataset is not available.
-
-        """
         if self.val_dataset is None:
             msg = "Validation dataset not available."
             raise RuntimeError(msg)
-
         return self._create_dataloader(self.val_dataset)
 
     def test_dataloader(self) -> DataLoader:
-        """Return test dataloader.
-
-        Raises:
-            RuntimeError: If test dataset is not available.
-
-        """
         if self.test_dataset is None:
             msg = "Test dataset not available. Call setup('test') first."
             raise RuntimeError(msg)
-
         return self._create_dataloader(self.test_dataset)
 
     def predict_dataloader(self) -> DataLoader:
-        """Return predict dataloader (same as test).
-
-        Raises:
-            RuntimeError: If test dataset is not available.
-
-        """
         return self.test_dataloader()

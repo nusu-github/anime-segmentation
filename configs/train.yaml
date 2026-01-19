@@ -1,0 +1,97 @@
+seed_everything: 7
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  precision: bf16-mixed
+  max_epochs: 200
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val/loss
+        mode: min
+        save_top_k: 3
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 20
+        mode: min
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: anime-segmentation
+      log_model: false
+
+model:
+  backbone:
+    name: swin_v1_t
+    pretrained: true
+
+  decoder:
+    out_ref: true
+    ms_supervision: true
+    dec_att: ASPPDeformable
+    squeeze_block: BasicDecBlk_x1
+
+  loss:
+    bce: 30.0
+    ssim: 10.0
+    iou: 0.5
+
+  compile: false
+
+data:
+  data_root: datasets/anime-segmentation
+  size: [1024, 1024]
+  val_ratio: 0.1
+
+  loader:
+    batch_size: 8
+    num_workers: 4
+    pin_memory: true
+
+  augmentation:
+    enabled: true
+    hflip_prob: 0.5
+    rotation_degrees: 15.0
+    color_jitter: true
+    brightness: 0.2
+    contrast: 0.2
+
+  synthesis:
+    enabled: false
+    ratio: 0.5
+    length: 2000
+
+    compositor:
+      k_probs:
+        0: 0.05
+        1: 0.35
+        2: 0.35
+        3: 0.20
+        4: 0.05
+      min_area_ratio: 0.02
+      max_area_ratio: 0.60
+
+    consistency:
+      enabled: true
+      color_prob: 0.5
+      shadow_prob: 0.3
+
+    degradation:
+      enabled: true
+      jpeg_prob: 0.3
+
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 1e-4
+    weight_decay: 0.01
+
+lr_scheduler:
+  class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+  init_args:
+    T_max: 200
+    eta_min: 1e-6

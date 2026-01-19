@@ -14,11 +14,13 @@ import kornia.filters as KF
 import torch
 from torch import nn
 
+from anime_segmentation.training.synthesis.base import BaseDegradation
+
 if TYPE_CHECKING:
     from torch import Generator, Tensor
 
 
-class QualityDegradation(nn.Module):
+class QualityDegradation(nn.Module, BaseDegradation):
     """Apply quality degradations to synthetic images.
 
     Randomly applies JPEG compression, blur, and noise to images
@@ -142,18 +144,13 @@ class QualityDegradation(nn.Module):
             Noisy image [3, H, W].
 
         """
-        if rng is not None:
-            noise = torch.randn(image.shape, generator=rng, device=image.device) * noise_std
-        else:
-            noise = torch.randn_like(image) * noise_std
+        noise = (
+            torch.randn(image.shape, generator=rng, device=image.device) * noise_std
+            if rng is not None
+            else torch.randn_like(image) * noise_std
+        )
 
         return torch.clamp(image + noise, 0, 1)
-
-    def _should_apply(self, prob: float, rng: Generator | None = None) -> bool:
-        """Check if degradation should be applied."""
-        if rng is not None:
-            return torch.rand(1, generator=rng).item() < prob
-        return torch.rand(1).item() < prob
 
     def _sample_uniform(
         self,
@@ -197,21 +194,29 @@ class QualityDegradation(nn.Module):
         result = image
 
         # Apply JPEG compression
-        if self._should_apply(self.jpeg_prob, rng):
+        if self.should_apply(self.jpeg_prob, rng):
             quality = self._sample_int(*self.jpeg_quality_range, rng)
             result = self._apply_jpeg_compression(result, quality)
 
         # Apply blur
-        if self._should_apply(self.blur_prob, rng):
+        if self.should_apply(self.blur_prob, rng):
             kernel_size = self._sample_int(*self.blur_kernel_range, rng)
             result = self._apply_gaussian_blur(result, kernel_size)
 
         # Apply noise
-        if self._should_apply(self.noise_prob, rng):
+        if self.should_apply(self.noise_prob, rng):
             noise_std = self._sample_uniform(*self.noise_std_range, rng)
             result = self._apply_gaussian_noise(result, noise_std, rng)
 
         return result, mask
+
+    def __call__(
+        self,
+        image: Tensor,
+        mask: Tensor,
+        rng: Generator | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        return super().__call__(image, mask, rng=rng)
 
 
 class DegradationSequence(nn.Module):

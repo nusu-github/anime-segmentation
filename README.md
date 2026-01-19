@@ -35,16 +35,16 @@ pip install .
 ### Training
 
 ```bash
-python -m anime_segmentation.training.train fit --config configs/birefnet_default.yaml
+python -m anime_segmentation.training.train fit --config configs/train.yaml
 ```
 
 Override parameters from CLI:
 
 ```bash
 python -m anime_segmentation.training.train fit \
-    --config configs/birefnet_default.yaml \
-    --model.bb_name swin_v1_t \
-    --data.batch_size 4
+    --config configs/train.yaml \
+    --model.backbone.name swin_v1_t \
+    --data.loader.batch_size 4
 ```
 
 ## Model Architecture
@@ -100,7 +100,7 @@ data:
 
 ## Configuration
 
-Training is configured via YAML files. See `configs/birefnet_default.yaml` for all options.
+Training is configured via YAML files. See `configs/train.yaml` for all options.
 
 ### Key Configuration Sections
 
@@ -108,33 +108,36 @@ Training is configured via YAML files. See `configs/birefnet_default.yaml` for a
 
 ```yaml
 model:
-  bb_name: convnext_atto      # Backbone selection
-  bb_pretrained: true
-  out_ref: true               # Gradient-aware refinement
-  ms_supervision: true        # Multi-scale supervision
-  dec_att: ASPPDeformable     # Decoder attention type
+  backbone:
+    name: convnext_atto     # Backbone selection
+    pretrained: true
+
+  decoder:
+    out_ref: true
+    ms_supervision: true
+    dec_att: ASPPDeformable
 ```
 
 **Optimizer & Scheduler**:
 
 ```yaml
-model:
-  optimizer:
-    class_path: torch.optim.AdamW
-    init_args:
-      lr: 1e-4
-      weight_decay: 0.01
-  scheduler:
-    class_path: torch.optim.lr_scheduler.CosineAnnealingLR
-    init_args:
-      T_max: 120
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 1e-4
+    weight_decay: 0.01
+
+lr_scheduler:
+  class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+  init_args:
+    T_max: 120
 ```
 
 **Loss Weights**:
 
 ```yaml
 model:
-  lambdas_pix_last:
+  loss:
     bce: 30.0
     iou: 0.5
     ssim: 10.0
@@ -144,10 +147,14 @@ model:
 
 ```yaml
 data:
-  size: [1024, 1024]
-  hflip_prob: 0.5
-  rotation_degrees: 10.0
-  color_jitter: true
+  loader:
+    batch_size: 8
+    num_workers: 4
+  augmentation:
+    enabled: true
+    hflip_prob: 0.5
+    rotation_degrees: 10.0
+    color_jitter: true
 ```
 
 **Trainer**:
@@ -208,8 +215,8 @@ anime-segmentation/
 │       └── callbacks.py      # Training callbacks
 ├── configs/
 │   ├── default.yaml          # Base defaults
-│   ├── birefnet_default.yaml # Full training config
-│   └── anime_segmentation.yaml
+│   ├── train.yaml            # Full training config
+│   └── custom_compositor.yaml # DI customization example
 └── pyproject.toml
 ```
 

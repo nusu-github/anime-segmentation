@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
+
+from anime_segmentation.training.synthesis.base import BaseValidator, ValidationResult
 
 if TYPE_CHECKING:
     from torch import Tensor
@@ -20,25 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class ValidationResult:
-    """Result of data validation.
-
-    Attributes:
-        is_valid: Whether the data passed all validation checks.
-        errors: List of error messages (validation failures).
-        warnings: List of warning messages (non-critical issues).
-        stats: Dictionary of computed statistics.
-
-    """
-
-    is_valid: bool
-    errors: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    stats: dict[str, Any] = field(default_factory=dict)
-
-
-class DataValidator:
+class DataValidator(BaseValidator):
     """Validate synthetic data for quality assurance.
 
     Performs automatic assertions on image-mask pairs to catch
@@ -97,8 +80,8 @@ class DataValidator:
         stats["image_shape"] = (img_h, img_w)
         stats["mask_shape"] = (mask_h, mask_w)
 
-        if self.require_shape_match and (img_h != mask_h or img_w != mask_w):
-            errors.append(f"Shape mismatch: image ({img_h}, {img_w}) vs mask ({mask_h}, {mask_w})")
+        if self.require_shape_match:
+            errors.extend(self.check_shapes(image, mask))
 
         # Check image value range
         img_min = float(image.min().item())

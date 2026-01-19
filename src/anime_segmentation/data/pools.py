@@ -18,6 +18,10 @@ from torchvision.io import ImageReadMode, read_image
 
 from anime_segmentation.constants import VALID_IMAGE_EXTENSIONS
 from anime_segmentation.exceptions import InvalidImageError
+from anime_segmentation.training.synthesis.base import (
+    BaseBackgroundPool,
+    BaseForegroundPool,
+)
 
 if TYPE_CHECKING:
     from torch import Generator, Tensor
@@ -41,7 +45,8 @@ def _load_rgba_image(path: str | Path) -> tuple[Tensor, Tensor]:
     """
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"Image not found: {path}")
+        msg = f"Image not found: {path}"
+        raise FileNotFoundError(msg)
 
     torchvision_error = None
     try:
@@ -66,10 +71,8 @@ def _load_rgba_image(path: str | Path) -> tuple[Tensor, Tensor]:
         return rgb, mask
     except Exception as pil_error:
         # Both methods failed
-        raise InvalidImageError(
-            f"Cannot load RGBA image {path}: "
-            f"torchvision error: {torchvision_error}, PIL error: {pil_error}"
-        ) from pil_error
+        msg = f"Cannot load RGBA image {path}: torchvision error: {torchvision_error}, PIL error: {pil_error}"
+        raise InvalidImageError(msg) from pil_error
 
 
 def _load_rgb_image(path: str | Path) -> Tensor:
@@ -88,7 +91,8 @@ def _load_rgb_image(path: str | Path) -> Tensor:
     """
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"Image not found: {path}")
+        msg = f"Image not found: {path}"
+        raise FileNotFoundError(msg)
 
     torchvision_error = None
     try:
@@ -103,13 +107,11 @@ def _load_rgb_image(path: str | Path) -> Tensor:
             img = img.convert("RGB")
             return TF.to_tensor(img)
     except Exception as pil_error:
-        raise InvalidImageError(
-            f"Cannot load RGB image {path}: "
-            f"torchvision error: {torchvision_error}, PIL error: {pil_error}"
-        ) from pil_error
+        msg = f"Cannot load RGB image {path}: torchvision error: {torchvision_error}, PIL error: {pil_error}"
+        raise InvalidImageError(msg) from pil_error
 
 
-class ForegroundPool:
+class ForegroundPool(BaseForegroundPool):
     """Pool of foreground character cutouts for Copy-Paste synthesis.
 
     Loads PNG images with alpha channels from the fg/ directory.
@@ -158,10 +160,11 @@ class ForegroundPool:
             Mask is binarized at threshold 0.5.
 
         """
-        if rng is not None:
-            idx = int(torch.randint(0, len(self.paths), (1,), generator=rng).item())
-        else:
-            idx = int(torch.randint(0, len(self.paths), (1,)).item())
+        idx = (
+            int(torch.randint(0, len(self.paths), (1,), generator=rng).item())
+            if rng is not None
+            else int(torch.randint(0, len(self.paths), (1,)).item())
+        )
 
         path = self.paths[idx]
         rgb, mask = _load_rgba_image(path)
@@ -172,7 +175,7 @@ class ForegroundPool:
         return rgb, mask
 
 
-class BackgroundPool:
+class BackgroundPool(BaseBackgroundPool):
     """Pool of background images for Copy-Paste synthesis.
 
     Loads images from the bg/ directory for use as composition backgrounds.
@@ -224,10 +227,11 @@ class BackgroundPool:
             Background tensor [3, H, W] in [0, 1] range.
 
         """
-        if rng is not None:
-            idx = int(torch.randint(0, len(self.paths), (1,), generator=rng).item())
-        else:
-            idx = int(torch.randint(0, len(self.paths), (1,)).item())
+        idx = (
+            int(torch.randint(0, len(self.paths), (1,), generator=rng).item())
+            if rng is not None
+            else int(torch.randint(0, len(self.paths), (1,)).item())
+        )
 
         path = self.paths[idx]
         rgb = _load_rgb_image(path)

@@ -154,10 +154,11 @@ class FeatherBlending:
         """Blend with feathered edges."""
         # Sample random feather radius
         min_r, max_r = self.feather_radius_range
-        if rng is not None:
-            radius = int(torch.randint(min_r, max_r + 1, (1,), generator=rng).item())
-        else:
-            radius = int(torch.randint(min_r, max_r + 1, (1,)).item())
+        radius = (
+            int(torch.randint(min_r, max_r + 1, (1,), generator=rng).item())
+            if rng is not None
+            else int(torch.randint(min_r, max_r + 1, (1,)).item())
+        )
 
         # Create feathered mask
         feathered_mask = self._create_feathered_mask(fg_mask, radius)
@@ -261,10 +262,11 @@ class BoundaryRGBRandomizer:
         boundary_zone = self._extract_boundary_zone(mask)
 
         # Generate noise
-        if rng is not None:
-            noise = torch.randn(image.shape, generator=rng, device=image.device) * self.noise_std
-        else:
-            noise = torch.randn_like(image) * self.noise_std
+        noise = (
+            torch.randn(image.shape, generator=rng, device=image.device) * self.noise_std
+            if rng is not None
+            else torch.randn_like(image) * self.noise_std
+        )
 
         # Apply noise only in boundary zone
         result = image + noise * boundary_zone

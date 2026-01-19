@@ -1,0 +1,25 @@
+# Custom compositor injection via DI
+data:
+  data_root: datasets/anime-segmentation
+
+  synthesis:
+    enabled: true
+    ratio: 0.7
+
+  compositor:
+    class_path: my_project.synthesis.MyCustomCompositor
+    init_args:
+      special_mode: true
+      custom_param: 42
+
+  consistency_pipeline:
+    class_path: my_project.synthesis.AdvancedConsistency
+    init_args:
+      use_neural_matching: true
+
+  degradation:
+    class_path: anime_segmentation.training.synthesis.degradation.QualityDegradation
+    init_args:
+      jpeg_prob: 0.5
+      blur_prob: 0.2
+      noise_prob: 0.15

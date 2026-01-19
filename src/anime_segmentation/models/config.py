@@ -78,11 +78,7 @@ def get_lateral_channels(
     if bb_name in LATERAL_CHANNELS_MAP:
         return LATERAL_CHANNELS_MAP[bb_name]
 
-    msg = (
-        f"Backbone '{bb_name}' not found in channel map. "
-        "Either provide a backbone instance with out_channels property "
-        "or add the backbone to LATERAL_CHANNELS_MAP."
-    )
+    msg = f"Backbone '{bb_name}' not found in channel map. Either provide a backbone instance with out_channels property or add the backbone to LATERAL_CHANNELS_MAP."
     raise ValueError(msg)
 
 
