@@ -315,7 +315,7 @@ class BiRefNetLightning(
             # Pixel Loss
             loss_pix, loss_dict_pix = self.pix_loss(
                 scaled_preds,
-                torch.clamp(gts, 0, 1),
+                gts,
                 pix_loss_lambda=1.0,
             )
 
@@ -636,7 +636,7 @@ class BiRefNetLightning(
         if compute_loss:
             loss, _ = self.pix_loss(
                 scaled_preds,
-                torch.clamp(gts, 0, 1),
+                gts,
                 pix_loss_lambda=1.0,
             )
 

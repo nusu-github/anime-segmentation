@@ -42,8 +42,9 @@ def _load_rgba_image(path: str | Path) -> tuple[Tensor, Tensor]:
         mask = tensor[3:4].float() / 255.0
     except Exception:
         # Fallback to PIL
-        img = Image.open(path).convert("RGBA")
-        tensor = TF.to_tensor(img)
+        with Image.open(path) as img:
+            img = img.convert("RGBA")
+            tensor = TF.to_tensor(img)
         rgb = tensor[:3]
         mask = tensor[3:4]
 
@@ -64,8 +65,9 @@ def _load_rgb_image(path: str | Path) -> Tensor:
         tensor = read_image(str(path), mode=ImageReadMode.RGB)
         return tensor.float() / 255.0
     except Exception:
-        img = Image.open(path).convert("RGB")
-        return TF.to_tensor(img)
+        with Image.open(path) as img:
+            img = img.convert("RGB")
+            return TF.to_tensor(img)
 
 
 class ForegroundPool:

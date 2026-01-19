@@ -24,8 +24,9 @@ def _normalize_tensors(
         Tuple of normalized (preds, target) tensors with shape [B, H, W].
 
     """
-    preds = preds.float()
-    target = target.float()
+    # Detach to avoid retaining autograd graphs when metrics are used during training.
+    preds = preds.detach().float()
+    target = target.detach().float()
 
     # Squeeze channel dimension if present
     if preds.ndim == 4:
@@ -268,18 +269,15 @@ class SMeasureMetric(Metric):
         """Compute region-aware structural similarity."""
         # Find centroid of foreground
         h, w = gt.shape
-        y_coords, x_coords = torch.meshgrid(
-            torch.arange(h, device=gt.device),
-            torch.arange(w, device=gt.device),
-            indexing="ij",
-        )
-
         fg_sum = gt.sum()
         if fg_sum == 0:
             cx, cy = w // 2, h // 2
         else:
-            cx = (x_coords.float() * gt).sum() / fg_sum
-            cy = (y_coords.float() * gt).sum() / fg_sum
+            # Use 1D projections to avoid allocating full HxW coordinate grids.
+            y_coords = torch.arange(h, device=gt.device, dtype=gt.dtype)
+            x_coords = torch.arange(w, device=gt.device, dtype=gt.dtype)
+            cy = (gt.sum(dim=1) * y_coords).sum() / fg_sum
+            cx = (gt.sum(dim=0) * x_coords).sum() / fg_sum
             cx, cy = int(cx.round()), int(cy.round())
 
         # Ensure valid indices
