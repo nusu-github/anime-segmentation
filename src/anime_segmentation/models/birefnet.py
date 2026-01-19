@@ -1,5 +1,6 @@
 import inspect
 import warnings
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -11,9 +12,22 @@ from torch import nn
 
 from .backbones.build_backbone import build_backbone
 from .config import get_lateral_channels
-from .modules.decoder_blocks import BasicDecBlk, ResBlk
+from .modules.decoder_blocks import DecoderBlockRegistry
 from .modules.lateral_blocks import BasicLatBlk
 from .modules.norms import adaptive_group_norm_act
+
+
+class TrainingOutput(NamedTuple):
+    """Output structure during training mode.
+
+    Attributes:
+        scaled_preds: Multi-scale predictions. When out_ref is enabled,
+            this is a tuple of ([gdt_preds, gdt_labels], decoder_outputs).
+        class_preds: List containing auxiliary classification predictions (or None).
+    """
+
+    scaled_preds: list[torch.Tensor] | tuple
+    class_preds: list[torch.Tensor | None]
 
 _ACT_LAYER_MAP: dict[str, type[nn.Module]] = {
     "relu": nn.ReLU,
@@ -177,8 +191,7 @@ class BiRefNet(
         if squeeze_block:
             block_type, num_blocks = squeeze_block.split("_x")
             num_blocks = int(num_blocks)
-            block_map = {"BasicDecBlk": BasicDecBlk, "ResBlk": ResBlk}
-            BlockClass = block_map[block_type]
+            BlockClass = DecoderBlockRegistry.get(block_type)
             self.squeeze_module = nn.Sequential(
                 *[
                     BlockClass(
@@ -286,10 +299,19 @@ class BiRefNet(
         scaled_preds = self.decoder(features)
         return scaled_preds, class_preds
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> TrainingOutput | list[torch.Tensor]:
+        """Forward pass with mode-dependent output.
+
+        Args:
+            x: Input tensor [B, 3, H, W].
+
+        Returns:
+            Training mode: TrainingOutput(scaled_preds, class_preds)
+            Eval mode: list of prediction tensors at multiple scales
+        """
         scaled_preds, class_preds = self.forward_ori(x)
         if self.training:
-            return scaled_preds, [class_preds]
+            return TrainingOutput(scaled_preds, [class_preds])
         return scaled_preds
 
 
@@ -329,8 +351,8 @@ class Decoder(nn.Module):
         self.act_layer = act_layer
         self.act_kwargs = act_kwargs
 
-        DecoderBlock = {"BasicDecBlk": BasicDecBlk, "ResBlk": ResBlk}[dec_blk]
-        LateralBlock = {"BasicLatBlk": BasicLatBlk}[lat_blk]
+        DecoderBlock = DecoderBlockRegistry.get(dec_blk)
+        LateralBlock = {"BasicLatBlk": BasicLatBlk}[lat_blk]  # TODO: Add LateralBlockRegistry
 
         self.bbs_without_pyramid = ["vit", "dino"]
         self.use_pyramid_neck = any(
@@ -575,7 +597,11 @@ class Decoder(nn.Module):
             p4_gdt = self.gdt_convs_4(p4)
             if self.training:
                 m4_dia = m4
-                assert m4_dia is not None
+                if m4_dia is None:
+                    raise RuntimeError(
+                        "Gradient refinement (out_ref=True) requires multi-scale supervision "
+                        "(ms_supervision=True) during training, but m4 is None"
+                    )
                 gdt_label_main_4 = gdt_gt * F.interpolate(
                     m4_dia,
                     size=gdt_gt.shape[2:],
@@ -620,7 +646,11 @@ class Decoder(nn.Module):
             p3_gdt = self.gdt_convs_3(p3)
             if self.training:
                 m3_dia = m3
-                assert m3_dia is not None
+                if m3_dia is None:
+                    raise RuntimeError(
+                        "Gradient refinement (out_ref=True) requires multi-scale supervision "
+                        "(ms_supervision=True) during training, but m3 is None"
+                    )
                 gdt_label_main_3 = gdt_gt * F.interpolate(
                     m3_dia,
                     size=gdt_gt.shape[2:],
@@ -665,7 +695,11 @@ class Decoder(nn.Module):
             p2_gdt = self.gdt_convs_2(p2)
             if self.training:
                 m2_dia = m2
-                assert m2_dia is not None
+                if m2_dia is None:
+                    raise RuntimeError(
+                        "Gradient refinement (out_ref=True) requires multi-scale supervision "
+                        "(ms_supervision=True) during training, but m2 is None"
+                    )
                 gdt_label_main_2 = gdt_gt * F.interpolate(
                     m2_dia,
                     size=gdt_gt.shape[2:],

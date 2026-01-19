@@ -20,6 +20,7 @@ from anime_segmentation.constants import (
     IMAGENET_STD,
     VALID_IMAGE_EXTENSIONS,
 )
+from anime_segmentation.exceptions import SynthesisValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +275,7 @@ class SynthesisDataset(Dataset):
         degradation=None,  # QualityDegradation
         validator=None,  # DataValidator
         normalize: bool = True,
+        strict_validation: bool = False,
     ) -> None:
         """Initialize synthesis dataset.
 
@@ -285,6 +287,8 @@ class SynthesisDataset(Dataset):
             degradation: Optional QualityDegradation module.
             validator: Optional DataValidator.
             normalize: Whether to apply ImageNet normalization.
+            strict_validation: If True, raise exception on validation failure
+                instead of just logging a warning.
 
         """
         self.compositor = compositor
@@ -294,6 +298,7 @@ class SynthesisDataset(Dataset):
         self.degradation = degradation
         self.validator = validator
         self.normalize = normalize
+        self.strict_validation = strict_validation
 
         # Normalization transform
         if normalize:
@@ -342,6 +347,10 @@ class SynthesisDataset(Dataset):
         if self.validator is not None:
             result = self.validator.validate(image, mask)
             if not result.is_valid:
+                if self.strict_validation:
+                    raise SynthesisValidationError(
+                        f"Synthesis validation failed: {result.errors}"
+                    )
                 logger.warning("Synthesis validation failed: %s", result.errors)
 
         # Normalize image

@@ -7,7 +7,6 @@ backgrounds with various blending strategies and placement constraints.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -20,6 +19,7 @@ from anime_segmentation.training.synthesis.blending import (
     HardPasteBlending,
     SeamlessCloneBlending,
 )
+from anime_segmentation.training.synthesis.config import CompositorConfig
 from anime_segmentation.training.synthesis.transforms import (
     InstanceTransform,
     compute_mask_area_ratio,
@@ -34,85 +34,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class CompositorConfig:
-    """Configuration for CopyPasteCompositor.
-
-    Attributes:
-        k_probs: Probability distribution for number of characters (k).
-        min_area_ratio: Minimum area ratio for a character (vs canvas).
-        max_area_ratio: Maximum area ratio for a single character.
-        max_total_coverage: Maximum total coverage of all characters.
-        max_iou_overlap: Maximum IoU overlap allowed between characters.
-        blending_probs: Probability distribution for blending strategies.
-        boundary_randomize_prob: Probability of boundary RGB randomization.
-        boundary_randomize_width: Boundary width in pixels.
-        boundary_randomize_noise_std: Noise std for boundary randomization.
-
-    """
-
-    k_probs: dict[int, float] = field(
-        default_factory=lambda: {
-            0: 0.05,  # Negative examples (background only)
-            1: 0.35,
-            2: 0.35,
-            3: 0.20,
-            4: 0.05,
-        },
-    )
-
-    min_area_ratio: float = 0.02
-    max_area_ratio: float = 0.60
-    max_total_coverage: float = 0.85
-
-    max_iou_overlap: float = 0.30
-
-    blending_probs: dict[str, float] = field(
-        default_factory=lambda: {
-            "hard": 0.35,
-            "feather": 0.55,
-            "seamless": 0.10,
-        },
-    )
-
-    boundary_randomize_prob: float = 0.3
-    boundary_randomize_width: int = 3
-    boundary_randomize_noise_std: float = 0.05
-
-    def __post_init__(self) -> None:
-        """Validate configuration values."""
-        # Validate k_probs sum to 1
-        prob_sum = sum(self.k_probs.values())
-        if abs(prob_sum - 1.0) > 1e-6:
-            msg = f"k_probs must sum to 1.0, got {prob_sum}"
-            raise ValueError(msg)
-
-        # Validate blending_probs sum to 1
-        blend_sum = sum(self.blending_probs.values())
-        if abs(blend_sum - 1.0) > 1e-6:
-            msg = f"blending_probs must sum to 1.0, got {blend_sum}"
-            raise ValueError(msg)
-
-        # Validate ranges
-        if not 0 < self.min_area_ratio < self.max_area_ratio <= 1:
-            msg = "Invalid area ratio range"
-            raise ValueError(msg)
-        if not 0 < self.max_total_coverage <= 1:
-            msg = "Invalid max_total_coverage"
-            raise ValueError(msg)
-        if not 0 <= self.max_iou_overlap <= 1:
-            msg = "Invalid max_iou_overlap"
-            raise ValueError(msg)
-        if not 0.0 <= self.boundary_randomize_prob <= 1.0:
-            msg = "Invalid boundary_randomize_prob"
-            raise ValueError(msg)
-        if self.boundary_randomize_width < 1:
-            msg = "boundary_randomize_width must be >= 1"
-            raise ValueError(msg)
-        if self.boundary_randomize_noise_std < 0:
-            msg = "boundary_randomize_noise_std must be >= 0"
-            raise ValueError(msg)
+# Re-export CompositorConfig for backward compatibility
+__all__ = ["CopyPasteCompositor", "CompositorConfig"]
 
 
 class CopyPasteCompositor:

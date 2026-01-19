@@ -17,6 +17,7 @@ from PIL import Image
 from torchvision.io import ImageReadMode, read_image
 
 from anime_segmentation.constants import VALID_IMAGE_EXTENSIONS
+from anime_segmentation.exceptions import InvalidImageError
 
 if TYPE_CHECKING:
     from torch import Generator, Tensor
@@ -33,22 +34,42 @@ def _load_rgba_image(path: str | Path) -> tuple[Tensor, Tensor]:
     Returns:
         Tuple of (rgb [3, H, W], mask [1, H, W]) tensors in [0, 1] range.
 
+    Raises:
+        FileNotFoundError: If the image file does not exist.
+        InvalidImageError: If the image cannot be loaded by any method.
+
     """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Image not found: {path}")
+
+    torchvision_error = None
     try:
         # Try fast path with torchvision.io
         tensor = read_image(str(path), mode=ImageReadMode.RGB_ALPHA)
         # tensor shape: [4, H, W], uint8
         rgb = tensor[:3].float() / 255.0
         mask = tensor[3:4].float() / 255.0
-    except Exception:
+        return rgb, mask
+    except RuntimeError as e:
+        # torchvision.io failed, will try PIL fallback
+        torchvision_error = e
+        logger.debug("torchvision.io failed for %s: %s, trying PIL fallback", path, e)
+
+    try:
         # Fallback to PIL
         with Image.open(path) as img:
             img = img.convert("RGBA")
             tensor = TF.to_tensor(img)
         rgb = tensor[:3]
         mask = tensor[3:4]
-
-    return rgb, mask
+        return rgb, mask
+    except Exception as pil_error:
+        # Both methods failed
+        raise InvalidImageError(
+            f"Cannot load RGBA image {path}: "
+            f"torchvision error: {torchvision_error}, PIL error: {pil_error}"
+        ) from pil_error
 
 
 def _load_rgb_image(path: str | Path) -> Tensor:
@@ -60,14 +81,32 @@ def _load_rgb_image(path: str | Path) -> Tensor:
     Returns:
         RGB tensor [3, H, W] in [0, 1] range.
 
+    Raises:
+        FileNotFoundError: If the image file does not exist.
+        InvalidImageError: If the image cannot be loaded by any method.
+
     """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Image not found: {path}")
+
+    torchvision_error = None
     try:
         tensor = read_image(str(path), mode=ImageReadMode.RGB)
         return tensor.float() / 255.0
-    except Exception:
+    except RuntimeError as e:
+        torchvision_error = e
+        logger.debug("torchvision.io failed for %s: %s, trying PIL fallback", path, e)
+
+    try:
         with Image.open(path) as img:
             img = img.convert("RGB")
             return TF.to_tensor(img)
+    except Exception as pil_error:
+        raise InvalidImageError(
+            f"Cannot load RGB image {path}: "
+            f"torchvision error: {torchvision_error}, PIL error: {pil_error}"
+        ) from pil_error
 
 
 class ForegroundPool:
