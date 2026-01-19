@@ -79,6 +79,10 @@ class BiRefNetLightning(
         self._compile = compile
         self._compile_mode = compile_mode
 
+        if self.auxiliary_classification and self.num_classes is None:
+            msg = "num_classes must be specified when auxiliary_classification is True"
+            raise ValueError(msg)
+
         self.model: BiRefNet | None = None
         self.example_input_array: torch.Tensor | None = None
 
@@ -324,6 +328,18 @@ class BiRefNetLightning(
         """
         if None in class_preds_lst:
             return torch.zeros((), device=device)
+        if torch.any(class_labels < 0):
+            msg = (
+                "auxiliary_classification is enabled but class_labels contain negative values. "
+                "Provide valid class labels or disable auxiliary classification."
+            )
+            raise ValueError(msg)
+        if self.num_classes is not None and torch.any(class_labels >= self.num_classes):
+            msg = (
+                "auxiliary_classification received out-of-range class labels. "
+                f"num_classes={self.num_classes}."
+            )
+            raise ValueError(msg)
         return self.cls_loss(class_preds_lst, class_labels)
 
     def _log_training_metrics(self, losses: dict) -> None:

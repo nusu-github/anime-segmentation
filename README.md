@@ -81,13 +81,35 @@ BiRefNet uses a hierarchical encoder-decoder structure with:
 
 ## Dataset Format
 
-Prepare your dataset in BiRefNet-style structure:
+This project supports two dataset layouts. The default Hugging Face dataset
+uses the `imgs/` + `masks/` structure, and the datamodule will split
+train/val using `val_ratio`.
+
+### Layout A (default)
+
+```text
+dataset/
+├── imgs/     # Input images (.png, .jpg)
+├── masks/    # Ground truth masks (.png)
+├── fg/       # Foreground cutouts (optional, for synthesis)
+└── bg/       # Backgrounds (optional, for synthesis)
+```
+
+Configuration:
+
+```yaml
+data:
+  data_root: path/to/dataset
+  val_ratio: 0.1
+```
+
+### Layout B (explicit splits)
 
 ```text
 dataset/
 ├── train/
-│   ├── im/     # Input images (.png, .jpg)
-│   └── gt/     # Ground truth masks (.png)
+│   ├── im/    # or imgs/
+│   └── gt/    # or masks/
 ├── val/
 │   ├── im/
 │   └── gt/
@@ -96,18 +118,7 @@ dataset/
     └── gt/
 ```
 
-Update the config file:
-
-```yaml
-data:
-  data_root: path/to/dataset
-  training_sets:
-    - train
-  validation_sets:
-    - val
-  test_sets:
-    - test
-```
+The datamodule will use the explicit splits if `train/` and `val/` are present.
 
 ## Configuration
 

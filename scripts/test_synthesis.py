@@ -170,6 +170,7 @@ def test_synthesis(
     # Compositor configuration
     config = CompositorConfig(
         k_probs={0: 0.05, 1: 0.35, 2: 0.35, 3: 0.20, 4: 0.05},
+        max_instances=4,
         min_area_ratio=0.05,
         max_area_ratio=0.50,
         max_total_coverage=0.80,

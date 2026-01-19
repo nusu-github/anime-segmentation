@@ -281,6 +281,8 @@ class CopyPasteCompositor(BaseCompositor):
 
         # Sample number of characters
         k = self._sample_k(rng)
+        if self.config.max_instances >= 0:
+            k = min(k, self.config.max_instances)
 
         # Get background
         background = self.bg_pool.sample(target_size, rng)

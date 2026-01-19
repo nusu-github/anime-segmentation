@@ -415,16 +415,21 @@ class MixedDataset(Dataset):
 
 def _find_anime_segmentation_pairs(
     data_root: str | Path,
+    *,
+    image_dir_names: tuple[str, ...] = ("imgs", "im"),
+    mask_dir_names: tuple[str, ...] = ("masks", "gt"),
 ) -> tuple[list[str], list[str]]:
     """Find image-mask pairs for anime-segmentation dataset.
 
-    Expects structure:
+    Supports common directory conventions:
         {data_root}/
-        ├── imgs/   # Images
-        └── masks/  # Masks
+        ├── imgs/ (or im/)
+        └── masks/ (or gt/)
 
     Args:
-        data_root: Root directory containing imgs/ and masks/.
+        data_root: Root directory containing image/mask subdirectories.
+        image_dir_names: Candidate image directory names (checked in order).
+        mask_dir_names: Candidate mask directory names (checked in order).
 
     Returns:
         Tuple of (image_paths, mask_paths).
@@ -439,11 +444,24 @@ def _find_anime_segmentation_pairs(
         msg = f"Data root does not exist: {data_root}"
         raise FileNotFoundError(msg)
 
-    imgs_dir = data_root / "imgs"
-    masks_dir = data_root / "masks"
+    imgs_dir = None
+    masks_dir = None
+    for img_name in image_dir_names:
+        for mask_name in mask_dir_names:
+            candidate_imgs = data_root / img_name
+            candidate_masks = data_root / mask_name
+            if candidate_imgs.exists() and candidate_masks.exists():
+                imgs_dir = candidate_imgs
+                masks_dir = candidate_masks
+                break
+        if imgs_dir is not None:
+            break
 
-    if not imgs_dir.exists() or not masks_dir.exists():
-        msg = f"Expected 'imgs/' and 'masks/' directories in {data_root}"
+    if imgs_dir is None or masks_dir is None:
+        msg = (
+            f"Expected image/mask directories in {data_root}. "
+            f"Tried images={image_dir_names}, masks={mask_dir_names}."
+        )
         raise FileNotFoundError(msg)
 
     # Build mask lookup map for efficiency
@@ -474,8 +492,12 @@ def _find_anime_segmentation_pairs(
 class AnimeSegmentationDataModule(L.LightningDataModule):
     """LightningDataModule for anime-segmentation training.
 
-    Loads the local dataset layout (imgs/, masks/, fg/, bg/) and resolves
-    synthesis components via dependency injection for testability and reuse.
+    Loads dataset layouts in either of the following forms:
+      - {data_root}/imgs + {data_root}/masks (HF dataset default)
+      - {data_root}/train|val|test with im/gt or imgs/masks subfolders
+
+    Synthesis components (fg/, bg/) are resolved via dependency injection
+    for testability and reuse.
     """
 
     def __init__(
@@ -529,6 +551,13 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         self._mask_paths: list[str] | None = None
         self._train_indices: list[int] | None = None
         self._val_indices: list[int] | None = None
+        self._train_image_paths: list[str] | None = None
+        self._train_mask_paths: list[str] | None = None
+        self._val_image_paths: list[str] | None = None
+        self._val_mask_paths: list[str] | None = None
+        self._test_image_paths: list[str] | None = None
+        self._test_mask_paths: list[str] | None = None
+        self._explicit_splits: bool = False
 
         self.save_hyperparameters(
             ignore=[
@@ -545,12 +574,62 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
     def _load_and_split_paths(self) -> None:
         """Load image-mask pairs and split them deterministically."""
         logger.info("Loading dataset from: %s", self.data_root)
-        self._image_paths, self._mask_paths = _find_anime_segmentation_pairs(
-            self.data_root,
-        )
-        logger.info("Found %d image-mask pairs", len(self._image_paths))
+        data_root = Path(self.data_root)
 
+        train_dir = data_root / "train"
+        val_dir = data_root / "val"
+        test_dir = data_root / "test"
+        has_split_dirs = any(p.exists() for p in (train_dir, val_dir, test_dir))
+
+        if has_split_dirs:
+            if not train_dir.exists():
+                msg = f"Found split layout but missing train/ in {data_root}"
+                raise FileNotFoundError(msg)
+
+            train_images, train_masks = _find_anime_segmentation_pairs(train_dir)
+            val_images: list[str] = []
+            val_masks: list[str] = []
+            test_images: list[str] = []
+            test_masks: list[str] = []
+
+            if val_dir.exists():
+                val_images, val_masks = _find_anime_segmentation_pairs(val_dir)
+            if test_dir.exists():
+                test_images, test_masks = _find_anime_segmentation_pairs(test_dir)
+
+            if val_images:
+                self._explicit_splits = True
+                self._train_image_paths = train_images
+                self._train_mask_paths = train_masks
+                self._val_image_paths = val_images
+                self._val_mask_paths = val_masks
+                self._test_image_paths = test_images or None
+                self._test_mask_paths = test_masks or None
+                logger.info(
+                    "Using explicit splits: %d train, %d validation, %d test samples",
+                    len(train_images),
+                    len(val_images),
+                    len(test_images),
+                )
+                return
+
+            logger.warning(
+                "Detected train/ without val/ in %s. Falling back to val_ratio split.",
+                data_root,
+            )
+            self._image_paths = train_images
+            self._mask_paths = train_masks
+            self._test_image_paths = test_images or None
+            self._test_mask_paths = test_masks or None
+        else:
+            self._image_paths, self._mask_paths = _find_anime_segmentation_pairs(
+                self.data_root,
+            )
+
+        assert self._image_paths is not None
         n_samples = len(self._image_paths)
+        logger.info("Found %d image-mask pairs", n_samples)
+
         generator = torch.Generator().manual_seed(42)
         indices = torch.randperm(n_samples, generator=generator).tolist()
 
@@ -579,6 +658,17 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         normalize = not (is_train and self.augmentation.enabled)
         transform = PairedTransform(size=self.size, normalize=normalize)
 
+        return SegmentationDataset(image_paths, mask_paths, transform=transform)
+
+    def _create_dataset_from_paths(
+        self,
+        image_paths: list[str],
+        mask_paths: list[str],
+        *,
+        is_train: bool,
+    ) -> SegmentationDataset:
+        normalize = not (is_train and self.augmentation.enabled)
+        transform = PairedTransform(size=self.size, normalize=normalize)
         return SegmentationDataset(image_paths, mask_paths, transform=transform)
 
     def on_after_batch_transfer(
@@ -740,21 +830,34 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
         )
 
     def setup(self, stage: str | None = None) -> None:
-        if self._image_paths is None:
+        if (
+            self._image_paths is None
+            and self._train_image_paths is None
+            and self._val_image_paths is None
+        ):
             self._load_and_split_paths()
-
-        assert self._train_indices is not None
-        assert self._val_indices is not None
 
         if self.synthesis.enabled and self._compositor is None:
             self._setup_synthesis_components()
 
         match stage:
             case "fit" | None:
-                real_train_dataset = self._create_dataset(
-                    self._train_indices,
-                    is_train=True,
-                )
+                if self._explicit_splits:
+                    assert self._train_image_paths is not None
+                    assert self._train_mask_paths is not None
+                    assert self._val_image_paths is not None
+                    assert self._val_mask_paths is not None
+                    real_train_dataset = self._create_dataset_from_paths(
+                        self._train_image_paths,
+                        self._train_mask_paths,
+                        is_train=True,
+                    )
+                else:
+                    assert self._train_indices is not None
+                    real_train_dataset = self._create_dataset(
+                        self._train_indices,
+                        is_train=True,
+                    )
 
                 if self.synthesis.enabled and self._compositor is not None:
                     synth_dataset = SynthesisDataset(
@@ -781,20 +884,56 @@ class AnimeSegmentationDataModule(L.LightningDataModule):
                 else:
                     self.train_dataset = real_train_dataset
 
-                self.val_dataset = self._create_dataset(
-                    self._val_indices,
-                    is_train=False,
-                )
+                if self._explicit_splits:
+                    assert self._val_image_paths is not None
+                    assert self._val_mask_paths is not None
+                    self.val_dataset = self._create_dataset_from_paths(
+                        self._val_image_paths,
+                        self._val_mask_paths,
+                        is_train=False,
+                    )
+                else:
+                    assert self._val_indices is not None
+                    self.val_dataset = self._create_dataset(
+                        self._val_indices,
+                        is_train=False,
+                    )
             case "validate":
-                self.val_dataset = self._create_dataset(
-                    self._val_indices,
-                    is_train=False,
-                )
+                if self._explicit_splits:
+                    assert self._val_image_paths is not None
+                    assert self._val_mask_paths is not None
+                    self.val_dataset = self._create_dataset_from_paths(
+                        self._val_image_paths,
+                        self._val_mask_paths,
+                        is_train=False,
+                    )
+                else:
+                    assert self._val_indices is not None
+                    self.val_dataset = self._create_dataset(
+                        self._val_indices,
+                        is_train=False,
+                    )
             case "test" | "predict":
-                self.test_dataset = self._create_dataset(
-                    self._val_indices,
-                    is_train=False,
-                )
+                if self._test_image_paths and self._test_mask_paths:
+                    self.test_dataset = self._create_dataset_from_paths(
+                        self._test_image_paths,
+                        self._test_mask_paths,
+                        is_train=False,
+                    )
+                elif self._explicit_splits:
+                    assert self._val_image_paths is not None
+                    assert self._val_mask_paths is not None
+                    self.test_dataset = self._create_dataset_from_paths(
+                        self._val_image_paths,
+                        self._val_mask_paths,
+                        is_train=False,
+                    )
+                else:
+                    assert self._val_indices is not None
+                    self.test_dataset = self._create_dataset(
+                        self._val_indices,
+                        is_train=False,
+                    )
 
     def _create_dataloader(
         self,
