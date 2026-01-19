@@ -6,6 +6,17 @@
 
 High-precision background removal for anime characters using **BiRefNet** (Bilateral Reference Network). This project provides a complete training and inference pipeline built on PyTorch Lightning with modern tooling and Hugging Face Hub integration.
 
+## Research Objective
+
+This project defines the anime character segmentation task as:
+
+> **Generating high-precision binary masks (DIS domain) for the primary salient character (SOD domain) within input images, while preserving complex boundary structures.**
+
+- **SOD (Salient Object Detection)**: Detecting the primary salient character (main subject) in the input image
+- **DIS (Dichotomous Image Segmentation)**: Producing accurate binary masks that capture intricate boundary details (hair strands, clothing frills, accessories, etc.)
+
+**This project and its outputs are distributed as research materials for academic and experimental purposes.**
+
 ## Features
 
 - **BiRefNet Architecture**: State-of-the-art encoder-decoder with gradient-aware refinement (Out-Ref) and multi-scale supervision
@@ -170,13 +181,15 @@ trainer:
 
 The training pipeline includes BiRefNet-style metrics:
 
-| Metric    | Description                   |
-| --------- | ----------------------------- |
-| IoU       | Intersection over Union       |
-| MAE       | Mean Absolute Error           |
-| S-measure | Spatial/structural similarity |
-| E-measure | Enhanced alignment measure    |
-| F-measure | Weighted precision-recall     |
+| Metric           | Description                              |
+| ---------------- | ---------------------------------------- |
+| IoU              | Intersection over Union                  |
+| MAE              | Mean Absolute Error                      |
+| S-measure        | Spatial/structural similarity            |
+| E-measure        | Enhanced alignment measure               |
+| F-measure        | Weighted precision-recall                |
+| Boundary F-score | Boundary alignment quality               |
+| Negative FP rate | False positives on character-less images |
 
 ## Hugging Face Hub
 

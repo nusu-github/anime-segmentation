@@ -37,6 +37,18 @@ def _validate_target_size(target_size: tuple[int, int]) -> tuple[int, int]:
     return target_size
 
 
+def _validate_threshold(threshold: float) -> float:
+    """Validate that threshold is within [0, 1]."""
+    if not isinstance(threshold, (float, int)):
+        msg = f"threshold must be a float, got {type(threshold).__name__}"
+        raise InvalidInputError(msg)
+    threshold_f = float(threshold)
+    if not 0.0 <= threshold_f <= 1.0:
+        msg = f"threshold must be in [0, 1], got {threshold_f}"
+        raise InvalidInputError(msg)
+    return threshold_f
+
+
 class BiRefNetPredictor:
     def __init__(
         self,
@@ -92,12 +104,17 @@ class BiRefNetPredictor:
         self,
         image: Image.Image,
         target_size: tuple[int, int] = (1024, 1024),
+        *,
+        binarize: bool = True,
+        threshold: float = 0.5,
     ) -> Image.Image:
         """Predict segmentation mask for the given image.
 
         Args:
             image: PIL Image to segment.
             target_size: Target size (width, height) for model input.
+            binarize: Whether to return a binary mask.
+            threshold: Threshold for binarization (0-1).
 
         Returns:
             Grayscale PIL Image mask.
@@ -107,6 +124,7 @@ class BiRefNetPredictor:
             InvalidTargetSizeError: If target_size is not a valid (w, h) tuple.
         """
         input_tensor, original_size = self.preprocess(image, target_size)
+        threshold = _validate_threshold(threshold)
 
         with torch.inference_mode():
             preds = self.model(input_tensor)
@@ -125,5 +143,7 @@ class BiRefNetPredictor:
                 align_corners=True,
             )
             pred = pred.squeeze()  # [H, W]
+            if binarize:
+                pred = (pred >= threshold).float()
 
         return transforms.ToPILImage()(pred)

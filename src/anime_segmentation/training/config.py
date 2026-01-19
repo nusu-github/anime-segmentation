@@ -42,7 +42,7 @@ class CompositorConfig:
     """Copy-Paste compositor configuration."""
 
     k_probs: dict[int, float] = field(
-        default_factory=lambda: {0: 0.05, 1: 0.35, 2: 0.35, 3: 0.20, 4: 0.05},
+        default_factory=lambda: {0: 0.1, 1: 0.9},
     )
     min_area_ratio: float = 0.02
     max_area_ratio: float = 0.60

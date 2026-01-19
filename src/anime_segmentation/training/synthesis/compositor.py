@@ -42,11 +42,11 @@ __all__ = ["CompositorConfig", "CopyPasteCompositor"]
 
 
 class CopyPasteCompositor(BaseCompositor):
-    """Multi-character Copy-Paste compositor.
+    """Single-character Copy-Paste compositor for SOD+DIS.
 
-    Generates synthetic training images by compositing multiple foreground
-    characters onto background images with configurable placement and
-    blending strategies.
+    Generates synthetic training images by compositing one foreground
+    character onto a background image with configurable placement and
+    blending strategies. Supports K=0 for negative examples.
     """
 
     def __init__(

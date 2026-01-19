@@ -104,8 +104,16 @@ class BiRefNetLightning(
             nn.BCEWithLogitsLoss() if self.decoder_cfg.out_ref else None
         )
 
-        self.val_metrics = SegmentationMetrics(prefix="val/")
-        self.test_metrics = SegmentationMetrics(prefix="test/")
+        self.val_metrics = SegmentationMetrics(
+            prefix="val/",
+            include_boundary=True,
+            include_negative_fp=True,
+        )
+        self.test_metrics = SegmentationMetrics(
+            prefix="test/",
+            include_boundary=True,
+            include_negative_fp=True,
+        )
 
     # =========================================================================
     # Internal helpers

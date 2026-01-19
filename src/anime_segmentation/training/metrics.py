@@ -5,6 +5,7 @@ For comprehensive evaluation with curves, use the NumPy-based metrics in metrics
 """
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.func import vmap
 from torchmetrics import Metric, MetricCollection
@@ -217,129 +218,140 @@ class SMeasureMetric(Metric):
         """
         preds, target_bin = _normalize_tensors(preds, target)
 
-        # Process each sample
-        for pred, gt in zip(preds, target_bin, strict=True):
-            sm = self._compute_sm(pred, gt)
-            self.sm_sum += sm
-            self.count += 1
+        sm = self._compute_sm_batch(preds, target_bin)
+        self.sm_sum += sm.sum()
+        self.count += preds.shape[0]
 
-    def _compute_sm(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Compute S-measure for a single sample."""
-        y = gt.mean()
+    def _compute_sm_batch(self, pred: Tensor, gt: Tensor) -> Tensor:
+        """Compute S-measure for a batch."""
+        y = gt.mean(dim=(1, 2))
 
-        # Compute object and region similarity
-        so = self._object_similarity(pred, gt)
-        sr = self._region_similarity(pred, gt)
+        so = self._object_similarity_batch(pred, gt)
+        sr = self._region_similarity_batch(pred, gt)
         combined = self.alpha * so + (1 - self.alpha) * sr
 
-        # Replace conditionals with torch.where
+        pred_mean = pred.mean(dim=(1, 2))
         return torch.where(
             y == 0,
-            1 - pred.mean(),
-            torch.where(y == 1, pred.mean(), combined),
+            1 - pred_mean,
+            torch.where(y == 1, pred_mean, combined),
         )
 
-    def _object_similarity(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Compute object-aware structural similarity."""
+    def _object_similarity_batch(self, pred: Tensor, gt: Tensor) -> Tensor:
+        """Compute object-aware structural similarity for a batch."""
         fg = pred * gt
         bg = (1 - pred) * (1 - gt)
-        u = gt.mean()
+        u = gt.mean(dim=(1, 2))
 
-        fg_score = self._s_object(fg, gt)
-        bg_score = self._s_object(bg, 1 - gt)
+        fg_score = self._s_object_batch(fg, gt)
+        bg_score = self._s_object_batch(bg, 1 - gt)
 
         return u * fg_score + (1 - u) * bg_score
 
-    def _s_object(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Compute object similarity component."""
-        mask = gt.bool()
-        mask_sum = mask.sum()
+    def _s_object_batch(self, pred: Tensor, gt: Tensor) -> Tensor:
+        """Compute object similarity component for a batch."""
+        mask = gt > 0
+        mask_sum = mask.sum(dim=(1, 2))
+        mask_sum_f = mask_sum.to(dtype=pred.dtype)
 
-        # Safe indexing with fallback
-        masked_pred = pred[mask] if mask_sum > 0 else pred.new_zeros(1)
-        x = masked_pred.mean()
-        sigma_x = masked_pred.std() if mask_sum > 1 else pred.new_zeros(())
+        sum_pred = (pred * mask).sum(dim=(1, 2))
+        sum_pred2 = (pred * pred * mask).sum(dim=(1, 2))
 
-        score = 2 * x / (x.pow(2) + 1 + sigma_x + 1e-8)
+        mask_sum_safe = torch.where(mask_sum > 0, mask_sum_f, torch.ones_like(mask_sum_f))
+        mean = sum_pred / mask_sum_safe
+        mean = torch.where(mask_sum > 0, mean, torch.zeros_like(mean))
 
-        # Return 0 if no foreground
-        return torch.where(mask_sum > 0, score, pred.new_zeros(()))
+        denom = torch.where(mask_sum > 1, mask_sum_f - 1, torch.ones_like(mask_sum_f))
+        var = (sum_pred2 - (sum_pred * sum_pred) / mask_sum_safe) / (denom + 1e-8)
+        var = torch.where(mask_sum > 1, var, torch.zeros_like(var))
+        std = torch.sqrt(torch.clamp(var, min=0))
 
-    def _region_similarity(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Compute region-aware structural similarity."""
-        # Find centroid of foreground
-        h, w = gt.shape
-        fg_sum = gt.sum()
-        if fg_sum == 0:
-            cx, cy = w // 2, h // 2
-        else:
-            # Use 1D projections to avoid allocating full HxW coordinate grids.
-            y_coords = torch.arange(h, device=gt.device, dtype=gt.dtype)
-            x_coords = torch.arange(w, device=gt.device, dtype=gt.dtype)
-            cy = (gt.sum(dim=1) * y_coords).sum() / fg_sum
-            cx = (gt.sum(dim=0) * x_coords).sum() / fg_sum
-            cx, cy = int(cx.round()), int(cy.round())
+        score = 2 * mean / (mean.pow(2) + 1 + std + 1e-8)
+        return torch.where(mask_sum > 0, score, torch.zeros_like(score))
 
-        # Ensure valid indices
-        cx = max(1, min(cx, w - 1))
-        cy = max(1, min(cy, h - 1))
+    def _region_similarity_batch(self, pred: Tensor, gt: Tensor) -> Tensor:
+        """Compute region-aware structural similarity for a batch."""
+        batch_size, h, w = gt.shape
+        device = gt.device
+        dtype = gt.dtype
 
-        # Divide into 4 regions and compute SSIM for each
-        weights = []
-        scores = []
+        fg_sum = gt.sum(dim=(1, 2))
+        denom = torch.where(fg_sum > 0, fg_sum, torch.ones_like(fg_sum))
 
-        regions = [
-            (slice(0, cy), slice(0, cx)),  # Top-left
-            (slice(0, cy), slice(cx, w)),  # Top-right
-            (slice(cy, h), slice(0, cx)),  # Bottom-left
-            (slice(cy, h), slice(cx, w)),  # Bottom-right
-        ]
+        y_coords = torch.arange(h, device=device, dtype=dtype)
+        x_coords = torch.arange(w, device=device, dtype=dtype)
+        cy = (gt.sum(dim=2) * y_coords).sum(dim=1) / denom
+        cx = (gt.sum(dim=1) * x_coords).sum(dim=1) / denom
 
-        total_area = h * w
-        for region in regions:
-            pred_region = pred[region]
-            gt_region = gt[region]
-            area = pred_region.numel()
+        cy = torch.where(fg_sum > 0, cy, gt.new_full((batch_size,), h // 2))
+        cx = torch.where(fg_sum > 0, cx, gt.new_full((batch_size,), w // 2))
 
-            if area == 0:
-                continue
+        cy = cy.round().long()
+        cx = cx.round().long()
+        cy = torch.minimum(cy, torch.full_like(cy, h - 1))
+        cx = torch.minimum(cx, torch.full_like(cx, w - 1))
+        cy = torch.maximum(cy, torch.ones_like(cy))
+        cx = torch.maximum(cx, torch.ones_like(cx))
 
-            weight = area / total_area
-            score = self._ssim(pred_region, gt_region)
-            weights.append(weight)
-            scores.append(score)
+        zeros = torch.zeros_like(cy)
+        y0 = torch.stack([zeros, zeros, cy, cy], dim=1)
+        y1 = torch.stack([cy, cy, torch.full_like(cy, h), torch.full_like(cy, h)], dim=1)
+        x0 = torch.stack([zeros, cx, zeros, cx], dim=1)
+        x1 = torch.stack([cx, torch.full_like(cx, w), cx, torch.full_like(cx, w)], dim=1)
 
-        if not scores:
-            return torch.tensor(0.0, device=pred.device)
+        area = (y1 - y0) * (x1 - x0)
+        area_f = area.to(dtype=pred.dtype)
+        total_area = pred.new_tensor(h * w)
 
-        weights = torch.tensor(weights, device=pred.device)
-        scores = torch.stack(scores)
-        return (weights * scores).sum()
+        pred_i = self._integral_image(pred)
+        gt_i = self._integral_image(gt)
+        pred2_i = self._integral_image(pred * pred)
+        gt2_i = self._integral_image(gt * gt)
+        pred_gt_i = self._integral_image(pred * gt)
 
-    def _ssim(self, pred: Tensor, gt: Tensor) -> Tensor:
-        """Compute SSIM between two regions."""
-        x = pred.mean()
-        y = gt.mean()
-        n = pred.numel()
+        batch_idx = torch.arange(batch_size, device=device)[:, None]
 
-        # Handle edge case: n <= 1
-        if n <= 1:
-            return pred.new_ones(())
+        def rect_sum(integral: Tensor) -> Tensor:
+            return (
+                integral[batch_idx, y1, x1]
+                - integral[batch_idx, y0, x1]
+                - integral[batch_idx, y1, x0]
+                + integral[batch_idx, y0, x0]
+            )
 
-        sigma_x = ((pred - x).pow(2)).sum() / (n - 1)
-        sigma_y = ((gt - y).pow(2)).sum() / (n - 1)
-        sigma_xy = ((pred - x) * (gt - y)).sum() / (n - 1)
+        sum_pred = rect_sum(pred_i)
+        sum_gt = rect_sum(gt_i)
+        sum_pred2 = rect_sum(pred2_i)
+        sum_gt2 = rect_sum(gt2_i)
+        sum_pred_gt = rect_sum(pred_gt_i)
 
-        alpha = 4 * x * y * sigma_xy
-        beta = (x.pow(2) + y.pow(2)) * (sigma_x + sigma_y)
+        area_safe = torch.where(area_f > 0, area_f, torch.ones_like(area_f))
+        mean_pred = sum_pred / area_safe
+        mean_gt = sum_gt / area_safe
 
-        # Replace conditionals with torch.where
-        normal_result = alpha / (beta + 1e-8)
-        return torch.where(
+        denom_var = torch.where(area_f > 1, area_f - 1, torch.ones_like(area_f))
+        var_pred = (sum_pred2 - area_f * mean_pred.pow(2)) / (denom_var + 1e-8)
+        var_gt = (sum_gt2 - area_f * mean_gt.pow(2)) / (denom_var + 1e-8)
+        cov = (sum_pred_gt - area_f * mean_pred * mean_gt) / (denom_var + 1e-8)
+
+        alpha = 4 * mean_pred * mean_gt * cov
+        beta = (mean_pred.pow(2) + mean_gt.pow(2)) * (var_pred + var_gt)
+        ssim = torch.where(
             alpha != 0,
-            normal_result,
-            torch.where(beta == 0, pred.new_ones(()), pred.new_zeros(())),
+            alpha / (beta + 1e-8),
+            torch.where(beta == 0, torch.ones_like(beta), torch.zeros_like(beta)),
         )
+
+        ssim = torch.where(area_f > 1, ssim, torch.ones_like(ssim))
+        ssim = torch.where(area_f > 0, ssim, torch.zeros_like(ssim))
+
+        weights = area_f / total_area
+        return (weights * ssim).sum(dim=1)
+
+    @staticmethod
+    def _integral_image(x: Tensor) -> Tensor:
+        """Compute integral image with top-left zero padding."""
+        return F.pad(torch.cumsum(torch.cumsum(x, dim=1), dim=2), (1, 0, 1, 0))
 
     def compute(self) -> Tensor:
         """Compute mean S-measure."""
@@ -354,7 +366,8 @@ class EMeasureMetric(Metric):
     how well the prediction's global mean and local values match the target.
     Uses an enhanced alignment matrix that penalizes both false positives and negatives.
 
-    Reference: Fan et al., "Enhanced-alignment Measure for Binary Foreground Map Evaluation" (IJCAI 2018)
+    Reference: Fan et al., "Enhanced-alignment Measure for Binary Foreground Map Evaluation"
+    (IJCAI 2018)
     """
 
     is_differentiable: bool = False
@@ -623,12 +636,18 @@ class SegmentationMetrics(MetricCollection):
 
     """
 
-    def __init__(self, prefix: str = "", include_boundary: bool = False) -> None:
+    def __init__(
+        self,
+        prefix: str = "",
+        include_boundary: bool = True,
+        include_negative_fp: bool = True,
+    ) -> None:
         """Initialize metric collection.
 
         Args:
             prefix: Prefix for metric names (e.g., "val_" or "test_").
             include_boundary: Whether to include boundary F-score metric.
+            include_negative_fp: Whether to include negative FP rate metric.
 
         """
         metrics_dict = {
@@ -641,5 +660,7 @@ class SegmentationMetrics(MetricCollection):
 
         if include_boundary:
             metrics_dict["boundary_f"] = BoundaryFScoreMetric()
+        if include_negative_fp:
+            metrics_dict["neg_fp_rate"] = NegativeFPRateMetric()
 
         super().__init__(metrics_dict, prefix=prefix)

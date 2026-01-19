@@ -15,6 +15,7 @@ class BiRefNetInference(nn.Module):
 
     Always returns the final prediction tensor with sigmoid applied,
     regardless of the underlying model configuration (out_ref, ms_supervision, etc.).
+    Optionally binarizes the output using a fixed threshold.
 
     This wrapper:
     - Ensures the model is in eval mode
@@ -28,7 +29,13 @@ class BiRefNetInference(nn.Module):
         >>> mask = inference(input_tensor)  # Always returns [B, 1, H, W] tensor
     """
 
-    def __init__(self, model: BiRefNet) -> None:
+    def __init__(
+        self,
+        model: BiRefNet,
+        *,
+        binarize: bool = True,
+        threshold: float = 0.5,
+    ) -> None:
         """Initialize inference wrapper.
 
         Args:
@@ -36,6 +43,11 @@ class BiRefNetInference(nn.Module):
         """
         super().__init__()
         self.model = model
+        self.binarize = binarize
+        if not 0.0 <= threshold <= 1.0:
+            msg = f"threshold must be in [0, 1], got {threshold}"
+            raise ValueError(msg)
+        self.threshold = float(threshold)
         self.model.eval()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -69,13 +81,18 @@ class BiRefNetInference(nn.Module):
                 # Single tensor output
                 final_pred = outputs
 
-            return final_pred.sigmoid()
+            pred = final_pred.sigmoid()
+            if self.binarize:
+                pred = (pred >= self.threshold).float()
+            return pred
 
     @classmethod
     def from_pretrained(
         cls,
         model_name: str,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        binarize: bool = True,
+        threshold: float = 0.5,
         **kwargs,
     ) -> "BiRefNetInference":
         """Load model from pretrained weights and wrap for inference.
@@ -90,6 +107,6 @@ class BiRefNetInference(nn.Module):
         """
         model = BiRefNet.from_pretrained(model_name, **kwargs)
         model.to(device)
-        wrapper = cls(model)
+        wrapper = cls(model, binarize=binarize, threshold=threshold)
         wrapper.to(device)
         return wrapper

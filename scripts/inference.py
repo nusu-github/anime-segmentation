@@ -43,6 +43,9 @@ class AnimeSegmentationPredictor:
         self,
         image: Image.Image,
         target_size: tuple[int, int] = (1024, 1024),
+        *,
+        binarize: bool = True,
+        threshold: float = 0.5,
     ) -> Image.Image:
         """Returns a grayscale PIL Image mask for the given image."""
         w, h = image.size
@@ -65,6 +68,8 @@ class AnimeSegmentationPredictor:
                 align_corners=True,
             )
             pred = pred.squeeze()
+            if binarize:
+                pred = (pred >= threshold).float()
 
         return transforms.ToPILImage()(pred)
 
@@ -87,6 +92,17 @@ def main() -> None:
     parser.add_argument("--size", type=int, default=1024, help="Inference size")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="Binarization threshold (default: 0.5)",
+    )
+    parser.add_argument(
+        "--prob-map",
+        action="store_true",
+        help="Output probability map instead of binary mask",
+    )
+    parser.add_argument(
         "--mask-only",
         action="store_true",
         help="Output mask only (default: output RGBA image)",
@@ -98,7 +114,12 @@ def main() -> None:
     if args.input:
         # Single image
         image = Image.open(args.input)
-        mask = predictor.predict(image, target_size=(args.size, args.size))
+        mask = predictor.predict(
+            image,
+            target_size=(args.size, args.size),
+            binarize=not args.prob_map,
+            threshold=args.threshold,
+        )
 
         if args.mask_only:
             output_path = args.output or Path(args.input).stem + "_mask.png"
@@ -120,7 +141,12 @@ def main() -> None:
 
         for img_path in images:
             image = Image.open(img_path)
-            mask = predictor.predict(image, target_size=(args.size, args.size))
+            mask = predictor.predict(
+                image,
+                target_size=(args.size, args.size),
+                binarize=not args.prob_map,
+                threshold=args.threshold,
+            )
 
             if args.mask_only:
                 output_path = output_dir / f"{img_path.stem}_mask.png"

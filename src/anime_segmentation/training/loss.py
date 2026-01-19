@@ -81,7 +81,8 @@ class ContourLoss(nn.Module):
 
         Args:
             pred: Predicted tensor of shape (B, C, H, W), probability (0..1).
-            target: Target tensor of shape (B, C, H, W), where region_in_contour == 1, region_out == 0.
+            target: Target tensor of shape (B, C, H, W), where region_in_contour == 1,
+                region_out == 0.
 
         Returns:
             Contour loss value.
@@ -309,7 +310,7 @@ class PixLoss(nn.Module):
 
         # Stack for efficient computation: [num_scales, B, C, H, W]
         stacked_logits = torch.stack(resized_logits)
-        stacked_probs = stacked_logits.sigmoid()
+        stacked_probs = stacked_logits.sigmoid() if self.loss_prob else None
 
         # Pre-initialize log accumulators for efficiency
         log_accum: dict[str, torch.Tensor] = {
@@ -319,24 +320,26 @@ class PixLoss(nn.Module):
 
         total = gt.new_zeros(())
 
-        # Compute losses for all scales at once where possible
-        for i in range(n):
-            probs = stacked_probs[i]
-            logits = stacked_logits[i]
+        # Flatten scales into batch dimension for batched loss computation
+        batch_size = stacked_logits.shape[1]
+        logits_flat = stacked_logits.reshape(n * batch_size, *stacked_logits.shape[2:])
+        gt_flat = gt.unsqueeze(0).expand(n, -1, -1, -1, -1).reshape(n * batch_size, *gt.shape[1:])
 
-            # Probability-based losses
+        # Probability-based losses
+        if stacked_probs is not None:
+            probs_flat = stacked_probs.reshape(n * batch_size, *stacked_probs.shape[2:])
             for name, crit in self.loss_prob.items():
                 w = self.lambdas[name] * pix_loss_lambda
-                loss_val = crit(probs, gt) * w
-                total += loss_val
-                log_accum[name] += loss_val.detach() / n
+                loss_val = crit(probs_flat, gt_flat)
+                total += loss_val * w * n
+                log_accum[name] += loss_val.detach() * w
 
-            # Logit-based losses
-            for name, crit in self.loss_logit.items():
-                w = self.lambdas[name] * pix_loss_lambda
-                loss_val = crit(logits, gt) * w
-                total += loss_val
-                log_accum[name] += loss_val.detach() / n
+        # Logit-based losses
+        for name, crit in self.loss_logit.items():
+            w = self.lambdas[name] * pix_loss_lambda
+            loss_val = crit(logits_flat, gt_flat)
+            total += loss_val * w * n
+            log_accum[name] += loss_val.detach() * w
 
         loss_dict = {k: v.item() for k, v in log_accum.items() if k in self.lambdas}
         return total, loss_dict
